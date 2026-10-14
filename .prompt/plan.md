@@ -1539,6 +1539,56 @@ avec ce document) sont ajoutés ici, sous « Constats du Mx ».
 | M4 | `managed` : objets possédés (sans adoption implicite, `OwnedObjectConflict`), deux hashs, `Recreate`/`RollingUpdate`, token opérateur, credentials, worker, TokenReview ; action `restart` | e2e kind complet vert, test d'upgrade depuis l'alpha compris |
 | M5 | `weebo-batlehub-importer` (release Helm → `BatleHubLocalInstance`, grants/policies → CR en pause) ; budget mesuré ; release 0.1.0 | release publiée de bout en bout |
 
+### Constats du M0 (2026-10-14)
+
+Repo `github.com/batleforc/weebo-batlehub` (public), commit `394cd62`,
+CI, docs (GitHub Pages) et e2e kind verts au premier passage. Pas de
+`test:live-batlehub` au M0 : la tâche et le conteneur batlehub arrivent
+avec le M1.
+
+- **Gabarit du kit v0.14.2** : il génère aussi un kind `BatleHubObject`
+  (exemple), la commande `migrate-instance-ref` et la licence **MIT**
+  (Cargo, labels d'image) alors que les opérateurs weebo sont Apache-2.0 :
+  les trois sont retirés ici, la licence est à corriger dans le gabarit.
+  `sharedWith` du `BatleHubLocalInstance` généré est retiré (2.8).
+- **Forme de `BatleHubLocalInstance` au M0** : celle du gabarit (`url`,
+  `tokenSecretRef`). Le M1 la remplace par `external`/`managed` (4.1) ;
+  rien n'étant publié, ce n'est pas une rupture.
+- **Fait en avance sur le M1** : le contrôle du rôle par
+  `GET /api/v1/me` (`OperatorUnauthorized` sur un rôle autre qu'admin) et
+  le label `instance-token` (`TokenSecretNotAllowed`), tous deux couverts
+  par l'envtest `local_instance_controller`. Le finalizer et
+  `InstanceInUse` restent au M1 (aucun kind ne se lie encore à une
+  instance).
+- **OpenAPI de batlehub** : committée dans batlehub (`ui/openapi.json`,
+  versionnée avec chaque tag) : `task gen:spec` la télécharge par URL
+  brute, sans construire batlehub. 316 chemins ; le patch
+  `10-admin-api-only.jq` garde l'API admin et `/api/v1/me` (88 chemins,
+  170 schémas atteignables). `/livez` n'est **pas** dans la spec (handler
+  actix hors utoipa) : appelé directement.
+- **openapi-generator 7.25** (OpenAPI 3.1 en bêta) : un `oneOf` de
+  variantes enum à une valeur (`FlagKind` : `cve`, `malware`… ou
+  `{other}`) produit un enum Rust qui ne compile pas : patch
+  `20-merge-string-enum-variants.jq`.
+- **D6 et le chart** : refuser `watch.clusterKinds: false` dans
+  `_params.tpl` casse `task lint:helm` (le kit fait un rendu de fumée de
+  ce mode). Au M0 il n'y a aucune règle propre (`clusterRules`), le mode
+  fonctionne : le refus est reporté au M4, sauf si le kit gagne d'ici là
+  `params.watchRules` (§11.2) ou un moyen d'exclure un rendu de fumée.
+- **Page « Reason codes » générée** : le générateur du kit lit
+  `error.rs` comme du texte : accolades équilibrées dans les doc comments
+  (`${` seul le casse) et bras de `severity` qualifiés (`ReasonCode::X`,
+  pas de `use ReasonCode::*`). Les codes « Events seulement »
+  (`ConfigReloaded`…) y apparaissent comme advisories tant qu'aucun
+  `announce_change` ne les émet (M2+).
+- **e2e au M0** : un smoke sans batlehub (`TokenSecretNotAllowed`,
+  `InstanceUnreachable`) et la bascule de leader ; le test d'upgrade est
+  sauté tant qu'aucun chart n'est publié (première fois à l'alpha du M2 :
+  le valider à la main sur une branche avant, 9.3).
+- **Pousser des workflows** : `gh repo create --push` pousse avec le jeton
+  de `gh`, sans le scope `workflow` : refusé. Le `git push` normal
+  (credential `store`) passe.
+
 ## 11. Évolutions proposées
 
 ### 11.1 Côté batlehub (nous le maintenons aussi)
