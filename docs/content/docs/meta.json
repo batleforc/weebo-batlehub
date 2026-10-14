@@ -1,0 +1,12 @@
+{
+  "title": "weebo-batlehub",
+  "pages": [
+    "index",
+    "---Getting started---",
+    "guides/install",
+    "guides/connect-instance",
+    "---Reference---",
+    "...crds",
+    "reference"
+  ]
+}

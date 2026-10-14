@@ -1,0 +1,52 @@
+# ── Build stage ───────────────────────────────────────────────────────────────
+# Red Hat Hummingbird images (builder and runtime): the main image. Its
+# `-static` sibling is Containerfile.static.
+# The workspace is rustls end to end (kube's rustls-tls, reqwest's `rustls`
+# feature) — no OpenSSL needed at build or run time.
+FROM registry.access.redhat.com/hi/rust:latest-builder@sha256:6ecd7053f3415021e6241c672570ba156073b77210e9fb30c581d07311e78b5a AS builder
+
+# The builder image defaults to a non-root user without write access to
+# /build; root is confined to this throwaway stage.
+# hadolint ignore=DL3002
+USER 0
+
+WORKDIR /build
+
+# Cache dependency compilation separately from source changes: manifests
+# first, every crate stubbed, deps built, then the real sources.
+COPY Cargo.toml Cargo.lock ./
+COPY crates/ crates/
+RUN find crates -name '*.rs' -delete && \
+    for crate in crates/*/; do \
+      mkdir -p "$crate/src" && echo "pub fn _stub() {}" > "$crate/src/lib.rs"; \
+    done && \
+    for bin in operator crdgen; do echo "fn main() {}" > "crates/$bin/src/main.rs"; done
+
+# --locked: build exactly what Cargo.lock resolves. Failure is tolerated
+# here only because stubs may not satisfy every crate; the real build below
+# is the one that gates.
+RUN cargo build --locked --release -p operator 2>/dev/null; exit 0
+
+COPY crates/ crates/
+RUN find crates -name '*.rs' -exec touch {} + && \
+    cargo build --locked --release -p operator
+
+# ── Runtime image ─────────────────────────────────────────────────────────────
+# Red Hat Hummingbird core runtime: minimal, continuously rebuilt for CVEs.
+# Grype reads its RPM database (Trivy doesn't know the OS); its accepted
+# findings are .grype.yaml's.
+FROM registry.access.redhat.com/hi/core-runtime:latest@sha256:1abbb3f306dd1df28c46415def816056247cf850b861655097d46af971746f9b AS runtime
+
+COPY --from=builder /build/target/release/weebo-batlehub-operator /usr/local/bin/operator
+
+# Numeric so Kubernetes can enforce `runAsNonRoot` without resolving names;
+# the Helm chart pins the same UID, valid for the `-static` image too.
+USER 65532:65532
+
+LABEL org.opencontainers.image.title="weebo-batlehub-operator" \
+      org.opencontainers.image.description="Kubernetes operator driving BatleHub instances as CRDs" \
+      org.opencontainers.image.source="https://github.com/batleforc/weebo-batlehub" \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.vendor="batleforc"
+
+ENTRYPOINT ["/usr/local/bin/operator"]

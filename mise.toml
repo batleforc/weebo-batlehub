@@ -1,0 +1,31 @@
+[tools]
+cocogitto = "latest"
+rust = { version = "latest", components = ["rust-src", "rustfmt", "llvm-tools", "clippy"], profile = "default" }
+task = "latest"
+gitleaks = "latest"
+jq = "latest"
+# The docs site (docs/, @weebo/operator-docs)
+node = "24"
+# BatleHub client generation (spec/scripts/gen-client.sh): aqua ships
+# openapi-generator as a bare jar, run through this JDK.
+java = "temurin-25"
+"aqua:OpenAPITools/openapi-generator" = "7.25.0"
+# `task audit`
+"aqua:EmbarkStudios/cargo-deny" = "latest"
+trivy = "latest"
+# `task coverage` (needs rust's llvm-tools component, already listed)
+"aqua:taiki-e/cargo-llvm-cov" = "latest"
+# envtest (crates/testkit): Go for its build-time bindings, and the real
+# control-plane binaries it starts
+go = "latest"
+etcd = "3.5.32"
+"aqua:kubernetes/kubernetes/kube-apiserver" = "1.36.2"
+# CI / container / chart linting
+actionlint = "latest"
+# actionlint shells out to shellcheck for every `run:` script
+shellcheck = "latest"
+hadolint = "latest"
+helm = "latest"
+# The kind e2e (deploy/e2e)
+kubectl = "latest"
+kind = "latest"

@@ -1,0 +1,87 @@
+---
+title: Reason codes
+description: Every code the operator puts on a condition, an Event or an admission denial.
+---
+
+Every condition, Event and admission denial the operator writes carries one
+of these codes, never free text: alerts, scripts and `kubectl` filters can
+rely on them. The list is generated from the operator's source, so it
+matches the installed version.
+
+- **Blocking**: `Ready` turns `False` with this reason, and every failed
+  reconcile records a `Warning` Event with it ([Events](/docs/reference/events)).
+  An admission webhook denial carries one too (HTTP 403, the code as its
+  reason).
+- **Advisory**: the CR still works. `Reconciled` is the reason of `Ready: True`; the
+  others are a condition of their own (its `type` is the code, its
+  `status` `"True"`) or a lifecycle Event.
+
+Every CR's `Ready` reason also labels the reconcile counter
+([Metrics & health](/docs/reference/metrics)), so a code can be graphed and
+alerted on. To find where one shows up right now:
+
+```bash
+kubectl get events -A --field-selector reason=InvalidSpec
+```
+
+| Code | Severity | Shows as | Meaning |
+| --- | --- | --- | --- |
+| `Reconciled` | advisory | `Ready: True` | `Ready: True` — the one success reason every reconciler uses. |
+| `InvalidSpec` | blocking | `Ready: False`, Event (`Warning`) | The spec is inconsistent in a way only a change of the CR fixes (a rule the CRD's validation can't express, a gate both set and exempted, `configApplyPending` outside an external instance without `manageConfig`…). |
+| `InstanceNotFound` | blocking | `Ready: False`, Event (`Warning`) | `spec.instanceRef` names no `BatleHubLocalInstance` the operator sees, or, unset, the namespace has none to default to. |
+| `InstanceAmbiguous` | blocking | `Ready: False`, Event (`Warning`) | `spec.instanceRef` is unset and the namespace has several `BatleHubLocalInstance`s: set `spec.instanceRef`. |
+| `InstanceNotAllowed` | blocking | `Ready: False`, Event (`Warning`) | The instance named is out of reach: in another namespace that doesn't consent to it, or outside the namespace the operator is limited to. |
+| `InstanceBindingChanged` | blocking | `Ready: False`, Event (`Warning`) | `spec.instanceRef` now designates another instance than the one recorded in `status.instance`: not followed until `spec.instanceRef` names the instance to use explicitly. |
+| `InstanceNotReady` | blocking | `Ready: False`, Event (`Warning`) | The instance exists but is not (yet) `Ready`; the message carries the instance's own reason. |
+| `InstanceInUse` | blocking | `Ready: False`, Event (`Warning`) | The instance is being deleted while CRs are still bound to it (named in the message): delete them first, or annotate the instance `batlehub.weebo.io/force-orphan: "true"` to leave them orphaned. |
+| `TokenSecretMissing` | blocking | `Ready: False`, Event (`Warning`) | The token Secret of the instance (admin token of an external instance, operator token supplied to a managed one), or its key, is missing or not UTF-8. |
+| `TokenSecretNotAllowed` | blocking | `Ready: False`, Event (`Warning`) | The token Secret lacks the label `batlehub.weebo.io/instance-token: "true"`: the operator only reads a token from a Secret that opts in (it would send it to the instance's URL). |
+| `SecretNotAllowed` | blocking | `Ready: False`, Event (`Warning`) | A Secret of `configLayers`, `credentials` or `configFrom` lacks the label `batlehub.weebo.io/credential: "true"`: its content would be sent to BatleHub, so it must opt in (the message gives the `kubectl label` command). |
+| `InstanceUnreachable` | blocking | `Ready: False`, Event (`Warning`) | BatleHub did not answer: network error, timeout, 502/504, or `/livez` silent. |
+| `OperatorUnauthorized` | blocking | `Ready: False`, Event (`Warning`) | BatleHub refused the operator's token (401/403), or `GET /api/v1/me` returned a role other than `admin` (the message says which). |
+| `OperatorTokenShadowed` | blocking | `Ready: False`, Event (`Warning`) | The configuration no longer declares the operator's token (the credentials layer of a managed instance, `spec.config` of an external one): applying it would lock the operator out. |
+| `RemoteError` | blocking | `Ready: False`, Event (`Warning`) | BatleHub answered with an error the operator doesn't expect (a 500, an unknown answer); the message keeps the status and the start of the body. |
+| `RemoteRejected` | blocking | `Ready: False`, Event (`Warning`) | BatleHub rejected a governance write (400), a version that doesn't exist included. |
+| `RemoteNotFound` | blocking | `Ready: False`, Event (`Warning`) | What the CR references doesn't exist in BatleHub (a registry the instance doesn't serve). |
+| `ConfigInvalid` | blocking | `Ready: False`, Event (`Warning`) | BatleHub's own parser refuses the rendered configuration (`reload.validation: Strict`), or a layer is not TOML. |
+| `ConfigLayerMissing` | blocking | `Ready: False`, Event (`Warning`) | A ConfigMap or Secret of `configLayers`, `credentials` or `configFrom` is missing. |
+| `ConfigRejected` | blocking | `Ready: False`, Event (`Warning`) | The instance refused the configuration (dry run or load); it is re-staged at most every 10 minutes. |
+| `ConfigPropagating` | blocking | `Ready: False`, Event (`Warning`) | The new configuration is not yet seen by every pod, or a reload is in progress; the message names the pods behind. |
+| `NoReadyPod` | blocking | `Ready: False`, Event (`Warning`) | No proxy pod is ready to approve a reload. |
+| `WorkloadNotReady` | blocking | `Ready: False`, Event (`Warning`) | The desired replicas are not available or up to date (managed). |
+| `HotReloadDisabled` | blocking | `Ready: False`, Event (`Warning`) | The configuration endpoints answer 503 (hot reload disabled), or a pod reports hot reload disabled while the spec says otherwise. |
+| `ConfigReadOnly` | blocking | `Ready: False`, Event (`Warning`) | External instance: the first configuration layer is not writable. |
+| `RestartForbidden` | blocking | `Ready: False`, Event (`Warning`) | External instance with `manageConfig`: a key that needs a restart changed; the push is held back (the operator can't restart an instance it doesn't deploy). |
+| `InstanceConfigUnmanaged` | blocking | `Ready: False`, Event (`Warning`) | A `BatleHubRegistry` on an external instance without `manageConfig`: the operator renders no configuration there. |
+| `OwnedObjectConflict` | blocking | `Ready: False`, Event (`Warning`) | Managed instance: an object the operator must create already exists and isn't the operator's — never adopted implicitly. |
+| `GrantStorageUnavailable` | blocking | `Ready: False`, Event (`Warning`) | BatleHub has no grant storage configured (503). |
+| `GrantConflict` | blocking | `Ready: False`, Event (`Warning`) | A grant in place on that node was not written by this CR, or another CR targets the same coordinate and subject. |
+| `PolicyConflict` | blocking | `Ready: False`, Event (`Warning`) | A policy in place on that node was not written by this CR, or another CR targets the same coordinate. |
+| `GrantHeldByOwnership` | blocking | `Ready: False`, Event (`Warning`) | 409: the subject already holds these actions through package ownership. |
+| `ExemptionNotPermitted` | blocking | `Ready: False`, Event (`Warning`) | 403 on an exemption: `gates:exempt` is granted to no role, the operator's identity needs a grant on the version or its package (the message gives it). |
+| `DuplicateRegistryName` | blocking | `Ready: False`, Event (`Warning`) | Another `BatleHubRegistry` rendered first on the same instance has the same `name`, or a registry of another namespace would complete an entry of the instance's own configuration. |
+| `NamespaceNotAllowed` | blocking | `Ready: False`, Event (`Warning`) | A registry of another namespace contains a `${VAR}` placeholder: placeholders resolve from the instance's environment, so they are refused outside its namespace. |
+| `InstanceRejected` | blocking | `Ready: False`, Event (`Warning`) | The instance refused the configuration containing this registry. |
+| `MaintenanceFailed` | blocking | `Ready: False`, Event (`Warning`) | The maintenance action failed; `status.lastRun` has the details. |
+| `MaintenanceTimeout` | blocking | `Ready: False`, Event (`Warning`) | The maintenance action exceeded `timeoutSeconds`. |
+| `MaintenanceInterrupted` | blocking | `Ready: False`, Event (`Warning`) | The operator stopped while the run was in progress: closed as failed rather than replayed (at most once). |
+| `LeavesWatchScope` | blocking | `Ready: False`, Event (`Warning`) | An update would take a CR still carrying the finalizer out of the operator's label selector (`watch.labelSelector`): refused at admission. |
+| `KubernetesApiError` | blocking | `Ready: False`, Event (`Warning`) | A Kubernetes API call of the operator itself failed (reading a CR or a Secret, patching a status, the finalizer) — retried. |
+| `RestartRequired` | advisory | condition `RestartRequired: True`, Event (`Normal`) | A key that needs a restart changed and the operator won't roll the pods (`reload.restart: Never`, or an external instance): the keys are in the message. |
+| `ConfigHeld` | advisory | condition `ConfigHeld: True`, Event (`Normal`) | `reload.strategy: Manual`: a validated configuration waits for the approval of its hash (in the message). |
+| `ConfigWarnings` | advisory | condition `ConfigWarnings: True`, Event (`Normal`) | `GET /admin/config/warnings` is not empty (`status.warnings`). |
+| `UnresolvedPlaceholders` | advisory | condition `UnresolvedPlaceholders: True`, Event (`Normal`) | `${VAR}` placeholders the operator couldn't resolve for validation (names in the message). |
+| `ConfigInvalidLenient` | advisory | condition `ConfigInvalidLenient: True`, Event (`Normal`) | The parser refused the configuration but `reload.validation: Lenient` applied it anyway. |
+| `RegistrySelectorIgnored` | advisory | condition `RegistrySelectorIgnored: True`, Event (`Normal`) | `registrySelector.namespaces.from` other than `Same` on an operator limited to one namespace: registries of other namespaces are not seen. |
+| `TokenReviewUnavailable` | advisory | condition `TokenReviewUnavailable: True`, Event (`Normal`) | `autoTokenReview` asked on an operator limited to one namespace: no ClusterRoleBinding is created, bind TokenReview yourself. |
+| `RegistrySuspended` | advisory | condition `RegistrySuspended: True`, Event (`Normal`) | The registry is suspended (`spec.suspend`): kept, not rendered. |
+| `MaintenanceRunning` | advisory | condition `MaintenanceRunning: True`, Event (`Normal`) | A maintenance run is in progress. |
+| `MaintenanceSuspended` | advisory | condition `MaintenanceSuspended: True`, Event (`Normal`) | The maintenance schedule is suspended. |
+| `SuspiciousGrant` | advisory | condition `SuspiciousGrant: True`, Event (`Normal`) | A grant is legal but probably unintended (`status.warnings`). |
+| `ExemptionExpired` | advisory | condition `ExemptionExpired: True`, Event (`Normal`) | Exemptions past their `exemptUntil` (listed in the message): reported, not rewritten. |
+| `ConfigReloaded` | advisory | Event (`Normal`) | The instance reloaded a new configuration (Event only). |
+| `ConfigRolledOut` | advisory | Event (`Normal`) | A new configuration was rolled out by restarting the pods (Event only). |
+| `RestartInterrupts` | advisory | Event (`Normal`) | A rollout interrupts the instance (single replica, `Recreate`) (Warning Event only). |
+| `MaintenanceStarted` | advisory | Event (`Normal`) | A maintenance run started (Event only). |
+| `Revoked` | advisory | Event (`Normal`) | The finalizer revoked what the CR wrote in BatleHub (Event only). |
+| `Released` | advisory | Event (`Normal`) | The finalizer finished — cleanup done, or the CR force-orphaned (Event only). |

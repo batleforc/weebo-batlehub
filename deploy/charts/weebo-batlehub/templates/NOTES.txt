@@ -1,0 +1,28 @@
+{{ include "weebo-operator.notes" . }}
+
+1. Connect a BatleHub instance with an admin API token. The operator only
+   reads a token from a Secret labelled for it:
+
+     kubectl -n <namespace> create secret generic batlehub-admin --from-literal=token=<token>
+     kubectl -n <namespace> label secret batlehub-admin batlehub.weebo.io/instance-token=true
+
+     kubectl apply -n <namespace> -f - <<YAML
+     apiVersion: batlehub.weebo.io/v1alpha1
+     kind: BatleHubLocalInstance
+     metadata:
+       name: main
+     spec:
+       url: https://batlehub.example.com
+       tokenSecretRef:
+         name: batlehub-admin
+         key: token
+     YAML
+
+   `kubectl get bhli` shows whether it answers (Ready, Reason).
+
+2. Creating a BatleHubLocalInstance sends a Secret of its namespace to the
+   URL it names: grant the kind like you grant pods.
+
+Argo CD: paste the health check of the
+{{ include "weebo-operator.fullname" . }}-argocd-health ConfigMap into argocd-cm under
+`resource.customizations.health.batlehub.weebo.io_*`.

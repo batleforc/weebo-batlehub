@@ -1,0 +1,44 @@
+---
+title: BatleHubLocalInstance
+description: >-
+  One BatleHub instance, owned by a namespace: its token is that namespace's,
+  and only the objects of that namespace use it.
+full: true
+---
+
+- **API version:** `batlehub.weebo.io/v1alpha1`
+- **Scope:** Namespaced
+- **Short names:** `bhli`
+- **Guide:** [Connect a BatleHub instance](/docs/guides/connect-instance)
+
+One BatleHub instance, owned by a namespace: its token is that
+namespace's, and only the objects of that namespace use it. `Ready`
+tells whether the instance answers and accepts the token below.
+
+## Example
+
+```yaml
+apiVersion: batlehub.weebo.io/v1alpha1
+kind: BatleHubLocalInstance
+metadata:
+  name: my-localinstance
+  namespace: team-a
+spec:
+  url: https://batlehub.example.com
+  tokenSecretRef:
+    name: batlehub-admin
+    key: token
+```
+
+## Spec fields
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `tokenSecretRef` | `object` | yes |  | The API token the operator authenticates with, in a `Secret` of this namespace labelled `batlehub.weebo.io/instance-token: "true"` (without the label the operator doesn't read it). Read on every reconcile: rotating it needs no restart. |
+| `url` | `string` | yes |  | Base URL of the BatleHub instance, e.g. `https://example.com`. |
+
+## Build a manifest
+
+Answer the questions and fill in the fields: the YAML preview updates as you type, ready to copy or download and `kubectl apply`.
+
+<CrdForm kind="BatleHubLocalInstance" />

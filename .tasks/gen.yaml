@@ -1,0 +1,39 @@
+version: "3"
+
+# BatleHub admin API client generation (spec/, spec §9.2). The spec is
+# vendored under spec/, so `client` runs offline and is safe to call from
+# `task recu` / the pre-commit hook; only `spec` touches the network.
+
+vars:
+  BATLEHUB_VERSION: '{{.BATLEHUB_VERSION | default "1.4.0"}}'
+
+tasks:
+  spec:
+    desc: "Download and vendor BatleHub's OpenAPI spec for a release (usage: task gen:spec [BATLEHUB_VERSION=1.4.0])"
+    cmds:
+      - spec/scripts/fetch-spec.sh "{{.BATLEHUB_VERSION}}"
+
+  client:
+    desc: "Regenerate crates/batlehub-client from the vendored spec + spec/patches/*.jq (usage: task gen:client [BATLEHUB_VERSION=1.4.0])"
+    sources:
+      - spec/batlehub-v{{.BATLEHUB_VERSION}}.json
+      - spec/patches/*.jq
+      - spec/openapi-generator.yaml
+      - spec/batlehub-client.Cargo.toml
+      - spec/scripts/gen-client.sh
+    generates:
+      - crates/batlehub-client/src/**/*.rs
+      - crates/batlehub-client/Cargo.toml
+    cmds:
+      - mise exec -- spec/scripts/gen-client.sh "{{.BATLEHUB_VERSION}}"
+
+  bump:
+    desc: "Move to another BatleHub release: vendor its spec, then regenerate the client (usage: task gen:bump BATLEHUB_VERSION=x.y.z)"
+    requires:
+      vars: [BATLEHUB_VERSION]
+    cmds:
+      - task: spec
+        vars: { BATLEHUB_VERSION: "{{.BATLEHUB_VERSION}}" }
+      - task: client
+        vars: { BATLEHUB_VERSION: "{{.BATLEHUB_VERSION}}" }
+      - echo "Update BATLEHUB_VERSION's default in .tasks/gen.yaml (and, from M2, the batlehub-config tag in Cargo.toml and the default image), then delete the old spec file"

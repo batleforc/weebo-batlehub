@@ -1,0 +1,37 @@
+{
+  "name": "docs",
+  "version": "0.0.6",
+  "private": true,
+  "scripts": {
+    "build": "next build",
+    "dev": "next dev",
+    "start": "next start",
+    "types:check": "fumadocs-mdx && next typegen && tsc --noEmit",
+    "postinstall": "fumadocs-mdx",
+    "lint": "eslint",
+    "gen:crds": "weebo-crd-docs"
+  },
+  "dependencies": {
+    "@weebo/operator-docs": "https://github.com/batleforc/weebo-operator-kit/releases/download/v0.14.2/weebo-operator-docs-0.14.2.tgz",
+    "fumadocs-core": "16.16.2",
+    "fumadocs-mdx": "15.4.6",
+    "fumadocs-ui": "16.16.2",
+    "lucide-react": "^1.24.0",
+    "next": "16.4.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "shiki": "^4.3.1"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.3.2",
+    "@types/mdx": "^2.0.14",
+    "@types/node": "^26.1.1",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "eslint": "^9.39.4",
+    "eslint-config-next": "16.4.0",
+    "postcss": "^8.5.17",
+    "tailwindcss": "^4.3.2",
+    "typescript": "^6.0.3"
+  }
+}

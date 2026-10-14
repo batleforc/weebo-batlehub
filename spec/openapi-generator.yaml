@@ -1,0 +1,8 @@
+# openapi-generator `rust` options — see
+# https://openapi-generator.tech/docs/generators/rust
+packageName: batlehub-client
+library: reqwest
+supportAsync: true
+# One builder-free params struct per operation keeps call sites readable.
+useSingleRequestParameter: true
+preferUnsignedInt: false

@@ -1,0 +1,66 @@
+name: E2E
+
+# kind end to end (`task e2e`, deploy/e2e/run.sh): both operator images,
+# installed by the Helm chart next to cert-manager, then the upgrade from
+# the last published chart (when there is one), the smoke and leader
+# failover.
+#
+# Runs on PRs touching what ships, weekly, on demand, and as the gate of
+# publish.yml (workflow_call): nothing is pushed unless the main image's
+# run passes (the static one, optional in a release, doesn't gate it).
+on:
+  pull_request:
+    paths:
+      - crates/**
+      - deploy/**
+      - Containerfile*
+      - Cargo.toml
+      - Cargo.lock
+      - .github/workflows/e2e.yml
+      - .tasks/e2e.yaml
+  schedule:
+    - cron: "0 4 * * 1"
+  workflow_dispatch: {}
+  workflow_call:
+    inputs:
+      ref:
+        description: Git ref (tag) to test; defaults to the triggering ref.
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-${{ github.event_name }}-${{ inputs.ref || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  kind:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    # The static image is optional in a release (publish.yml): its e2e
+    # failing is reported, not a gate.
+    continue-on-error: ${{ !matrix.required }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - file: Containerfile
+            required: true
+          - file: Containerfile.static
+            required: false
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup-mise
+      - run: mise install
+      - name: kind e2e
+        env:
+          CONTAINERFILE: ${{ matrix.file }}
+        run: mise exec -- task e2e CONTAINERFILE="$CONTAINERFILE"

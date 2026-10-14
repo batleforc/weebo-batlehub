@@ -1,0 +1,62 @@
+name: Publish
+
+# Publishes a release tag `vX.Y.Z` (a bump made locally with `cog bump`):
+# the kind e2e (e2e.yml) on that tag, then weebo-operator-kit's publish
+# workflow — the image of each variant (Red Hat Hummingbird, and a
+# statically linked one as `-static`), scanned by Grype (accepted findings:
+# .grype.yaml), smoke-run, signed; the chart (OCI); the GitHub Release. The
+# static variant is optional: a failure there leaves it out of the release
+# instead of blocking it.
+#
+# Images are amd64. `arm64: true` adds a separate arm64 image per variant
+# (`vX.Y.Z-arm64`, `vX.Y.Z-static-arm64`), built natively, never a gate.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag (vX.Y.Z) to (re)publish.
+        required: true
+        type: string
+      run-e2e:
+        description: Run the kind e2e gate first.
+        required: false
+        type: boolean
+        default: true
+
+# Every job declares what it needs.
+permissions: {}
+
+jobs:
+  e2e:
+    # A tag push has no inputs: run-e2e is null there, and null == false
+    # in expressions, so it must be tested on the event.
+    if: ${{ github.event_name == 'push' || inputs.run-e2e }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/e2e.yml
+    with:
+      ref: ${{ inputs.tag || github.ref_name }}
+
+  publish:
+    # Nothing reaches the registry unless the e2e passed (it may be skipped
+    # only through the run-e2e input).
+    needs: e2e
+    if: >-
+      ${{ !cancelled() && (needs.e2e.result == 'success' || needs.e2e.result == 'skipped') }}
+    uses: batleforc/weebo-operator-kit/.github/workflows/publish.yml@v0.14.2
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+    with:
+      tag: ${{ inputs.tag || github.ref_name }}
+      image: ghcr.io/batleforc/weebo-batlehub-operator
+      chart: weebo-batlehub
+      variants: >-
+        [{"file": "Containerfile", "suffix": "", "required": true},
+         {"file": "Containerfile.static", "suffix": "-static", "required": false}]
+      smoke-entrypoint: /usr/local/bin/operator
+      smoke-args: --version
+      arm64: false

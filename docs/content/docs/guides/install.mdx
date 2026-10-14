@@ -1,0 +1,26 @@
+---
+title: Install via Helm
+description: Bring up the operator with its chart.
+---
+
+The chart lives at `oci://ghcr.io/batleforc/charts/weebo-batlehub`. It
+needs [cert-manager](https://cert-manager.io) for the certificate of the
+operator's HTTPS server (probes and admission webhooks).
+
+```bash
+helm install weebo-batlehub \
+  oci://ghcr.io/batleforc/charts/weebo-batlehub \
+  --namespace weebo-batlehub --create-namespace \
+  --set certManager.issuerRef.name=<issuer>
+```
+
+No release is published yet: until then, install from a checkout with
+`deploy/charts/weebo-batlehub` (after `helm dependency build`).
+
+## Limited to one namespace
+
+`--set watch.namespace=<namespace>` limits the operator to the instances
+of that namespace: its kinds move from the ClusterRole to a Role there.
+BatleHub has no cluster-scoped kind; the operator still reads and writes
+Secrets through its ClusterRole (`clusterSecrets`), in every namespace that
+has an instance.

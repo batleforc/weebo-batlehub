@@ -1,0 +1,48 @@
+version: "3"
+
+# kind end-to-end test (deploy/e2e/run.sh): also run weekly by
+# .github/workflows/e2e.yml, and as the gate of publish.yml. Needs a
+# container engine kind can use.
+
+vars:
+  CLUSTER: weebo-batlehub-e2e
+  IMAGE: weebo-batlehub-operator:e2e
+  # docker or podman (kind picks podman with KIND_EXPERIMENTAL_PROVIDER).
+  ENGINE: '{{.ENGINE | default "docker"}}'
+
+tasks:
+  default:
+    desc: "Full kind e2e: cluster, operator image, upgrade test, smoke, teardown (usage: task e2e [UPGRADE_FROM=none|X.Y.Z] [CONTAINERFILE=Containerfile.static])"
+    cmds:
+      - task: up
+      - defer: { task: down }
+      - task: image
+      - task: run
+
+  up:
+    desc: "Create the kind cluster (kept if it already exists)"
+    status:
+      - mise exec -- kind get clusters | grep -qx {{.CLUSTER}}
+    cmds:
+      - mise exec -- kind create cluster --name {{.CLUSTER}} --wait 2m
+
+  image:
+    desc: "Build the operator image and load it into the kind cluster"
+    cmds:
+      - "{{.ENGINE}} build -t {{.IMAGE}} -f {{.CONTAINERFILE | default \"Containerfile\"}} ."
+      - mise exec -- kind load docker-image {{.IMAGE}} --name {{.CLUSTER}}
+
+  run:
+    desc: "Deploy cert-manager and the chart into the kind cluster (upgrading from the last published chart when there is one), then run the smoke (usage: task e2e:run [UPGRADE_FROM=none|X.Y.Z])"
+    env:
+      IMAGE: "{{.IMAGE}}"
+      # Empty: the latest published chart; `none`: skip the upgrade test.
+      UPGRADE_FROM: "{{.UPGRADE_FROM}}"
+    cmds:
+      - mise exec -- kubectl config use-context kind-{{.CLUSTER}}
+      - mise exec -- deploy/e2e/run.sh
+
+  down:
+    desc: "Delete the kind cluster"
+    cmds:
+      - mise exec -- kind delete cluster --name {{.CLUSTER}}

@@ -1,0 +1,33 @@
+{
+  "apiVersion": "batlehub.weebo.io/v1alpha1",
+  "kind": "BatleHubLocalInstance",
+  "scope": "Namespaced",
+  "description": "One BatleHub instance, owned by a namespace: its token is that\nnamespace's, and only the objects of that namespace use it. `Ready`\ntells whether the instance answers and accepts the token below.",
+  "properties": {
+    "tokenSecretRef": {
+      "description": "The API token the operator authenticates with, in a `Secret` of\nthis namespace labelled\n`batlehub.weebo.io/instance-token: \"true\"` (without the\nlabel the operator doesn't read it). Read on every reconcile:\nrotating it needs no restart.",
+      "properties": {
+        "key": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "key",
+        "name"
+      ],
+      "type": "object"
+    },
+    "url": {
+      "description": "Base URL of the BatleHub instance, e.g. `https://example.com`.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "tokenSecretRef",
+    "url"
+  ],
+  "type": "object"
+}

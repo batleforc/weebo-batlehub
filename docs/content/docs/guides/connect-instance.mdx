@@ -1,0 +1,47 @@
+---
+title: Connect a BatleHub instance
+description: Point the operator at a BatleHub instance with an admin token.
+---
+
+A `BatleHubLocalInstance` is one BatleHub instance, owned by a namespace:
+its token lives in a Secret of that namespace, and only the objects of that
+namespace use it.
+
+## The token Secret opts in
+
+The operator reads Secrets with its own rights, and the instance names the
+URL the token is sent to. So it only reads a token from a Secret labelled
+`batlehub.weebo.io/instance-token: "true"`: without the label, the instance
+is `Ready: False` with `TokenSecretNotAllowed`, and the Secret's content is
+never read.
+
+```bash
+kubectl -n team-a create secret generic batlehub-admin --from-literal=token=<token>
+kubectl -n team-a label secret batlehub-admin batlehub.weebo.io/instance-token=true
+```
+
+The token must carry BatleHub's `admin` role: the operator checks it with
+`GET /api/v1/me` (another role gives `OperatorUnauthorized`, the message
+says which).
+
+## The instance
+
+```yaml
+apiVersion: batlehub.weebo.io/v1alpha1
+kind: BatleHubLocalInstance
+metadata:
+  name: main
+  namespace: team-a
+spec:
+  url: https://batlehub.example.com
+  tokenSecretRef:
+    name: batlehub-admin
+    key: token
+```
+
+`kubectl -n team-a get bhli` shows `READY` and `REASON`; `Ready: True`
+says BatleHub's version, read from `/livez`. The token is read again on
+every reconcile: rotating it needs no restart.
+
+Creating a `BatleHubLocalInstance` sends a Secret of its namespace to the
+URL it names: grant the kind like you grant pods.
