@@ -6,9 +6,10 @@ use std::fmt::Debug;
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
-use api::Status;
 use api::status::Condition;
-use application::ports::{BoundInstance, ConfigParser, GatewayFactory, InstanceDirectory};
+use application::ports::{
+    BoundInstance, ConfigParser, GatewayFactory, InstanceDependents, InstanceDirectory,
+};
 use application::use_cases::Outcome;
 use domain::Failure;
 use domain::error::ReasonCode;
@@ -49,6 +50,8 @@ pub struct Ctx {
     /// Which instance a CR lives on (`LocalInstanceDirectory`, on the
     /// watch scope).
     pub instances: Arc<dyn InstanceDirectory>,
+    /// The CRs bound to an instance, holding its deletion.
+    pub dependents: Arc<dyn InstanceDependents>,
     /// BatleHub's configuration parser (unavailable until
     /// `batlehub-config` v1.5.0).
     pub config: Arc<dyn ConfigParser>,
@@ -128,41 +131,44 @@ pub fn record_reconcile(kind: &'static str, started: Instant, outcome: &Outcome)
         .record(kind, outcome.reason(), started.elapsed());
 }
 
-/// The `status` of every CRD here is a [`Status`].
+/// What [`publish`] needs of a CR's `status`.
 pub trait HasStatus {
-    fn status(&self) -> Option<&Status>;
+    /// The conditions of the last publish.
+    fn conditions(&self) -> &[Condition];
 
-    /// The instance recorded at the last resolution.
+    /// The instance recorded at the last resolution (the kinds that target
+    /// an instance).
     fn bound_instance(&self) -> Option<&BoundInstance> {
-        self.status()?.instance.as_ref()
+        None
     }
 }
 
 impl HasStatus for api::LocalInstance {
-    fn status(&self) -> Option<&Status> {
-        self.status.as_ref()
+    fn conditions(&self) -> &[Condition] {
+        self.status
+            .as_ref()
+            .map(|s| s.conditions.as_slice())
+            .unwrap_or_default()
     }
 }
 
 /// Publishes `outcome` on `obj` (read fresh from the API server: its
 /// conditions are the previous ones). The kit's: one merge patch
-/// (conditions, `observedGeneration` on success, the bound instance),
-/// retried while the apiserver is unavailable, then a `Warning` on every
-/// failed reconcile and a `Normal` for every condition change.
+/// (conditions with the advisories, `observedGeneration` on success, the
+/// bound instance, the kind's own `fields`), retried while the apiserver
+/// is unavailable, then a `Warning` on every failed reconcile and a
+/// `Normal` for every condition change.
 pub async fn publish<K>(
     api: &Api<K>,
     recorder: &Recorder,
     obj: &K,
     outcome: &Outcome,
+    mut fields: serde_json::Map<String, serde_json::Value>,
 ) -> Result<(), kube::Error>
 where
     K: Resource<DynamicType = ()> + HasStatus + Clone + Debug + DeserializeOwned + Serialize,
 {
-    let previous: &[Condition] = obj
-        .status()
-        .map(|s| s.conditions.as_slice())
-        .unwrap_or_default();
-    let mut fields = serde_json::Map::new();
+    let previous = obj.conditions();
     if let Some(instance) = &outcome.instance {
         let instance = serde_json::to_value(instance).expect("a BoundInstance serializes");
         fields.insert("instance".into(), instance);
@@ -175,7 +181,7 @@ where
         previous,
         StatusUpdate {
             ready: &outcome.ready,
-            advisories: &[],
+            advisories: &outcome.advisories,
             fields,
         },
     )

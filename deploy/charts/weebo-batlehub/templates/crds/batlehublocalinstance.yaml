@@ -16,8 +16,11 @@ spec:
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
-    - jsonPath: .spec.url
-      name: URL
+    - jsonPath: .status.endpoint
+      name: Endpoint
+      type: string
+    - jsonPath: .status.version
+      name: Version
       type: string
     - jsonPath: .status.conditions[?(@.type=='Ready')].status
       name: Ready
@@ -25,6 +28,9 @@ spec:
     - jsonPath: .status.conditions[?(@.type=='Ready')].reason
       name: Reason
       type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
     name: v1alpha1
     schema:
       openAPIV3Schema:
@@ -34,37 +40,83 @@ spec:
             description: |-
               One BatleHub instance, owned by a namespace: its token is that
               namespace's, and only the objects of that namespace use it. `Ready`
-              tells whether the instance answers and accepts the token below.
+              tells whether the instance answers and accepts the operator's token
+              with the admin role.
+
+              While objects are bound to it, its deletion waits (`InstanceInUse`);
+              `batlehub.weebo.io/force-orphan: "true"` releases it and leaves them
+              orphaned.
             properties:
-              tokenSecretRef:
+              external:
                 description: |-
-                  The API token the operator authenticates with, in a `Secret` of
-                  this namespace labelled
-                  `batlehub.weebo.io/instance-token: "true"` (without the
-                  label the operator doesn't read it). Read on every reconcile:
-                  rotating it needs no restart.
+                  A BatleHub the operator doesn't deploy: it reaches it at `url`
+                  with an admin token, and observes it. (The mode where the operator
+                  deploys BatleHub itself comes in a later version.)
                 properties:
-                  key:
-                    type: string
-                  name:
+                  adminTokenSecretRef:
+                    description: |-
+                      A token of BatleHub's `admin` role, in a `Secret` of this namespace
+                      labelled `batlehub.weebo.io/instance-token: "true"` (without the
+                      label the operator doesn't read it). Read on every reconcile:
+                      rotating it needs no restart.
+                    properties:
+                      key:
+                        type: string
+                      name:
+                        type: string
+                    required:
+                    - key
+                    - name
+                    type: object
+                  tls:
+                    default:
+                      insecureSkipVerify: false
+                    description: |-
+                      TLS verification of the connection to `url`: a private CA to trust
+                      (`tls.caSecretRef`, a `Secret` of this namespace), or the
+                      `tls.insecureSkipVerify` escape hatch.
+                    properties:
+                      caSecretRef:
+                        description: |-
+                          Optional custom CA certificate (a PEM bundle under `key`) to verify
+                          the instance's TLS with, read from a `Secret` of the instance's own
+                          namespace. Added on top of the platform trust store.
+                        nullable: true
+                        properties:
+                          key:
+                            type: string
+                          name:
+                            type: string
+                        required:
+                        - key
+                        - name
+                        type: object
+                      insecureSkipVerify:
+                        default: false
+                        description: |-
+                          Skip certificate verification entirely — insecure, intended only for
+                          throwaway/self-signed instances. Prefer `caSecretRef` below.
+                        type: boolean
+                    type: object
+                  url:
+                    description: Base URL of the BatleHub instance, e.g. `https://batlehub.example.com`.
                     type: string
                 required:
-                - key
-                - name
+                - adminTokenSecretRef
+                - url
                 type: object
-              url:
-                description: Base URL of the BatleHub instance, e.g. `https://example.com`.
-                type: string
             required:
-            - tokenSecretRef
-            - url
+            - external
             type: object
           status:
+            description: What the operator observed of the instance.
             nullable: true
             properties:
               conditions:
                 default: []
-                description: '`Ready`, carrying one of the operator''s reason codes.'
+                description: |-
+                  `Ready`, carrying one of the operator's reason codes, and the
+                  advisories next to it (`ConfigWarnings`).
                 items:
                   properties:
                     lastTransitionTime:
@@ -93,35 +145,40 @@ spec:
                   - type
                   type: object
                 type: array
-              instance:
-                description: |-
-                  The instance this object was resolved to and stays bound to (the
-                  kinds that target an instance): a `spec.instanceRef` by name only
-                  never silently moves to another instance created later under the
-                  same name.
+              endpoint:
+                description: The URL the operator calls.
                 nullable: true
-                properties:
-                  kind:
-                    description: '`Instance` or `LocalInstance`.'
-                    enum:
-                    - Instance
-                    - LocalInstance
-                    type: string
-                  name:
-                    type: string
-                  namespace:
-                    description: The local instance's namespace; absent for a cluster-scoped one.
-                    nullable: true
-                    type: string
-                required:
-                - kind
-                - name
-                type: object
+                type: string
               observedGeneration:
                 description: The `metadata.generation` the last successful reconcile applied.
                 format: int64
                 nullable: true
                 type: integer
+              version:
+                description: BatleHub's version, as its `/livez` reports it.
+                nullable: true
+                type: string
+              warnings:
+                description: |-
+                  What BatleHub finds legal but probably unintended in its own
+                  configuration (`GET /api/v1/admin/config/warnings`).
+                items:
+                  description: One warning of BatleHub on its configuration.
+                  properties:
+                    code:
+                      description: Stable identifier, e.g. `proxy-trust.unconfigured`.
+                      type: string
+                    message:
+                      type: string
+                    path:
+                      description: The configuration key it is about, e.g. `server.trusted_proxies`.
+                      type: string
+                  required:
+                  - code
+                  - message
+                  - path
+                  type: object
+                type: array
             type: object
         required:
         - spec

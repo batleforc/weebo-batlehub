@@ -1,0 +1,50 @@
+version: "3"
+
+# A disposable BatleHub for the live tests (`task test:live-batlehub`):
+# the released image and a Postgres on a private network, BatleHub on
+# 127.0.0.1:18080 with deploy/live/config.toml. Writes .batlehub-test.env.
+
+# Prefixed: the variables of included Taskfiles share one namespace
+# (e2e.yaml has its own ENGINE, defaulting to docker).
+vars:
+  LIVE_ENGINE:
+    sh: command -v docker >/dev/null 2>&1 && echo docker || echo podman
+  LIVE_NAME: weebo-batlehub-test
+  # The BatleHub release the operator targets (.tasks/gen.yaml's).
+  LIVE_IMAGE: '{{.LIVE_IMAGE | default "ghcr.io/batlehub/batlehub:1.5.0"}}'
+
+tasks:
+  container:start:
+    desc: "Run a disposable BatleHub (docker/podman, localhost:18080) and its Postgres, with an admin and a user token; writes .batlehub-test.env for the live tests"
+    cmds:
+      - task: container:stop
+      - "{{.LIVE_ENGINE}} network create {{.LIVE_NAME}} >/dev/null"
+      - >-
+        {{.LIVE_ENGINE}} run -d --name {{.LIVE_NAME}}-db --network {{.LIVE_NAME}}
+        -e POSTGRES_USER=batlehub -e POSTGRES_PASSWORD=batlehub -e POSTGRES_DB=batlehub
+        docker.io/library/postgres:17-alpine
+      - |
+        for i in $(seq 1 60); do
+          {{.LIVE_ENGINE}} exec {{.LIVE_NAME}}-db pg_isready -U batlehub >/dev/null 2>&1 && break
+          sleep 1
+        done
+      - >-
+        {{.LIVE_ENGINE}} run -d --name {{.LIVE_NAME}} --network {{.LIVE_NAME}} -p 127.0.0.1:18080:8080
+        -v "$PWD/deploy/live/config.toml:/etc/batlehub/config.toml:ro,Z"
+        {{.LIVE_IMAGE}}
+      - |
+        for i in $(seq 1 60); do
+          curl -fsS http://localhost:18080/livez >/dev/null 2>&1 && break
+          sleep 1
+        done
+        curl -fsS http://localhost:18080/livez || { {{.LIVE_ENGINE}} logs {{.LIVE_NAME}} | tail -20; exit 1; }
+        echo
+      - |
+        printf 'BATLEHUB_URL=http://localhost:18080\nBATLEHUB_ADMIN_TOKEN=live-admin-token\nBATLEHUB_USER_TOKEN=live-user-token\n' > .batlehub-test.env
+        echo "wrote .batlehub-test.env"
+
+  container:stop:
+    desc: "Remove the disposable BatleHub, its Postgres and their network"
+    cmds:
+      - "{{.LIVE_ENGINE}} rm -f {{.LIVE_NAME}} {{.LIVE_NAME}}-db >/dev/null 2>&1 || true"
+      - "{{.LIVE_ENGINE}} network rm {{.LIVE_NAME}} >/dev/null 2>&1 || true"

@@ -1,0 +1,30 @@
+# The disposable BatleHub of the live tests (`task batlehub:container:start`):
+# Postgres beside it, filesystem storage, two static tokens — the
+# operator's (admin) and a user's, which the operator must refuse. Nothing
+# here is a secret: the container only listens on 127.0.0.1.
+
+[server]
+host = "0.0.0.0"
+port = 8080
+
+[database]
+type = "postgresql"
+url = "postgresql://batlehub:batlehub@weebo-batlehub-test-db:5432/batlehub"
+max_connections = 5
+
+[storage]
+type = "filesystem"
+path = "/var/cache/batlehub"
+
+[[auth]]
+type = "token"
+
+[[auth.tokens]]
+value = "live-admin-token"
+role = "admin"
+user_id = "weebo-batlehub-operator"
+
+[[auth.tokens]]
+value = "live-user-token"
+role = "user"
+user_id = "live-user"

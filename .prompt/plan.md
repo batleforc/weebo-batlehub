@@ -18,8 +18,9 @@ d'une release Helm de batlehub, pas de la v0.1.
 
 Références : batlehub **v1.4.0** au moment de l'écriture (crate
 `batlehub-config`, chart Helm `helm/batlehub` 1.4.0, image
-`ghcr.io/batleforc/batlehub`), **v1.5.0** visée pour D4 (§11.1, D8
-acceptée) ; kit **v0.14.2**.
+`ghcr.io/batlehub/batlehub`), **v1.5.0** visée pour D4 (§11.1, D8
+acceptée) mais qui ne les porte pas (Constats du M1) ; kit **v0.14.2**
+(M0), **v0.14.3** (M1).
 
 ### Historique
 
@@ -527,7 +528,7 @@ de batlehub, pour qu'un `values.yaml` se traduise ligne à ligne (§8).
 
 | Champ | Défaut | Rôle |
 | --- | --- | --- |
-| `image.repository` / `tag` / `pullPolicy` | `ghcr.io/batleforc/batlehub` / version ciblée par l'opérateur (`WEEBO_BATLEHUB_DEFAULT_IMAGE`) / `IfNotPresent` | |
+| `image.repository` / `tag` / `pullPolicy` | `ghcr.io/batlehub/batlehub` / version ciblée par l'opérateur (`WEEBO_BATLEHUB_DEFAULT_IMAGE`) / `IfNotPresent` | |
 | `imagePullSecrets[]` | | |
 | `replicas` | 1 | Un stockage filesystem sur volume RWO plafonne à 1. |
 | `updateStrategy` | dérivé | Voir 6.2. |
@@ -1589,6 +1590,60 @@ avec le M1.
   de `gh`, sans le scope `workflow` : refusé. Le `git push` normal
   (credential `store`) passe.
 
+### Constats du M1 (2026-10-14)
+
+`test:live-batlehub` vert contre l'image `ghcr.io/batlehub/batlehub:1.5.0`
+(Postgres à côté, `task batlehub:container:start`, config
+`deploy/live/config.toml`) ; l'e2e kind déploie le même couple et attend
+une instance external `Ready`. Kit **v0.14.3** (licence du gabarit en
+placeholder, constat du M0). Couverture : 90,6 % des lignes, tests live
+compris, après le portage des tests binaires de forgejo
+(`crates/operator/tests/binary.rs` : HTTPS, lease, reconcile, perte du
+lease, SIGTERM ; `crates/crdgen/tests/in_sync.rs`).
+
+- **Image** : `ghcr.io/batlehub/batlehub` (pas `ghcr.io/batleforc/…`) ;
+  4.1 est corrigé. La release GitHub v1.5.0 était encore un brouillon,
+  l'image et le tag étaient publiés.
+- **Client régénéré sur l'OpenAPI 1.5.0** (`task gen:bump`), sans
+  nouveau patch.
+- **`GET /api/v1/me` avec un token inconnu** : `200` et
+  `role: "anonymous"`, jamais `401`. Le contrôle du rôle (déjà au M0) le
+  refuse donc en `OperatorUnauthorized` (« role is "anonymous" »), testé
+  en contrat et en live.
+- **Warnings** : `GET /api/v1/admin/config/warnings` demande
+  `config:read` (un `user` reçoit `403`). Une config minimale en donne
+  déjà deux (`proxy-trust.unconfigured`, `audit.no-retention`) :
+  l'advisory `ConfigWarnings` sera la norme, pas l'exception. Une erreur
+  de lecture des warnings fait échouer le reconcile comme `ping`.
+- **Config minimale de batlehub** : `[storage]` est obligatoire
+  (`missing field storage`), `[[registries]]` non.
+- **Forme de `BatleHubLocalInstance` au M1** : `spec.external` est
+  **requis**, seul (`url`, `adminTokenSecretRef`, `tls` du kit
+  `LocalTlsOptions`). `manageConfig` et `podSelector` arrivent au M2,
+  `managed` au M4 : rendre `external` facultatif à ce moment-là (avec la
+  règle CEL « exactement un mode ») n'est pas une rupture. Status propre
+  (`endpoint`, `version`, `warnings`) ; `version` et `warnings` sont
+  gardés tant que l'instance ne répond pas.
+- **CA** (`tls.caSecretRef`) : lu sans label de consentement (ce n'est
+  pas un secret) ; absent ou sans certificat PEM → `InvalidSpec`.
+- **`InstanceInUse`** : publié aussi sur `Ready` pendant que la
+  suppression attend (pas seulement en Event), comme le dit 4.1. Aucun
+  kind ne se lie encore à une instance : l'adaptateur
+  `ClusterDependents` rend une liste vide, l'envtest passe par un faux
+  (`FakeDependents`) ; la vraie liste arrive avec `BatleHubRegistry`
+  (M2). `force-orphan` testé.
+- **Taskfile** : les variables des Taskfiles inclus partagent un seul
+  espace (le `ENGINE` d'`e2e.yaml` écrasait celui de `batlehub.yaml`) :
+  préfixe `LIVE_`.
+- **Bloquant pour le M2** : `batlehub-config` **v1.5.0 ne porte pas
+  D4/D8**. Elle a la fusion par couches (`load_layered`,
+  `load_layered_from_str`, tableaux fusionnés par identité `name`/`type`),
+  mais pas `merge_layers` (fusion sans expansion d'env), ni
+  `validate_layers(layers, env)` (l'expansion `${VAR}` et
+  `apply_env_overrides()` lisent `std::env` du processus), ni
+  `RESTART_KEYS`. Le M2 attend une batlehub qui les publie (v1.5.1 ou
+  v1.6.0, à décider côté batlehub).
+
 ## 11. Évolutions proposées
 
 ### 11.1 Côté batlehub (nous le maintenons aussi)
@@ -1599,8 +1654,8 @@ subtil de l'opérateur.
 
 | Évolution | Statut | Retire |
 | --- | --- | --- |
-| `batlehub_config::merge_layers(&[&str]) -> toml::Value` (fusion sans expansion d'env) et `validate_layers(&[&str], env: impl Fn(&str) -> Option<String>)`, où `env` sert **aussi** aux overrides `PROXY_CACHE__*` (aujourd'hui `apply_env_overrides()` lit `std::env`, 2.2) | requis (v1.5.0) | Toute substitution maison, et le risque de diverger sur la fusion (2.2, 2.3) |
-| `batlehub_config::RESTART_KEYS` (la liste utilisée par batlehub lui-même) | requis (v1.5.0) | Toute copie de la liste (2.4) |
+| `batlehub_config::merge_layers(&[&str]) -> toml::Value` (fusion sans expansion d'env) et `validate_layers(&[&str], env: impl Fn(&str) -> Option<String>)`, où `env` sert **aussi** aux overrides `PROXY_CACHE__*` (aujourd'hui `apply_env_overrides()` lit `std::env`, 2.2) | requis, **absent de v1.5.0** (Constats du M1) | Toute substitution maison, et le risque de diverger sur la fusion (2.2, 2.3) |
+| `batlehub_config::RESTART_KEYS` (la liste utilisée par batlehub lui-même) | requis, **absent de v1.5.0** | Toute copie de la liste (2.4) |
 | `POST /admin/config/reload` avec `{"expected_sha256": …}` : recharge si le fichier a ce hash, répond le hash chargé ; pas de dédoublonnage sur un hash attendu | facultatif (si 6.1 est fragile au M2) | Le nonce de re-stage (6.1), et le risque d'approuver une révision qui n'est pas celle attendue |
 | `GET /admin/config/content` renvoie aussi le SHA-256 des couches lues | facultatif | La comparaison d'octets par pod |
 | Propagation d'un reload approuvé entre réplicas (via le backend de cache partagé) | facultatif | L'approbation pod par pod par IP (2.9), `podSelector` (6.6) |

@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # kind e2e (`task e2e`, .github/workflows/e2e.yml): deploys cert-manager and
-# the operator chart into the current kube context, then the M0 smoke — two
+# the operator chart into the current kube context, then the smoke — two
 # BatleHubLocalInstances whose state the operator decides without a running
-# BatleHub (an unlabelled token Secret, an unreachable URL) — and checks
-# leader election on the real deployment. A real BatleHub joins with M1.
+# BatleHub (an unlabelled token Secret, an unreachable URL) —, a real
+# BatleHub (batlehub.yaml) with an external instance that must end Ready,
+# and checks leader election on the real deployment.
 #
 # With a previously published chart, it first installs that release, creates
 # the smoke CRs with it, then upgrades to this checkout's chart and checks
@@ -47,6 +48,8 @@ dump() {
   kubectl -n "$OPERATOR_NS" get pods -o wide
   kubectl -n "$OPERATOR_NS" logs -l app.kubernetes.io/name=weebo-batlehub --tail=200 --prefix --all-containers
   kubectl -n team-a get batlehublocalinstances -o yaml
+  kubectl -n team-a get pods -o wide
+  kubectl -n team-a logs deploy/batlehub --tail=50
   kubectl get events -A --sort-by=.lastTimestamp | tail -n 50
 }
 # dump turns errexit off: leave right after it.
@@ -143,6 +146,15 @@ step "smoke: what the operator decides before calling BatleHub"
 ensure_ns team-a
 apply_smoke
 smoke_state
+
+step "a real BatleHub: an external instance ends Ready"
+kubectl apply -f "$HERE/batlehub.yaml"
+kubectl -n team-a rollout status deploy/postgres --timeout="$WAIT"
+kubectl -n team-a rollout status deploy/batlehub --timeout="$WAIT"
+reason_is ready Reconciled
+version="$(kubectl -n team-a get batlehublocalinstance ready -o jsonpath='{.status.version}')"
+[ -n "$version" ] || fail "ready: no status.version"
+echo "BatleHub $version"
 
 step "leader election"
 holder="$(kubectl -n "$OPERATOR_NS" get lease "$LEASE" -o jsonpath='{.spec.holderIdentity}')"

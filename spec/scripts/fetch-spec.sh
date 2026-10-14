@@ -4,7 +4,7 @@
 # writes (utoipa) as ui/openapi.json, versioned with each release.
 set -eu
 
-VERSION="${1:?usage: fetch-spec.sh <batlehub-version, e.g. 1.4.0>}"
+VERSION="${1:?usage: fetch-spec.sh <batlehub-version, e.g. 1.5.0>}"
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 OUT="$ROOT/spec/batlehub-v$VERSION.json"
 

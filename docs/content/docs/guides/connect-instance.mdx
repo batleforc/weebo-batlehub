@@ -5,7 +5,9 @@ description: Point the operator at a BatleHub instance with an admin token.
 
 A `BatleHubLocalInstance` is one BatleHub instance, owned by a namespace:
 its token lives in a Secret of that namespace, and only the objects of that
-namespace use it.
+namespace use it. In `external` mode the operator doesn't deploy BatleHub:
+it reaches an instance deployed by other means (its Helm chart, another
+cluster) and observes it.
 
 ## The token Secret opts in
 
@@ -33,15 +35,44 @@ metadata:
   name: main
   namespace: team-a
 spec:
-  url: https://batlehub.example.com
-  tokenSecretRef:
-    name: batlehub-admin
-    key: token
+  external:
+    url: https://batlehub.example.com
+    adminTokenSecretRef:
+      name: batlehub-admin
+      key: token
 ```
 
-`kubectl -n team-a get bhli` shows `READY` and `REASON`; `Ready: True`
-says BatleHub's version, read from `/livez`. The token is read again on
-every reconcile: rotating it needs no restart.
+`kubectl -n team-a get bhli` shows `ENDPOINT`, `VERSION` (read from
+`/livez`), `READY` and `REASON`. The token is read again on every
+reconcile: rotating it needs no restart.
+
+A private CA goes in a Secret of the same namespace (a PEM bundle, no
+label needed: it is no secret), added on top of the platform trust store:
+
+```yaml
+spec:
+  external:
+    url: https://batlehub.internal
+    adminTokenSecretRef: { name: batlehub-admin, key: token }
+    tls:
+      caSecretRef: { name: internal-ca, key: ca.crt }
+```
+
+## What BatleHub warns about
+
+BatleHub flags settings that are legal but probably unintended
+(`GET /api/v1/admin/config/warnings`): an ingress whose proxies aren't
+declared, an audit trail kept forever… The operator copies them into
+`status.warnings` and raises the `ConfigWarnings` condition next to
+`Ready: True`; it doesn't block anything.
+
+## Deleting an instance
+
+The instance carries the `batlehub.weebo.io/finalizer` finalizer: while
+objects of the namespace are bound to it, its deletion waits, `Ready:
+False` with `InstanceInUse` naming them. Delete them first, or annotate
+the instance `batlehub.weebo.io/force-orphan: "true"` to let it go and
+leave them orphaned (what they wrote in BatleHub stays there).
 
 Creating a `BatleHubLocalInstance` sends a Secret of its namespace to the
 URL it names: grant the kind like you grant pods.

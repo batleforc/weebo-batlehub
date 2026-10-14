@@ -1,14 +1,11 @@
-//! [`ConfigParser`] until BatleHub v1.5.0: validating a configuration
-//! needs `batlehub_config::merge_layers` and `validate_layers(layers, env)`
-//! (the spec's D4), which `batlehub-config` 1.4.0 doesn't have — its
-//! loaders read the operator's own environment. Nothing validates before
+//! [`ConfigParser`] until `batlehub-config` has what validating needs:
+//! `merge_layers` and `validate_layers(layers, env)` (the spec's D4, D8),
+//! which it doesn't have up to v1.5.0 — its loaders
+//! (`load_layered_from_str`) read the operator's own environment. Nothing validates before
 //! M2 (external instances without `manageConfig` render no
 //! configuration), so this adapter only says so.
 
 use application::ports::{ConfigError, ConfigParser, ConfigVerdict};
-
-/// The BatleHub version whose `batlehub-config` the real adapter needs.
-pub const PARSER_VERSION: &str = "1.5.0";
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct UnavailableConfigParser;
@@ -19,10 +16,11 @@ impl ConfigParser for UnavailableConfigParser {
         _layers: &[&str],
         _env: &dyn Fn(&str) -> Option<String>,
     ) -> Result<ConfigVerdict, ConfigError> {
-        Err(ConfigError::Unavailable(format!(
-            "validating a BatleHub configuration needs batlehub-config v{PARSER_VERSION} \
-             (merge_layers, validate_layers)"
-        )))
+        Err(ConfigError::Unavailable(
+            "validating a BatleHub configuration needs a batlehub-config with \
+             merge_layers and validate_layers (not in v1.5.0)"
+                .into(),
+        ))
     }
 }
 

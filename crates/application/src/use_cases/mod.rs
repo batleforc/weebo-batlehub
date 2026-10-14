@@ -4,8 +4,8 @@
 
 pub mod reconcile_instance;
 
-use domain::Failure;
 use domain::error::ReasonCode;
+use domain::{Advisory, Failure};
 
 use crate::ports::{
     BoundInstance, GatewayError, GatewayFactoryError, InstanceError, instance_reason,
@@ -36,6 +36,8 @@ pub struct Outcome {
     pub instance: Option<BoundInstance>,
     /// `Ok(message)` for `Ready: True`.
     pub ready: Result<String, Failure>,
+    /// Non-blocking conditions next to `Ready: True`.
+    pub advisories: Vec<Advisory>,
 }
 
 impl Outcome {
@@ -43,6 +45,7 @@ impl Outcome {
         Self {
             instance: None,
             ready: Ok(message.into()),
+            advisories: Vec::new(),
         }
     }
 
@@ -50,7 +53,17 @@ impl Outcome {
         Self {
             instance: None,
             ready: Err(failure.into()),
+            advisories: Vec::new(),
         }
+    }
+
+    /// Adds an advisory (shown only while `Ready` is `True`).
+    pub fn advise(mut self, reason: ReasonCode, message: impl Into<String>) -> Self {
+        self.advisories.push(Advisory {
+            reason,
+            message: message.into(),
+        });
+        self
     }
 
     /// Records the instance the CR is bound to.

@@ -13,7 +13,7 @@ Kubernetes operator driving [BatleHub](https://github.com/batlehub/batlehub)
 
 | Kind                    | Scope      | What it does                                                    |
 | ----------------------- | ---------- | --------------------------------------------------------------- |
-| `BatleHubLocalInstance` | Namespaced | A BatleHub instance: its URL and admin token (`tokenSecretRef`) |
+| `BatleHubLocalInstance` | Namespaced | A BatleHub instance: its URL and admin token (`external.adminTokenSecretRef`) |
 
 Planned (see the plan): `BatleHubRegistry`, `BatleHubMaintenance`,
 `BatleHubPackageGrant`, `BatleHubPackagePolicy`.

@@ -1,7 +1,6 @@
-# The M0 smoke: two instances of one namespace, neither needing a running
+# The smoke: two instances of one namespace, neither needing a running
 # BatleHub — what the operator decides before calling it. The real
-# BatleHub joins the e2e with M1 (a Ready instance) and M2 (its
-# configuration).
+# BatleHub is batlehub.yaml's.
 apiVersion: v1
 kind: Secret
 metadata:
@@ -27,10 +26,11 @@ metadata:
   name: unlabelled
   namespace: team-a
 spec:
-  url: http://batlehub.team-a.svc:8080
-  tokenSecretRef:
-    name: unlabelled-token
-    key: token
+  external:
+    url: http://batlehub.team-a.svc:8080
+    adminTokenSecretRef:
+      name: unlabelled-token
+      key: token
 ---
 # A labelled token, an instance that doesn't answer.
 apiVersion: batlehub.weebo.io/v1alpha1
@@ -39,7 +39,8 @@ metadata:
   name: unreachable
   namespace: team-a
 spec:
-  url: http://batlehub.team-a.svc:8080
-  tokenSecretRef:
-    name: labelled-token
-    key: token
+  external:
+    url: http://nothing.team-a.svc:8080
+    adminTokenSecretRef:
+      name: labelled-token
+      key: token

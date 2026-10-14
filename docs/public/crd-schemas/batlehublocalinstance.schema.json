@@ -2,32 +2,72 @@
   "apiVersion": "batlehub.weebo.io/v1alpha1",
   "kind": "BatleHubLocalInstance",
   "scope": "Namespaced",
-  "description": "One BatleHub instance, owned by a namespace: its token is that\nnamespace's, and only the objects of that namespace use it. `Ready`\ntells whether the instance answers and accepts the token below.",
+  "description": "One BatleHub instance, owned by a namespace: its token is that\nnamespace's, and only the objects of that namespace use it. `Ready`\ntells whether the instance answers and accepts the operator's token\nwith the admin role.\n\nWhile objects are bound to it, its deletion waits (`InstanceInUse`);\n`batlehub.weebo.io/force-orphan: \"true\"` releases it and leaves them\norphaned.",
   "properties": {
-    "tokenSecretRef": {
-      "description": "The API token the operator authenticates with, in a `Secret` of\nthis namespace labelled\n`batlehub.weebo.io/instance-token: \"true\"` (without the\nlabel the operator doesn't read it). Read on every reconcile:\nrotating it needs no restart.",
+    "external": {
+      "description": "A BatleHub the operator doesn't deploy: it reaches it at `url`\nwith an admin token, and observes it. (The mode where the operator\ndeploys BatleHub itself comes in a later version.)",
       "properties": {
-        "key": {
-          "type": "string"
+        "adminTokenSecretRef": {
+          "description": "A token of BatleHub's `admin` role, in a `Secret` of this namespace\nlabelled `batlehub.weebo.io/instance-token: \"true\"` (without the\nlabel the operator doesn't read it). Read on every reconcile:\nrotating it needs no restart.",
+          "properties": {
+            "key": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "key",
+            "name"
+          ],
+          "type": "object"
         },
-        "name": {
+        "tls": {
+          "default": {
+            "insecureSkipVerify": false
+          },
+          "description": "TLS verification of the connection to `url`: a private CA to trust\n(`tls.caSecretRef`, a `Secret` of this namespace), or the\n`tls.insecureSkipVerify` escape hatch.",
+          "properties": {
+            "caSecretRef": {
+              "description": "Optional custom CA certificate (a PEM bundle under `key`) to verify\nthe instance's TLS with, read from a `Secret` of the instance's own\nnamespace. Added on top of the platform trust store.",
+              "nullable": true,
+              "properties": {
+                "key": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "key",
+                "name"
+              ],
+              "type": "object"
+            },
+            "insecureSkipVerify": {
+              "default": false,
+              "description": "Skip certificate verification entirely — insecure, intended only for\nthrowaway/self-signed instances. Prefer `caSecretRef` below.",
+              "type": "boolean"
+            }
+          },
+          "type": "object"
+        },
+        "url": {
+          "description": "Base URL of the BatleHub instance, e.g. `https://batlehub.example.com`.",
           "type": "string"
         }
       },
       "required": [
-        "key",
-        "name"
+        "adminTokenSecretRef",
+        "url"
       ],
       "type": "object"
-    },
-    "url": {
-      "description": "Base URL of the BatleHub instance, e.g. `https://example.com`.",
-      "type": "string"
     }
   },
   "required": [
-    "tokenSecretRef",
-    "url"
+    "external"
   ],
   "type": "object"
 }

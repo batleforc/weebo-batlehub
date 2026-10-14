@@ -8,9 +8,9 @@
 
 use std::time::Duration;
 
-use application::ports::{AdminGateway, GatewayError, InstanceInfo};
+use application::ports::{AdminGateway, ConfigWarning, GatewayError, InstanceInfo};
 use batlehub_client::apis::configuration::Configuration;
-use batlehub_client::apis::{Error as ClientError, front_office_api};
+use batlehub_client::apis::{Error as ClientError, back_office_api, front_office_api};
 use batlehub_client::models::Role;
 use reqwest::{Client, StatusCode, Url};
 use serde::Deserialize;
@@ -48,10 +48,27 @@ impl HttpAdminGateway {
         Ok(Self { base, config })
     }
 
-    /// The default HTTP client: rustls, platform trust store, timeout.
-    pub fn default_client() -> Result<Client, String> {
-        Client::builder()
-            .timeout(REQUEST_TIMEOUT)
+    /// The HTTP client: rustls, the platform trust store plus `ca_pem`
+    /// (a PEM bundle) when given, certificate verification off when
+    /// `insecure_skip_verify`, a timeout. A `ca_pem` holding no
+    /// certificate is an error, never a silent fallback to the platform
+    /// store alone.
+    pub fn client(ca_pem: Option<&[u8]>, insecure_skip_verify: bool) -> Result<Client, String> {
+        let mut builder = Client::builder().timeout(REQUEST_TIMEOUT);
+        if let Some(pem) = ca_pem {
+            let certs = reqwest::Certificate::from_pem_bundle(pem)
+                .map_err(|e| format!("tls.caSecretRef: {e}"))?;
+            if certs.is_empty() {
+                return Err("tls.caSecretRef holds no PEM certificate".into());
+            }
+            for cert in certs {
+                builder = builder.add_root_certificate(cert);
+            }
+        }
+        if insecure_skip_verify {
+            builder = builder.danger_accept_invalid_certs(true);
+        }
+        builder
             .build()
             .map_err(|e| format!("building the HTTP client: {e}"))
     }
@@ -89,6 +106,7 @@ impl HttpAdminGateway {
     }
 
     /// `GET /api/v1/me`: the token must be known and carry the admin role.
+    /// BatleHub answers an unknown token as `anonymous` (200), not 401.
     async fn check_token(&self) -> Result<(), GatewayError> {
         let me = front_office_api::me(&self.config)
             .await
@@ -142,6 +160,23 @@ impl AdminGateway for HttpAdminGateway {
         self.check_token().await?;
         Ok(InstanceInfo { version })
     }
+
+    /// `GET /api/v1/admin/config/warnings` (`config:read`, which the admin
+    /// role has).
+    async fn config_warnings(&self) -> Result<Vec<ConfigWarning>, GatewayError> {
+        let response = back_office_api::get_config_warnings(&self.config)
+            .await
+            .map_err(|e| client_error("/api/v1/admin/config/warnings", e))?;
+        Ok(response
+            .warnings
+            .into_iter()
+            .map(|w| ConfigWarning {
+                code: w.code,
+                path: w.path,
+                message: w.message,
+            })
+            .collect())
+    }
 }
 
 #[cfg(test)]
@@ -160,6 +195,14 @@ mod tests {
         let gw = gateway("https://example.com").unwrap();
         assert_eq!(gw.url(&["livez"]).as_str(), "https://example.com/livez");
         assert_eq!(gw.config.base_path, "https://example.com");
+    }
+
+    #[test]
+    fn a_ca_must_hold_a_certificate() {
+        assert!(HttpAdminGateway::client(None, false).is_ok());
+        assert!(HttpAdminGateway::client(None, true).is_ok());
+        assert!(HttpAdminGateway::client(Some(b"not a pem"), false).is_err());
+        assert!(HttpAdminGateway::client(Some(b""), false).is_err());
     }
 
     #[test]

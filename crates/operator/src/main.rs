@@ -8,7 +8,9 @@ use std::time::Duration;
 
 use adapters_inbound::controller::{self, Ctx, Shutdown};
 use adapters_inbound::webhook;
-use adapters_outbound::{HttpGatewayFactory, LocalInstanceDirectory, UnavailableConfigParser};
+use adapters_outbound::{
+    ClusterDependents, HttpGatewayFactory, LocalInstanceDirectory, UnavailableConfigParser,
+};
 use api::LocalInstance;
 use futures::StreamExt;
 use kube::api::Api;
@@ -129,6 +131,7 @@ async fn run(telemetry: &telemetry::Telemetry) -> anyhow::Result<()> {
         client: client.clone(),
         gateways: Arc::new(HttpGatewayFactory::new(client.clone(), instances.clone())),
         instances,
+        dependents: Arc::new(ClusterDependents),
         config: Arc::new(UnavailableConfigParser),
         recorder: Recorder::new(
             client.clone(),

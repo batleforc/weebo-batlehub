@@ -18,8 +18,10 @@ export default defineConfig({
   // generation instead of shipping a stale example.
   examples: {
     BatleHubLocalInstance: {
-      url: "https://batlehub.example.com",
-      tokenSecretRef: { name: "batlehub-admin", key: "token" },
+      external: {
+        url: "https://batlehub.example.com",
+        adminTokenSecretRef: { name: "batlehub-admin", key: "token" },
+      },
     },
   },
   // The operator reference pages (content/docs/reference/), generated from

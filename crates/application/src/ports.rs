@@ -6,6 +6,7 @@
 
 use std::sync::Arc;
 
+pub use api::local_instance::ConfigWarning;
 use domain::error::ReasonCode;
 pub use weebo_kit_application::instances::{
     BoundInstance, InstanceDirectory, InstanceError, ResolveError,
@@ -55,6 +56,9 @@ pub trait AdminGateway: Send + Sync {
     /// Whether the instance answers and accepts the operator's token; its
     /// version.
     async fn ping(&self) -> Result<InstanceInfo, GatewayError>;
+    /// What BatleHub finds legal but probably unintended in its own
+    /// configuration.
+    async fn config_warnings(&self) -> Result<Vec<ConfigWarning>, GatewayError>;
 }
 
 /// Why no gateway could be built for an instance.
@@ -99,6 +103,20 @@ pub trait GatewayFactory: Send + Sync {
     ) -> Result<Arc<dyn AdminGateway>, GatewayFactoryError>;
 }
 
+/// The CRs bound to an instance, which hold its deletion.
+#[async_trait::async_trait]
+pub trait InstanceDependents: Send + Sync {
+    /// The CRs (`Kind/namespace/name`) bound to `instance`: recorded in
+    /// their status, or — not resolved yet — naming it in `instanceRef`,
+    /// or naming nothing when `default` (it is the only instance of its
+    /// namespace, the one they would default to).
+    async fn dependents(
+        &self,
+        instance: &BoundInstance,
+        default: bool,
+    ) -> Result<Vec<String>, String>;
+}
+
 /// What BatleHub's parser says of a configuration it accepts.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ConfigVerdict {
@@ -112,8 +130,8 @@ pub enum ConfigError {
     /// The parser refuses it (`ConfigInvalid`).
     #[error("{0}")]
     Invalid(String),
-    /// No parser to ask: validating needs `batlehub-config` v1.5.0
-    /// (`merge_layers`, `validate_layers`).
+    /// No parser to ask: validating needs a `batlehub-config` newer than
+    /// v1.5.0 (`merge_layers`, `validate_layers`).
     #[error("{0}")]
     Unavailable(String),
 }
@@ -144,5 +162,97 @@ pub fn instance_reason(err: &InstanceError) -> ReasonCode {
             | ResolveError::NotShared { .. } => ReasonCode::InstanceNotAllowed,
             ResolveError::BindingChanged { .. } => ReasonCode::InstanceBindingChanged,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn neutral_errors_map_onto_reason_codes() {
+        let bound = BoundInstance::local("ns", "hub");
+        let cases = [
+            (
+                GatewayError::Unreachable("x".into()).reason(),
+                ReasonCode::InstanceUnreachable,
+            ),
+            (
+                GatewayError::Unauthorized("x".into()).reason(),
+                ReasonCode::OperatorUnauthorized,
+            ),
+            (
+                GatewayError::Remote("x".into()).reason(),
+                ReasonCode::RemoteError,
+            ),
+            (
+                GatewayFactoryError::InstanceNotFound(bound).reason(),
+                ReasonCode::InstanceNotFound,
+            ),
+            (
+                GatewayFactoryError::TokenSecret("x".into()).reason(),
+                ReasonCode::TokenSecretMissing,
+            ),
+            (
+                GatewayFactoryError::TokenNotAllowed("x".into()).reason(),
+                ReasonCode::TokenSecretNotAllowed,
+            ),
+            (
+                GatewayFactoryError::Kubernetes("x".into()).reason(),
+                ReasonCode::KubernetesApiError,
+            ),
+            (
+                GatewayFactoryError::InvalidSpec("x".into()).reason(),
+                ReasonCode::InvalidSpec,
+            ),
+        ];
+        for (got, want) in cases {
+            assert_eq!(got, want);
+        }
+    }
+
+    #[test]
+    fn resolution_errors_map_onto_the_instance_codes() {
+        let resolve = |e| instance_reason(&InstanceError::Resolve(e));
+        assert_eq!(
+            instance_reason(&InstanceError::Kubernetes("x".into())),
+            ReasonCode::KubernetesApiError
+        );
+        assert_eq!(
+            resolve(ResolveError::NoInstance),
+            ReasonCode::InstanceNotFound
+        );
+        assert_eq!(
+            resolve(ResolveError::NotFound {
+                kind: "k".into(),
+                name: "n".into()
+            }),
+            ReasonCode::InstanceNotFound
+        );
+        assert_eq!(
+            resolve(ResolveError::Ambiguous {
+                kind: "k".into(),
+                count: 2
+            }),
+            ReasonCode::InstanceAmbiguous
+        );
+        for refused in [
+            ResolveError::InvalidRef("x".into()),
+            ResolveError::OutsideScope("x".into()),
+            ResolveError::NotShared {
+                instance: "i".into(),
+                with: "w".into(),
+            },
+        ] {
+            assert_eq!(resolve(refused), ReasonCode::InstanceNotAllowed);
+        }
+        assert_eq!(
+            resolve(ResolveError::BindingChanged {
+                name: "n".into(),
+                recorded: Box::new(BoundInstance::local("ns", "a")),
+                now: Box::new(BoundInstance::local("ns", "b")),
+            }),
+            ReasonCode::InstanceBindingChanged
+        );
     }
 }

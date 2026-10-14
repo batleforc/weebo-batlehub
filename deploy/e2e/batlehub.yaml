@@ -1,0 +1,150 @@
+# A real BatleHub in the e2e cluster (from M1): the released image, a
+# Postgres beside it (data on an emptyDir), and an external
+# BatleHubLocalInstance that must end Ready. Throwaway credentials: the
+# cluster lives for one run. Never use this anywhere else.
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: team-a
+spec:
+  selector: { app: postgres }
+  ports: [{ port: 5432 }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: team-a
+spec:
+  selector: { matchLabels: { app: postgres } }
+  template:
+    metadata: { labels: { app: postgres } }
+    spec:
+      # The alpine image's postgres user.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 70
+        runAsGroup: 70
+        fsGroup: 70
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: postgres
+          image: docker.io/library/postgres:17-alpine
+          env:
+            - { name: POSTGRES_USER, value: batlehub }
+            - { name: POSTGRES_PASSWORD, value: batlehub }
+            - { name: POSTGRES_DB, value: batlehub }
+            - { name: PGDATA, value: /var/lib/postgresql/data/pgdata }
+          ports: [{ containerPort: 5432 }]
+          readinessProbe:
+            exec: { command: [pg_isready, -U, batlehub] }
+            periodSeconds: 2
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/postgresql/data }
+            - { name: run, mountPath: /var/run/postgresql }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - { name: data, emptyDir: {} }
+        - { name: run, emptyDir: {} }
+        - { name: tmp, emptyDir: {} }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: batlehub
+  namespace: team-a
+data:
+  config.toml: |
+    [server]
+    host = "0.0.0.0"
+    port = 8080
+
+    [database]
+    type = "postgresql"
+    url = "postgresql://batlehub:batlehub@postgres.team-a.svc:5432/batlehub"
+    max_connections = 5
+
+    [storage]
+    type = "filesystem"
+    path = "/var/cache/batlehub"
+
+    [[auth]]
+    type = "token"
+
+    [[auth.tokens]]
+    value = "e2e-admin-token"
+    role = "admin"
+    user_id = "weebo-batlehub-operator"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: batlehub
+  namespace: team-a
+spec:
+  selector: { app: batlehub }
+  ports: [{ port: 8080 }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: batlehub
+  namespace: team-a
+spec:
+  selector: { matchLabels: { app: batlehub } }
+  template:
+    metadata: { labels: { app: batlehub } }
+    spec:
+      # The image's distroless nonroot user.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: batlehub
+          image: ghcr.io/batlehub/batlehub:1.5.0
+          ports: [{ containerPort: 8080 }]
+          readinessProbe:
+            httpGet: { path: /livez, port: 8080 }
+            periodSeconds: 2
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: config, mountPath: /etc/batlehub }
+            - { name: cache, mountPath: /var/cache/batlehub }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - { name: config, configMap: { name: batlehub } }
+        - { name: cache, emptyDir: {} }
+        - { name: tmp, emptyDir: {} }
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: batlehub-admin
+  namespace: team-a
+  labels:
+    batlehub.weebo.io/instance-token: "true"
+stringData:
+  token: e2e-admin-token
+---
+apiVersion: batlehub.weebo.io/v1alpha1
+kind: BatleHubLocalInstance
+metadata:
+  name: ready
+  namespace: team-a
+spec:
+  external:
+    url: http://batlehub.team-a.svc:8080
+    adminTokenSecretRef:
+      name: batlehub-admin
+      key: token

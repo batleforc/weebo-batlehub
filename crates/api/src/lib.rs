@@ -19,5 +19,5 @@ pub const GROUP: &str = "batlehub.weebo.io";
 /// opt-in label of a token Secret, `batlehub.weebo.io/instance-token`.
 pub const ANNOTATIONS: weebo_kit_api::Annotations = weebo_kit_api::Annotations::new(GROUP);
 
-pub use local_instance::LocalInstance;
+pub use local_instance::{LocalInstance, LocalInstanceStatus};
 pub use status::Status;

@@ -24,3 +24,12 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 weebo-kit-adapters = { workspace = true }
 weebo-kit-runtime = { workspace = true }
+
+[dev-dependencies]
+api = { workspace = true }
+k8s-openapi = { workspace = true }
+rcgen = "0.14.10"
+reqwest = { workspace = true }
+serde_json = { workspace = true }
+testkit = { workspace = true }
+wiremock = { workspace = true }
