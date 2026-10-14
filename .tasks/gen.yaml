@@ -5,16 +5,16 @@ version: "3"
 # `task recu` / the pre-commit hook; only `spec` touches the network.
 
 vars:
-  BATLEHUB_VERSION: '{{.BATLEHUB_VERSION | default "1.4.0"}}'
+  BATLEHUB_VERSION: '{{.BATLEHUB_VERSION | default "1.5.0"}}'
 
 tasks:
   spec:
-    desc: "Download and vendor BatleHub's OpenAPI spec for a release (usage: task gen:spec [BATLEHUB_VERSION=1.4.0])"
+    desc: "Download and vendor BatleHub's OpenAPI spec for a release (usage: task gen:spec [BATLEHUB_VERSION=1.5.0])"
     cmds:
       - spec/scripts/fetch-spec.sh "{{.BATLEHUB_VERSION}}"
 
   client:
-    desc: "Regenerate crates/batlehub-client from the vendored spec + spec/patches/*.jq (usage: task gen:client [BATLEHUB_VERSION=1.4.0])"
+    desc: "Regenerate crates/batlehub-client from the vendored spec + spec/patches/*.jq (usage: task gen:client [BATLEHUB_VERSION=1.5.0])"
     sources:
       - spec/batlehub-v{{.BATLEHUB_VERSION}}.json
       - spec/patches/*.jq

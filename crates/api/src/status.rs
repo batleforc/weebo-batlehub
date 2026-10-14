@@ -1,4 +1,5 @@
-//! The status every CRD of this operator shares.
+//! The status the kinds bound to an instance share (the instance has its
+//! own, [`crate::LocalInstanceStatus`]).
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

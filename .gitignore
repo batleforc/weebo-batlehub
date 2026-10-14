@@ -15,3 +15,6 @@ deploy/charts/*/charts/
 # Local env files
 .env
 .env.local
+
+# Live-test credentials (`task batlehub:container:start`)
+.batlehub-test.env

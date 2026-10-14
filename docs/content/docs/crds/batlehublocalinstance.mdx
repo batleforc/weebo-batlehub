@@ -13,7 +13,12 @@ full: true
 
 One BatleHub instance, owned by a namespace: its token is that
 namespace's, and only the objects of that namespace use it. `Ready`
-tells whether the instance answers and accepts the token below.
+tells whether the instance answers and accepts the operator's token
+with the admin role.
+
+While objects are bound to it, its deletion waits (`InstanceInUse`);
+`batlehub.weebo.io/force-orphan: "true"` releases it and leaves them
+orphaned.
 
 ## Example
 
@@ -24,18 +29,18 @@ metadata:
   name: my-localinstance
   namespace: team-a
 spec:
-  url: https://batlehub.example.com
-  tokenSecretRef:
-    name: batlehub-admin
-    key: token
+  external:
+    url: https://batlehub.example.com
+    adminTokenSecretRef:
+      name: batlehub-admin
+      key: token
 ```
 
 ## Spec fields
 
 | Field | Type | Required | Default | Description |
 | --- | --- | --- | --- | --- |
-| `tokenSecretRef` | `object` | yes |  | The API token the operator authenticates with, in a `Secret` of this namespace labelled `batlehub.weebo.io/instance-token: "true"` (without the label the operator doesn't read it). Read on every reconcile: rotating it needs no restart. |
-| `url` | `string` | yes |  | Base URL of the BatleHub instance, e.g. `https://example.com`. |
+| `external` | `object` | yes |  | A BatleHub the operator doesn't deploy: it reaches it at `url` with an admin token, and observes it. (The mode where the operator deploys BatleHub itself comes in a later version.) |
 
 ## Build a manifest
 

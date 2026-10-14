@@ -20,7 +20,7 @@ use std::time::Duration;
 use adapters_inbound::controller::{self, Ctx, Shutdown};
 use adapters_outbound::LocalInstanceDirectory;
 use api::LocalInstance;
-use api::local_instance::{LocalInstanceSpec, LocalSecretKeyRef};
+use api::local_instance::{ExternalInstance, LocalInstanceSpec, LocalSecretKeyRef};
 use k8s_openapi::api::core::v1::Namespace;
 use k8s_openapi::api::rbac::v1::{
     ClusterRole, ClusterRoleBinding, PolicyRule, Role, RoleBinding, RoleRef, Subject,
@@ -30,7 +30,7 @@ use kube::Client;
 use kube::api::{Api, ObjectMeta, PostParams};
 use kube::runtime::events::{Recorder, Reporter};
 use testkit::envtest::EnvTestCluster;
-use testkit::{FakeConfigParser, FakeGateway, StaticGatewayFactory};
+use testkit::{FakeConfigParser, FakeDependents, FakeGateway, StaticGatewayFactory};
 use weebo_kit_runtime::{Health, WatchScope};
 
 const TIMEOUT: Duration = Duration::from_secs(15);
@@ -172,10 +172,13 @@ fn local_instance(name: &str) -> LocalInstance {
     LocalInstance::new(
         name,
         LocalInstanceSpec {
-            url: "https://batlehub.example".into(),
-            token_secret_ref: LocalSecretKeyRef {
-                name: "token".into(),
-                key: "token".into(),
+            external: ExternalInstance {
+                url: "https://batlehub.example".into(),
+                admin_token_secret_ref: LocalSecretKeyRef {
+                    name: "token".into(),
+                    key: "token".into(),
+                },
+                tls: Default::default(),
             },
         },
     )
@@ -193,6 +196,7 @@ fn ctx(operator: &Client, scope: WatchScope) -> (Arc<Ctx>, Arc<Health>) {
         client: operator.clone(),
         gateways: Arc::new(StaticGatewayFactory::new(Arc::new(FakeGateway::default()))),
         instances,
+        dependents: Arc::new(FakeDependents::default()),
         config: Arc::new(FakeConfigParser),
         recorder: Recorder::new(
             operator.clone(),

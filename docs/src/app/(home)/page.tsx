@@ -23,8 +23,9 @@ metadata:
   name: main
   namespace: team-a
 spec:
-  url: https://batlehub.example.com
-  tokenSecretRef: { name: batlehub-admin, key: token }`,
+  external:
+    url: https://batlehub.example.com
+    adminTokenSecretRef: { name: batlehub-admin, key: token }`,
       }}
       features={[
         {

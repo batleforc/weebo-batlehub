@@ -6,5 +6,5 @@ pub mod envtest;
 pub mod polling;
 pub mod static_gateway_factory;
 
-pub use application::test_support::{FakeConfigParser, FakeGateway};
+pub use application::test_support::{FakeConfigParser, FakeDependents, FakeGateway};
 pub use static_gateway_factory::StaticGatewayFactory;
