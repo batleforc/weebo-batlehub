@@ -380,17 +380,19 @@ reason_is managed Reconciled
 [ "$(proxy_pods)" = "$first_pod" ] || fail "managed: the pod changed on a hot reload"
 token="$(kubectl -n team-a get secret managed-operator-token -o jsonpath='{.data.token}' | base64 -d)"
 ip="$(kubectl -n team-a get pod "$first_pod" -o jsonpath='{.status.podIP}')"
-# `kubectl run -i` may lose a short output: read again a few times.
-# The status code and curl's own errors are kept: a failure says why.
+# One long-lived curl pod, called with `kubectl exec`: `kubectl run -i
+# --rm` may attach after a short command exited and print nothing.
+kubectl -n team-a run e2e-probe --restart=Never --image=docker.io/curlimages/curl:8.17.0 \
+  --command -- sleep 3600 >/dev/null
+kubectl -n team-a wait pod/e2e-probe --for=condition=Ready --timeout="$WAIT" >/dev/null
 for _ in $(seq 1 12); do
-  health="$(kubectl -n team-a run "health-$RANDOM" --rm -i --restart=Never --quiet \
-    --image=docker.io/curlimages/curl:8.17.0 -- \
-    -sS -w '\nHTTP %{http_code}' -H "Authorization: Bearer $token" \
-    "http://$ip:8080/api/v1/admin/health" 2>&1 || true)"
+  health="$(kubectl -n team-a exec e2e-probe -- curl -sS -w '\nHTTP %{http_code}' \
+    -H "Authorization: Bearer $token" "http://$ip:8080/api/v1/admin/health" 2>&1 || true)"
   printf '%s' "$health" | grep -q '"registry":"npm-managed"' && break
   echo "managed: /api/v1/admin/health on $ip: ${health:-<no output>}" >&2
   sleep 5
 done
+kubectl -n team-a delete pod e2e-probe --wait=false >/dev/null
 printf '%s' "$health" | grep -q '"registry":"npm-managed"' \
   || fail "managed: the registry isn't served on $ip: ${health:-<no output>}"
 # A key read at startup: the pods roll.
