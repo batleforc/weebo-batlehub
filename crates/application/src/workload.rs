@@ -105,8 +105,39 @@ pub struct WorkloadInput<'a> {
     /// The worker template's: every change of the configuration (workers
     /// have no reload API).
     pub config_hash: &'a str,
-    /// The operator's namespace, let in by the `NetworkPolicy`.
-    pub operator_namespace: Option<&'a str>,
+    /// The operator's pods, let in by the `NetworkPolicy`.
+    pub operator: &'a OperatorPod,
+}
+
+/// The operator's own pods, as the chart describes them: what a managed
+/// instance's `NetworkPolicy` lets in to keep the admin API reachable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OperatorPod {
+    /// Its namespace (`POD_NAMESPACE`); `None`: the instance's own.
+    pub namespace: Option<String>,
+    /// Its selector labels (the kit's `WEEBO_OPERATOR_POD_LABELS`, the
+    /// chart's `nameOverride` applied).
+    pub labels: BTreeMap<String, String>,
+}
+
+impl OperatorPod {
+    /// The chart's selector label when its `nameOverride` is unset: what
+    /// is let in when the operator runs without `WEEBO_OPERATOR_POD_LABELS`.
+    pub fn fallback_labels() -> BTreeMap<String, String> {
+        BTreeMap::from([(
+            "app.kubernetes.io/name".to_string(),
+            "weebo-batlehub".to_string(),
+        )])
+    }
+}
+
+impl Default for OperatorPod {
+    fn default() -> Self {
+        Self {
+            namespace: None,
+            labels: Self::fallback_labels(),
+        }
+    }
 }
 
 /// The update strategy of the proxy `Deployment`, and why.
@@ -709,18 +740,15 @@ fn network_policy(
     if !from.is_empty() {
         // The operator keeps its access to the admin API.
         from.push(NetworkPolicyPeer {
-            namespace_selector: input.operator_namespace.map(|ns| LabelSelector {
+            namespace_selector: input.operator.namespace.as_ref().map(|ns| LabelSelector {
                 match_labels: Some(BTreeMap::from([(
                     "kubernetes.io/metadata.name".into(),
-                    ns.to_string(),
+                    ns.clone(),
                 )])),
                 ..Default::default()
             }),
             pod_selector: Some(LabelSelector {
-                match_labels: Some(BTreeMap::from([(
-                    "app.kubernetes.io/name".into(),
-                    "weebo-batlehub".into(),
-                )])),
+                match_labels: Some(input.operator.labels.clone()),
                 ..Default::default()
             }),
             ..Default::default()
@@ -813,9 +841,17 @@ mod tests {
             facts,
             restart_hash: "r1",
             config_hash: "c1",
-            operator_namespace: Some("weebo-batlehub-system"),
+            operator: &OPERATOR,
         }
     }
+
+    static OPERATOR: std::sync::LazyLock<OperatorPod> = std::sync::LazyLock::new(|| OperatorPod {
+        namespace: Some("weebo-batlehub-system".into()),
+        labels: BTreeMap::from([
+            ("app.kubernetes.io/name".into(), "batlehub-ops".into()),
+            ("app.kubernetes.io/instance".into(), "ops".into()),
+        ]),
+    });
 
     fn kinds(objects: &[OwnedObject]) -> Vec<String> {
         objects
@@ -940,6 +976,21 @@ mod tests {
         assert_eq!(ingress.as_array().unwrap().len(), 2);
         let from = &objects[9].manifest["spec"]["ingress"][0]["from"];
         assert_eq!(from.as_array().unwrap().len(), 2, "{from}");
+        // The operator's pods by the chart's selector labels (nameOverride
+        // applied), in its namespace.
+        assert_eq!(
+            from[1],
+            json!({
+                "namespaceSelector": {"matchLabels": {
+                    "kubernetes.io/metadata.name": "weebo-batlehub-system"
+                }},
+                "podSelector": {"matchLabels": {
+                    "app.kubernetes.io/instance": "ops",
+                    "app.kubernetes.io/name": "batlehub-ops"
+                }},
+            }),
+            "{from}"
+        );
     }
 
     #[test]

@@ -1234,7 +1234,7 @@
               "type": "array"
             },
             "ingressFrom": {
-              "description": "Who may reach the HTTP port; empty: anyone. The operator's pods\nare added.",
+              "description": "Who may reach the HTTP port; empty: anyone. The operator's pods\n(its chart's selector labels, in its namespace) are added.",
               "items": {
                 "type": "object"
               },

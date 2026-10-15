@@ -5,14 +5,16 @@
 //! control plane authorizes with RBAC: a call outside the granted scope is
 //! refused.
 //!
-//! `watch.namespace` (+ a label selector): the kinds in a Role of the
-//! watched namespace; Secrets and Events in the ClusterRole
-//! (`params.clusterSecrets: true`). BatleHub has no cluster-scoped kind,
-//! and `watch.clusterKinds: false` (all in Roles) refuses managed mode
-//! (spec §7.1).
+//! `watch.namespace` (+ a label selector): the kinds and the chart's
+//! namespaced rules (`params.watchRules`) in a Role of the watched
+//! namespace; Secrets and Events in the ClusterRole too
+//! (`params.clusterSecrets: true`). BatleHub has no cluster-scoped kind;
+//! `watch.clusterKinds: false` (all in Roles) renders no ClusterRole and
+//! keeps managed mode (spec §7.1).
 //!
 //! The rules below mirror the library chart's `clusterRole` and
-//! `watchRole` (`weebo-operator.kindRules`): keep them in step.
+//! `watchRole` (`weebo-operator.kindRules`) and this chart's
+//! `operator.namespacedRules`: keep them in step.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -55,20 +57,46 @@ fn kind_rules(kinds: &[&str]) -> Vec<PolicyRule> {
     ]
 }
 
-/// The kit's ClusterRole (Secrets, Events) and the chart's
-/// `params.clusterRules`, which stay cluster-wide with `watch.namespace`.
+/// The chart's `operator.namespacedRules`: what the operator reads and
+/// writes in the watched namespace (`params.watchRules`, in the watch
+/// Role, with `watch.namespace`).
+fn namespaced_rules() -> Vec<PolicyRule> {
+    let rule = |group: &str, resources: &[&str], verbs: &[&str]| PolicyRule {
+        api_groups: Some(vec![group.into()]),
+        resources: Some(resources.iter().map(|r| r.to_string()).collect()),
+        verbs: verbs.iter().map(|v| v.to_string()).collect(),
+        ..Default::default()
+    };
+    let write = &["get", "create", "patch", "delete"];
+    vec![
+        rule("", &["configmaps"], &["get", "list", "watch"]),
+        rule("", &["pods"], &["list"]),
+        rule("apps", &["replicasets", "statefulsets"], &["get"]),
+        rule(
+            "apps",
+            &["deployments"],
+            &["get", "list", "watch", "create", "patch", "delete"],
+        ),
+        rule(
+            "",
+            &["services", "serviceaccounts", "persistentvolumeclaims"],
+            write,
+        ),
+        rule("policy", &["poddisruptionbudgets"], write),
+        rule(
+            "networking.k8s.io",
+            &["ingresses", "networkpolicies"],
+            write,
+        ),
+        rule("autoscaling", &["horizontalpodautoscalers"], write),
+        rule(GROUP, &["batlehubmaintenances"], &["delete"]),
+    ]
+}
+
+/// The kit's Secrets and Events rules: in its ClusterRole
+/// (`params.clusterSecrets: true`) and in the watch Role.
 fn secrets_and_events() -> Vec<PolicyRule> {
     vec![
-        PolicyRule {
-            api_groups: Some(vec!["".into()]),
-            resources: Some(vec![
-                "configmaps".into(),
-                "pods".into(),
-                "namespaces".into(),
-            ]),
-            verbs: ["get", "list", "watch"].map(String::from).to_vec(),
-            ..Default::default()
-        },
         PolicyRule {
             api_groups: Some(vec!["".into()]),
             resources: Some(vec!["secrets".into()]),
@@ -111,8 +139,9 @@ fn role_ref(kind: &str, name: &str) -> RoleRef {
     }
 }
 
-/// What the chart renders with `watch.namespace: <watched>`.
-async fn grant_rbac(admin: &Client, watched: &str) {
+/// What the chart renders with `watch.namespace: <watched>`; without
+/// `cluster_kinds` (`watch.clusterKinds: false`), no ClusterRole at all.
+async fn grant_rbac(admin: &Client, watched: &str, cluster_kinds: bool) {
     let pp = PostParams::default();
     for ns in [OPERATOR_NS, watched, "elsewhere"] {
         Api::<Namespace>::all(admin.clone())
@@ -126,34 +155,39 @@ async fn grant_rbac(admin: &Client, watched: &str) {
             .await
             .unwrap();
     }
-    Api::<ClusterRole>::all(admin.clone())
-        .create(
-            &pp,
-            &ClusterRole {
-                metadata: meta("operator", None),
-                rules: Some(secrets_and_events()),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-    Api::<ClusterRoleBinding>::all(admin.clone())
-        .create(
-            &pp,
-            &ClusterRoleBinding {
-                metadata: meta("operator", None),
-                role_ref: role_ref("ClusterRole", "operator"),
-                subjects: Some(subject()),
-            },
-        )
-        .await
-        .unwrap();
+    if cluster_kinds {
+        Api::<ClusterRole>::all(admin.clone())
+            .create(
+                &pp,
+                &ClusterRole {
+                    metadata: meta("operator", None),
+                    rules: Some(secrets_and_events()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        Api::<ClusterRoleBinding>::all(admin.clone())
+            .create(
+                &pp,
+                &ClusterRoleBinding {
+                    metadata: meta("operator", None),
+                    role_ref: role_ref("ClusterRole", "operator"),
+                    subjects: Some(subject()),
+                },
+            )
+            .await
+            .unwrap();
+    }
+    let mut rules = kind_rules(NAMESPACED_KINDS);
+    rules.extend(secrets_and_events());
+    rules.extend(namespaced_rules());
     Api::<Role>::namespaced(admin.clone(), watched)
         .create(
             &pp,
             &Role {
                 metadata: meta("operator-watch", Some(watched)),
-                rules: Some(kind_rules(NAMESPACED_KINDS)),
+                rules: Some(rules),
             },
         )
         .await
@@ -207,6 +241,20 @@ fn local_instance(name: &str) -> LocalInstance {
 /// The operator's context, as `operator::main` builds it for `scope`, on
 /// the operator's own (RBAC-limited) client.
 fn ctx(operator: &Client, scope: WatchScope) -> (Arc<Ctx>, Arc<Health>) {
+    ctx_with(
+        operator,
+        scope,
+        Arc::new(application::test_support::FakeWorkloads::default()),
+    )
+}
+
+/// [`ctx`] with `workloads` (the real `KubeWorkloads`, on the operator's
+/// client, to apply a managed instance's objects with the chart's RBAC).
+fn ctx_with(
+    operator: &Client,
+    scope: WatchScope,
+    workloads: Arc<dyn application::ports::Workloads>,
+) -> (Arc<Ctx>, Arc<Health>) {
     let health = Arc::new(Health::default());
     let instances = Arc::new(LocalInstanceDirectory::new(operator.clone()).with_scope(
         scope.watched_namespace().map(String::from),
@@ -218,8 +266,8 @@ fn ctx(operator: &Client, scope: WatchScope) -> (Arc<Ctx>, Arc<Health>) {
         instances: instances.clone(),
         registries: instances,
         dependents: Arc::new(FakeDependents::default()),
-        workloads: Arc::new(application::test_support::FakeWorkloads::default()),
-        operator_namespace: None,
+        workloads,
+        operator: Default::default(),
         token_review_role: None,
         config: Arc::new(FakeConfigParser),
         sources: Arc::new(FakeSources::default()),
@@ -255,7 +303,7 @@ async fn a_namespaced_scope_runs_on_namespaced_rbac_and_sees_only_its_instances(
     let _ = tracing_subscriber::fmt().with_test_writer().try_init();
     let cluster = testkit::envtest::start().await;
     let admin = cluster.client();
-    grant_rbac(&admin, "team-a").await;
+    grant_rbac(&admin, "team-a", true).await;
     let operator = operator_client(&cluster).await;
 
     // The RBAC is as narrow as intended: no cluster-wide list of the kind.
@@ -313,36 +361,60 @@ async fn a_namespaced_scope_runs_on_namespaced_rbac_and_sees_only_its_instances(
     assert_eq!(health.live(), Ok(()));
 }
 
-/// Fully namespaced (`watch.clusterKinds: false`): no ClusterRole, so no
-/// rule a managed instance's objects need. A managed instance says so on
-/// `Ready` instead of looping on forbidden writes, and its deletion
-/// doesn't wait on a cluster-scoped binding it can't read.
+/// Fully namespaced (`watch.clusterKinds: false`): no ClusterRole at all,
+/// the managed instance's rules in the watch Role (`params.watchRules`).
+/// Its objects are applied and its Deployments and ConfigMaps watched
+/// with that Role alone; its deletion reads no cluster-scoped binding
+/// (no TokenReview role in this mode).
 #[tokio::test]
-async fn a_managed_instance_without_cluster_rules_is_refused_and_still_deletable() {
+async fn a_managed_instance_runs_on_the_watch_role_alone_and_is_deletable() {
+    use k8s_openapi::api::apps::v1::Deployment;
+
     let _ = tracing_subscriber::fmt().with_test_writer().try_init();
     let cluster = testkit::envtest::start().await;
     let admin = cluster.client();
-    grant_rbac(&admin, "team-a").await;
+    grant_rbac(&admin, "team-a", false).await;
     let operator = operator_client(&cluster).await;
     let scope = WatchScope::namespace("team-a")
         .without_cluster_kinds()
         .unwrap();
-    let (ctx, _) = ctx(&operator, scope);
+    let (ctx, health) = ctx_with(
+        &operator,
+        scope,
+        Arc::new(adapters_outbound::KubeWorkloads::new(operator.clone())),
+    );
     tokio::spawn(controller::local_instance::run(operator.clone(), ctx));
 
     let mut managed = local_instance("managed");
     managed.spec.external = None;
     managed.spec.managed = Some(Default::default());
+    managed.spec.config = serde_json::json!({
+        "server": {"host": "0.0.0.0", "port": 8080},
+        "storage": {"type": "filesystem", "path": "/var/cache/batlehub"},
+    });
     let team_a: Api<LocalInstance> = Api::namespaced(admin.clone(), "team-a");
     team_a
         .create(&PostParams::default(), &managed)
         .await
         .unwrap();
-    let state = testkit::polling::wait_for(&team_a, "managed", TIMEOUT, POLL, |i| {
-        ready(i).filter(|(_, reason)| reason == "InvalidSpec")
-    })
-    .await;
-    assert_eq!(state.0, "False");
+    // Applied by the operator's own account: the Role's rules suffice.
+    let deployments: Api<Deployment> = Api::namespaced(admin.clone(), "team-a");
+    let deadline = tokio::time::Instant::now() + TIMEOUT;
+    while deployments.get_opt("managed").await.unwrap().is_none() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the Deployment was never applied: {:?}",
+            team_a.get("managed").await.unwrap().status
+        );
+        tokio::time::sleep(POLL).await;
+    }
+    let state = testkit::polling::wait_for(&team_a, "managed", TIMEOUT, POLL, ready).await;
+    assert!(
+        !["InvalidSpec", "KubernetesApiError"].contains(&state.1.as_str()),
+        "{state:?}"
+    );
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(health.live(), Ok(()), "a watch failed on the Role alone");
 
     team_a.delete("managed", &Default::default()).await.unwrap();
     let deadline = tokio::time::Instant::now() + TIMEOUT;
@@ -381,7 +453,7 @@ async fn the_token_review_binding_is_shared_and_edited_with_the_chart_rules_only
     let _ = tracing_subscriber::fmt().with_test_writer().try_init();
     let cluster = testkit::envtest::start().await;
     let admin = cluster.client();
-    grant_rbac(&admin, "team-a").await;
+    grant_rbac(&admin, "team-a", true).await;
     const ROLE: &str = "weebo-batlehub-tokenreview";
     let pp = PostParams::default();
     Api::<ClusterRole>::all(admin.clone())

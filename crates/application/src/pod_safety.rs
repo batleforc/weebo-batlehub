@@ -23,7 +23,7 @@ use domain::error::ReasonCode;
 use k8s_openapi::api::core::v1::{PodSpec, SecurityContext};
 
 use crate::ports::OwnedObject;
-use crate::workload::{DocumentFacts, WorkloadInput, objects};
+use crate::workload::{DocumentFacts, OperatorPod, WorkloadInput, objects};
 
 /// How many problems a message names.
 const SHOWN: usize = 5;
@@ -294,7 +294,7 @@ pub fn sketch(name: &str, namespace: &str, spec: &ManagedInstance) -> Vec<OwnedO
         facts: &facts,
         restart_hash: "",
         config_hash: "",
-        operator_namespace: None,
+        operator: &OperatorPod::default(),
     })
 }
 

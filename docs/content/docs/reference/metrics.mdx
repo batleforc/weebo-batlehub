@@ -19,6 +19,7 @@ description: What the operator exports, the probes it answers, and the settings 
 | `weebo_batlehub_reconcile_total` | counter | `kind`, `result` (`success`/`error`: the severity of the `Ready` reason), `reason` (the `Ready` reason code) | Reconcile runs |
 | `weebo_batlehub_reconcile_duration_seconds` | histogram | `kind` | Reconcile run duration; buckets 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120 s |
 | `weebo_batlehub_webhook_decisions_total` | counter | `kind`, `result` (`allow`/`deny`) | Admission webhook decisions |
+| `weebo_batlehub_leader` | gauge (0/1) | none | `1` on the replica holding the leader lease |
 | `weebo_batlehub_instance_ready` | gauge | `instance_namespace`, `instance_name` | 1 when the BatleHubLocalInstance is `Ready`, 0 otherwise; gone with the instance |
 | `weebo_batlehub_instance_restart_required` | gauge | `instance_namespace`, `instance_name` | Keys waiting for a restart (`status.restartKeys`): `reload.restart: Never`, or a restart key held back on an external instance |
 | `weebo_batlehub_instance_config_warnings` | gauge | `instance_namespace`, `instance_name`, `code` | BatleHub's warnings on its configuration (`status.warnings`), by code; a warning that goes takes its series with it |
@@ -39,6 +40,9 @@ sum by (reason) (rate(weebo_batlehub_reconcile_total{result="error"}[15m]))
 
 # Reconcile p95, per kind
 histogram_quantile(0.95, sum by (kind, le) (rate(weebo_batlehub_reconcile_duration_seconds_bucket[5m])))
+
+# Nothing reconciles: no replica holds the lease
+sum(weebo_batlehub_leader) < 1
 ```
 
 ## Probes
@@ -63,5 +67,6 @@ Served on every replica, on the admission webhook's HTTPS port
 | Requeue | 300 s / 30 s | Next reconcile after a success (drift check) / after a failure, ±20 % so CRs don't move in lockstep. A failure only a change of the CR can clear waits the long delay: the change triggers a reconcile by itself |
 | Status patch | 3 retries | A status update the apiserver couldn't take (unavailable, 429, 5xx) is retried before the reconcile fails |
 | `LEASE_NAME`, `POD_NAMESPACE` | | The leader lease. Only its holder reconciles; it lasts 15 s, renewed every 5 s, and a leader that may have lost it exits (its pod restarts as a standby) |
+| `WEEBO_OPERATOR_POD_LABELS` | set by the chart | The operator pod's own selector labels (a JSON object, `nameOverride` applied): what a NetworkPolicy the operator writes selects to let the operator in, when it writes any |
 | `WEEBO_SHUTDOWN_DRAIN_SECONDS` | 5 | After SIGTERM, how long the webhook keeps answering while endpoints drain; in-flight requests then get 10 s |
 | `WEBHOOK_TLS_CERT_FILE`, `WEBHOOK_TLS_KEY_FILE` | `/etc/webhook/certs/tls.{crt,key}` | The webhook's certificate, re-read every 60 s: a rotation needs no restart |

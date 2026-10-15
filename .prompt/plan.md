@@ -25,6 +25,13 @@ batlehub, D8 révisée) et sur laquelle tout est épinglé depuis le M2 ; kit
 
 ### Historique
 
+- **v2.8 — kit v0.16.0 (2026-10-16)** : les constats de la revue qui
+  attendaient le kit sont faits (Constats « Kit v0.16.0 ») : liaison
+  TokenReview retirée même en `force-orphan`, status des écritures de
+  gouvernance enregistré avec reprise, règles namespacées dans le Role
+  `-watch` (`params.watchRules`) — le mode `clusterKinds: false` accepte
+  les instances managed —, NetworkPolicy managed sur les labels du pod de
+  l'opérateur, `spawn_reflector`/`register_leader_gauge` du kit.
 - **v2.7 — revue du 2026-10-15 (après la 0.1.0)** : corrections (Constats
   « Revue du 2026-10-15, après la 0.1.0 ») ; D10 (pods d'une instance
   managed restreints) et D11 (tier `Partial` : rechargé et signalé,
@@ -206,7 +213,7 @@ du 2026-10-14, ont été acceptées le même jour.
 | # | Décision (revue du 2026-10-14) | Retenu |
 | --- | --- | --- |
 | D5 | Nommer le kind namespacé `BatleHubLocalInstance` (rôle `LocalInstance` du kit) ? | **Acceptée** (2026-10-14) : même convention que `ForgejoLocalInstance`/`AuthentikLocalInstance` et le gabarit ; `InstanceRef`, `BoundInstance`, `read_local_instance_token`, `LocalSecretKeyRef`, `LocalTlsOptions` et les codes du gabarit servent tels quels (§2.8). Un `BatleHubInstance` cluster-scoped pourra venir plus tard (hors v1alpha1). |
-| D6 | Modes `watch.namespace` / `clusterKinds: false` du chart du kit | **`watch.namespace` supporté par refus** (§7.1) : pas de registry cross-namespace, pas de ClusterRoleBinding TokenReview, pas de watch des Namespaces. **`clusterKinds: false` à refuser par le chart** tant que le kit n'a pas de règles propres pour le Role `-watch` (§11.2) — **pas faisable** (le kit fait un rendu de fumée de ce mode, Constats du M0 et du M2) : le mode est documenté comme partiel (values, guide d'installation). `clusterSecrets: true` posé explicitement. |
+| D6 | Modes `watch.namespace` / `clusterKinds: false` du chart du kit | **`watch.namespace` supporté par refus** (§7.1) : pas de registry cross-namespace, pas de ClusterRoleBinding TokenReview, pas de watch des Namespaces. **`clusterKinds: false` à refuser par le chart** tant que le kit n'a pas de règles propres pour le Role `-watch` (§11.2) — **pas faisable** (le kit fait un rendu de fumée de ce mode, Constats du M0 et du M2) : le mode est documenté comme partiel (values, guide d'installation). **Révisé (kit v0.16.0, 2026-10-16)** : `params.watchRules` porte les règles namespacées dans le Role `-watch`, `clusterKinds: false` est supporté, mode managed compris. `clusterSecrets: true` posé explicitement. |
 | D7 | Première release | **0.1.0-alpha.1 au M2** (external + `manageConfig`), pour éprouver `publish.yml`, la porte e2e et le test d'upgrade tôt ; 0.1.0 au M5. |
 | D8 | Version de batlehub pour D4 | ~~v1.5.0~~ (ne les portait pas) → **v1.6.0** (révisée le 2026-10-15) : `merge_layers` → document canonique, `validate_layers(layers, &dyn Fn)`, `reload_keys::{RELOAD_KEYS, classify}` (RFC 0037 de batlehub) ; `batlehub-config` épinglé sur ce tag ; `task gen:bump` déplace ensemble spec, client, tag de `batlehub-config` et images des tests. |
 | D9 | Watch des Secrets en métadonnées (6.7) | **Le retirer** : `list/watch` sur `secrets` donne en RBAC le droit de lire tous les Secrets (RBAC ne sait pas limiter aux métadonnées), ce que le kit n'accorde jamais. Les Secrets sont relus à chaque reconcile comme dans forgejo/authentik, et leur hash entre dans `configHash` : une rotation est vue à la resynchronisation (≤ 300 s ±20 %), ou tout de suite si le CR change. Le watch des ConfigMaps en métadonnées reste. |
@@ -1566,7 +1573,9 @@ répondent en standby ; jauge `weebo_batlehub_leader` ; drain
 ### 6.10 Nettoyage
 
 - Objets possédés : owner references (6.5).
-- Sujet du ClusterRoleBinding TokenReview : retiré par le finalizer (6.5) ;
+- Sujet du ClusterRoleBinding TokenReview : retiré à chaque suppression
+  de l'instance, `force-orphan` compris (hook `always` de
+  `controller::finalize_with` du kit, après la libération de l'instance) ;
   le binding lui-même part avec le ClusterRole du chart.
 - Instance : finalizer, `InstanceInUse` tant que des CR y sont liés
   (4.1).
@@ -1612,7 +1621,10 @@ répondent en standby ; jauge `weebo_batlehub_leader` ; drain
 Celles du kit (`WEEBO_METRICS_ADDR`, `LOG_FORMAT`,
 `OTEL_EXPORTER_OTLP_ENDPOINT`, `WEEBO_RECONCILE_CONCURRENCY`,
 `POD_NAMESPACE`, `LEASE_NAME`, `WEBHOOK_PORT`, `WEBHOOK_TLS_*`,
-`WEEBO_SHUTDOWN_DRAIN_SECONDS`), posées par le chart du kit. Propres
+`WEEBO_SHUTDOWN_DRAIN_SECONDS`, `WEEBO_OPERATOR_POD_LABELS` — labels de
+sélection du pod de l'opérateur, que la NetworkPolicy d'une instance
+managed laisse entrer ; absente, `app.kubernetes.io/name: weebo-batlehub`
+et un warning au démarrage ; illisible, arrêt), posées par le chart du kit. Propres
 (`params.env`) :
 
 | Variable | Rôle |
@@ -1634,13 +1646,17 @@ Une valeur illisible arrête le démarrage.
   vers les instances (`networkPolicy.egress.batlehub` : pods batlehub du
   cluster sur leur port HTTP, plus les URLs external), `clusterRules`,
   `alerts`.
-- `clusterRules` : `apps/deployments`, `services`, `configmaps`
-  (lecture), `persistentvolumeclaims`, `serviceaccounts`,
-  `networking.k8s.io/ingresses`, `networkpolicies`,
+- Règles namespacées (`operator.namespacedRules`) : `apps/deployments`,
+  `services`, `configmaps` (lecture), `persistentvolumeclaims`,
+  `serviceaccounts`, `networking.k8s.io/ingresses`, `networkpolicies`,
   `policy/poddisruptionbudgets`, `autoscaling/horizontalpodautoscalers`
   en `get/list/watch/create/patch/delete` ; `pods` en `get/list/watch` ;
   `apps/replicasets` et `apps/statefulsets` en `get` (contrôleur d'un pod
-  vérifié avant de lui envoyer le token, 6.6) ;
+  vérifié avant de lui envoyer le token, 6.6) ; `delete` des
+  `batlehubmaintenances`. En `clusterRules` sans `watch.namespace`, en
+  `watchRules` (Role `-watch` du namespace, kit v0.16.0) avec : jamais
+  les deux. `task lint:helm` vérifie où elles atterrissent dans chaque mode.
+- `clusterRules`, cluster-wide seulement : les règles namespacées,
   `namespaces` en `get/list/watch` ; avec `tokenReview.enabled` en mode
   cluster seulement, `clusterrolebindings` en `create` et en `get/patch`
   sur le seul `<release>-tokenreview` (`resourceNames`, jamais `delete`),
@@ -1686,8 +1702,8 @@ cluster-scoped ; ce qu'il fait dans chaque mode :
 | Mode | Comportement |
 | --- | --- |
 | cluster (défaut) | Tout ce document. |
-| `watch.namespace` | Les 5 kinds passent dans le Role `-watch` du namespace. Refus : pas de registry cross-namespace (`RegistrySelectorIgnored` sur une instance qui demande `All`/`Selector`), pas de watch des Namespaces, pas de ClusterRoleBinding TokenReview (ni ClusterRole, ni variable, ni règle : `autoTokenReview` demandé donne l'advisory `TokenReviewUnavailable`, l'utilisateur lie TokenReview lui-même ; même chose avec `tokenReview.enabled: false`). Limite connue : `params.clusterRules` (Deployments, Services, PVC… du mode managed) restent dans le ClusterRole, le chart du kit n'ayant pas de règles propres pour le Role `-watch` (§11.2) : le mode limite ce que l'opérateur **réconcilie**, pas tout ce qu'il **peut** écrire. |
-| `watch.clusterKinds: false` (tout en Roles) | **Partiel**, à refuser par le chart dès que possible : sans ClusterRole, `params.clusterRules` disparaissent — couches ConfigMap, `configFrom` ConfigMap et `podSelector` échouent (`KubernetesApiError`). Le mode managed ne pourrait rien écrire : **refusé par une condition** (`Ready: False`, `InvalidSpec`, revue du 2026-10-15 bis ; pas de webhook dans ce mode, le chart du kit n'en rend pas), sans TokenReview (rien à lier ni délier : la suppression ne lit aucun binding). Le `fail` dans `_params.tpl` casse le rendu de fumée du kit : il attend `params.watchRules` (§11.2), qui lèvera aussi ce refus. Documenté comme tel (values, guide d'installation). |
+| `watch.namespace` | Les 5 kinds et les règles namespacées (`params.watchRules`) passent dans le Role `-watch` du namespace : rien d'écrit ailleurs. Refus : pas de registry cross-namespace (`RegistrySelectorIgnored` sur une instance qui demande `All`/`Selector`), pas de watch des Namespaces, pas de ClusterRoleBinding TokenReview (ni ClusterRole, ni variable, ni règle : `autoTokenReview` demandé donne l'advisory `TokenReviewUnavailable`, l'utilisateur lie TokenReview lui-même ; même chose avec `tokenReview.enabled: false`). Le ClusterRole ne garde que ce que le kit y met (Secrets, Events). |
+| `watch.clusterKinds: false` (tout en Roles) | Comme `watch.namespace`, sans ClusterRole : le Role `-watch` porte tout (kit v0.16.0, `params.watchRules`) — couches ConfigMap, `podSelector`, mode managed. Ni TokenReview ni lecture d'un binding (la suppression n'en lit aucun). Le refus `InvalidSpec` du mode managed (revue du 2026-10-15) est levé ; envtest sur le seul Role. |
 | `watch.labelSelector` | Supporté tel quel (kit) : `LeavesWatchScope` au webhook `/scope`. Pas une frontière de sécurité (RBAC ne filtre pas par label). |
 
 **Avertissement de sécurité** (dans le `NOTES.txt` et la doc) : un
@@ -2341,8 +2357,8 @@ branche `fix/review-2026-10-15` (kit v0.15.1 inchangé).
   interdit. `WEEBO_BATLEHUB_TOKENREVIEW_CLUSTERROLE` n'est posée que si le
   chart rend le ClusterRole.
 - **`watch.clusterKinds: false`** : une instance managed est refusée
-  (`InvalidSpec`) au lieu d'échouer en boucle en `KubernetesApiError` ; à
-  lever avec `params.watchRules` du kit (prochaine release du kit).
+  (`InvalidSpec`) au lieu d'échouer en boucle en `KubernetesApiError` ;
+  levé avec `params.watchRules` du kit (Constats « Kit v0.16.0 »).
 - **Métriques du §6.11 livrées** : jauges d'instance (labels
   `instance_namespace`/`instance_name`, séries retirées avec le warning
   ou l'instance), `admin_requests_total` par décorateur (`endpoint` =
@@ -2380,6 +2396,40 @@ branche `fix/review-2026-10-15` (kit v0.15.1 inchangé).
   cluster (`admin_gateway_contract`, `in_sync`, `cli`) et doctests ;
   l'envtest reste à `test:integration`.
 
+### Kit v0.16.0 (2026-10-16)
+
+Montée sur le kit v0.16.0 (`task kit:sync`, `@weebo/operator-docs`
+compris) et constats de la revue qui l'attendaient :
+
+- **TokenReview et `force-orphan`** : le retrait du sujet du
+  ClusterRoleBinding était dans le cleanup, que `force-orphan` saute :
+  le ServiceAccount d'une instance forcée restait lié. Il passe dans le
+  hook `always` de `controller::finalize_with` (avec le retrait des
+  séries de métriques), après la libération de l'instance ou à sa
+  place ; sans rôle TokenReview, toujours rien lu (6.10).
+- **Status des écritures de gouvernance** : `StatusLedger::record`
+  passe par `status::record` du kit — une erreur transitoire de
+  l'apiserver après une écriture réussie dans BatleHub est rejouée sur
+  place au lieu de laisser le CR en désaccord avec ce qu'il a écrit.
+- **RBAC** : les règles namespacées (`operator.namespacedRules`) vont
+  soit en `clusterRules` (cluster-wide), soit en `params.watchRules`
+  (Role `-watch`, `watch.namespace`) : limité à un namespace,
+  l'opérateur ne peut plus écrire de Deployment ailleurs. Le refus des
+  instances managed en `clusterKinds: false` est levé, les watches
+  Deployment et ConfigMap tournent dans ce mode ; envtest
+  (`watch_scope`) sur le seul Role avec le vrai `KubeWorkloads`, et
+  vérifications de rendu dans `task lint:helm` (7, 7.1).
+- **NetworkPolicy managed** : l'opérateur entre par les labels de
+  sélection de son pod (`pod::own_labels()`, `WEEBO_OPERATOR_POD_LABELS`,
+  `nameOverride` compris) et non plus par
+  `app.kubernetes.io/name: weebo-batlehub` en dur ; variable absente :
+  ce label par défaut et un warning au démarrage (6.12).
+- **Kit** : `store::spawn_reflector` et `leader::register_leader_gauge`
+  remplacent les copies de `main.rs` (mêmes noms de métriques) ; la jauge
+  `weebo_batlehub_leader` apparaît dans la page « Metrics ».
+- **`pathPrefix`** : sans objet, l'opérateur n'a pas de configuration
+  Vault.
+
 ## 11. Évolutions proposées
 
 ### 11.1 Côté batlehub (nous le maintenons aussi)
@@ -2411,10 +2461,8 @@ retire du code subtil de l'opérateur.
   obligatoire) : en attendant, l'opérateur implémente
   `InstanceDirectory` sur ses instances locales (2.8). Utile à tout
   opérateur dont le produit n'a qu'une forme namespacée.
-- Règles propres pour le Role `-watch` (un `params.watchRules` à côté de
-  `params.clusterRules`) : sans lui, `watch.namespace` laisse les règles
-  du workload dans le ClusterRole et `clusterKinds: false` reste partiel
-  sans que le chart puisse le refuser (7.1).
+- ~~Règles propres pour le Role `-watch`~~ : `params.watchRules`, livré
+  en v0.16.0 et adopté (7.1).
 - Avertissements dans `Admission` (`warnings` de l'`AdmissionResponse`) :
   changement du trait, donc release mineure du kit.
 - Index « Secret/ConfigMap → CR qui le lisent » en watch de métadonnées

@@ -41,7 +41,9 @@ use crate::ports::{
     AdminGateway, ConfigParser, GatewayError, KeyChanges, Owner, PendingSource, PodGateway,
     Reloaded, TokenCheck, WorkloadError, Workloads,
 };
-use crate::workload::{DocumentFacts, WorkloadInput, objects, removed, update_strategy};
+use crate::workload::{
+    DocumentFacts, OperatorPod, WorkloadInput, objects, removed, update_strategy,
+};
 
 /// The first characters of the credentials revision's comment line.
 pub const CREDENTIALS_COMMENT: &str = "# weebo-batlehub credentials-revision: sha256:";
@@ -61,7 +63,8 @@ pub struct ManagedPass<'a> {
     /// `status.partialKeys`: keys partially applied since the pods
     /// started.
     pub partial_keys: Vec<String>,
-    pub operator_namespace: Option<String>,
+    /// The operator's pods, let in by the `NetworkPolicy`.
+    pub operator: OperatorPod,
     /// The chart's TokenReview `ClusterRole`; `None` when the operator may
     /// not bind it (limited to one namespace).
     pub token_review_role: Option<String>,
@@ -639,7 +642,7 @@ impl Deploy<'_> {
             facts: self.facts,
             restart_hash,
             config_hash: self.target_hash,
-            operator_namespace: pass.operator_namespace.as_deref(),
+            operator: &pass.operator,
         };
         workloads
             .apply(&pass.owner, &objects(&input))
@@ -1012,7 +1015,7 @@ mod tests {
                 state: self.state.clone(),
                 restart_keys: self.restart_keys.clone(),
                 partial_keys: self.partial_keys.clone(),
-                operator_namespace: None,
+                operator: OperatorPod::default(),
                 token_review_role: self.token_review_role.clone(),
             };
             let report =
