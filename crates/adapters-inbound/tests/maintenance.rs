@@ -97,6 +97,7 @@ fn ctx(client: &Client, gateway: Arc<FakeGateway>) -> Arc<Ctx> {
         shutdown: Shutdown::never(),
         health: Arc::new(Health::default()),
         scope: WatchScope::cluster(),
+        images: Default::default(),
     })
 }
 

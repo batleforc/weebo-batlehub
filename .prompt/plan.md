@@ -25,6 +25,14 @@ batlehub, D8 révisée) et sur laquelle tout est épinglé depuis le M2 ; kit
 
 ### Historique
 
+- **v2.7 — revue du 2026-10-15 (après la 0.1.0)** : corrections (Constats
+  « Revue du 2026-10-15, après la 0.1.0 ») ; D10 (pods d'une instance
+  managed restreints) et D11 (tier `Partial` : rechargé et signalé,
+  `reload.partial`) acceptées. Reportés à la prochaine release du kit
+  (hook de finalizer toujours exécuté, écriture de status avec reprise,
+  `watchRules` du chart, sélecteur des pods de l'opérateur exporté,
+  `spawn_reflector`/`register_leader_gauge` génériques) : la part RBAC du
+  mode `clusterKinds: false` et les constats qui en dépendent.
 - **v2.6 — M5, 2026-10-15** : importeur et budget livrés (Constats du
   M5) ; reste la release 0.1.0. Écarts : l'importeur lit les values d'une
   release (`helm get values --all`), pas le Secret de release de Helm ;
@@ -202,6 +210,8 @@ du 2026-10-14, ont été acceptées le même jour.
 | D7 | Première release | **0.1.0-alpha.1 au M2** (external + `manageConfig`), pour éprouver `publish.yml`, la porte e2e et le test d'upgrade tôt ; 0.1.0 au M5. |
 | D8 | Version de batlehub pour D4 | ~~v1.5.0~~ (ne les portait pas) → **v1.6.0** (révisée le 2026-10-15) : `merge_layers` → document canonique, `validate_layers(layers, &dyn Fn)`, `reload_keys::{RELOAD_KEYS, classify}` (RFC 0037 de batlehub) ; `batlehub-config` épinglé sur ce tag ; `task gen:bump` déplace ensemble spec, client, tag de `batlehub-config` et images des tests. |
 | D9 | Watch des Secrets en métadonnées (6.7) | **Le retirer** : `list/watch` sur `secrets` donne en RBAC le droit de lire tous les Secrets (RBAC ne sait pas limiter aux métadonnées), ce que le kit n'accorde jamais. Les Secrets sont relus à chaque reconcile comme dans forgejo/authentik, et leur hash entre dans `configHash` : une rotation est vue à la resynchronisation (≤ 300 s ±20 %), ou tout de suite si le CR change. Le watch des ConfigMaps en métadonnées reste. |
+| D10 | Ce que peuvent être les pods d'une instance managed (revue du 2026-10-15) | **Restreindre** (2026-10-15) : créer un `BatleHubLocalInstance` ne donne pas plus que faire tourner batlehub. Images limitées à une allow-list de dépôts (réglage de l'opérateur `WEEBO_BATLEHUB_ALLOWED_IMAGES`, value `managedInstances.allowedImages`, par défaut `ghcr.io/batlehub/batlehub` et `ghcr.io/batlehub/batlehub-worker`) ; refus de `hostPath`, `privileged`, `allowPrivilegeEscalation: true`, `capabilities.add`, `hostProcess`, `procMount` autre que `Default` ; label `batlehub.weebo.io/credential` exigé sur tout Secret lu par les pods (`env[].valueFrom.secretKeyRef`, `envFrom[].secretRef`, volumes `secret`/`projected`). Refusé par le webhook et revérifié avant tout apply (`InvalidSpec`, `SecretNotAllowed`, rien n'est écrit). |
+| D11 | Le tier `Partial` de `reload_keys` en managed (laissé « à trancher au M4 », revue du 2026-10-15) | **Rechargé à chaud par défaut, signalé** (2026-10-15) : toute modification de `registries[*]` est `Partial` — la traiter en redémarrage roulerait les pods à chaque registry rattachée. Réglage `reload.partial` : `Reload` (défaut) recharge et lève l'advisory `PartiallyApplied` (clés dans `status.partialKeys`, jusqu'au redémarrage des pods) ; `Restart` les traite comme des clés à redémarrage (`reload.restart` décide). |
 
 ## 2. Choix structurants
 
@@ -286,9 +296,12 @@ recopie pas :
   chargé au démarrage, couche credentials comprise. Non vide : le push est
   retenu (`RestartForbidden`, 6.6).
 - **managed** (M4) : `reload_keys::classify(avant, après)` sur les
-  documents de `merge_layers` alimente le hash de redémarrage (6.1) ;
-  `Partial` est traité comme un redémarrage quand le travail de fond
-  compte pour l'instance (réglage par instance, à trancher au M4).
+  documents de `merge_layers` prévoit les clés à redémarrage (6.1) ; le
+  `restart_required` du dry run et de chaque `POST …/config/reload`
+  (contre la config de **démarrage** du pod, couche credentials et
+  environnement compris) complète ce que les documents de l'opérateur ne
+  montrent pas. `Partial` : D11 (`reload.partial`, rechargé et signalé
+  par défaut).
 
 ### 2.5 Server-side apply pour les objets possédés
 
@@ -313,12 +326,26 @@ recopie pas :
 
 - Résolus par l'instance, pas par l'opérateur.
 - Pour valider, l'opérateur passe à `validate_layers` l'environnement
-  qu'il connaît de l'instance (`env[].value`,
-  `env[].valueFrom.secretKeyRef` de l'instance managed, `PROXY_CACHE__*`
-  compris) et une valeur factice pour le reste, et liste les noms non
-  résolus dans l'advisory `UnresolvedPlaceholders`. Les valeurs lues
-  servent à la validation seulement : elles ne sont ni rendues ni
-  envoyées, et n'apparaissent dans aucun message.
+  qu'il connaît de l'instance managed, construit comme Kubernetes le fait
+  (`envFrom` dans l'ordre, puis `env`, le dernier gagne ; `value`, clés
+  d'un ConfigMap, d'un Secret labellisé `credential`, `PROXY_CACHE__*`
+  compris) et une valeur factice pour le reste ; une variable posée mais
+  illisible (`fieldRef`, source absente) reçoit la valeur factice sans
+  être signalée, seuls les noms qu'aucune variable ne pose sont listés
+  dans l'advisory `UnresolvedPlaceholders`. Les valeurs lues servent à la
+  validation seulement : elles ne sont ni rendues ni envoyées.
+- **Messages** : batlehub (son parser comme son API admin) cite des
+  valeurs (`invalid type: string "…"`, une URL et ses identifiants).
+  Quand le texte d'un Secret entre dans ce qui est jugé (couche,
+  `configFrom`, couche credentials, valeur d'environnement lue d'un
+  Secret) — et, pour les refus de l'instance, dès que la config contient
+  un `${` (l'instance l'a résolu) —, un message ne garde que chemins de
+  clés et positions : chaînes citées vidées, identifiants d'URL retirés
+  (`application::redact`), dans `Ready`, `rejectionMessage` et les
+  Events. Le message complet reste dans les journaux de batlehub et son
+  audit `config_changes`. Limite : la couche credentials d'une instance
+  external, que l'opérateur ne voit pas, peut encore apparaître dans un
+  refus d'une config sans `${`.
 - `reload.validation: Lenient` existe pour le cas où c'est la valeur
   factice qui fait échouer la validation : le refus du parser devient
   l'advisory `ConfigInvalidLenient` au lieu de bloquer.
@@ -463,16 +490,25 @@ corrigée dans le kit v0.14 (K16) et dans forgejo
   `batlehub.weebo.io/credential: "true"`, sinon `SecretNotAllowed` (le
   message nomme le Secret et la commande `kubectl label`). Les ConfigMaps
   n'en ont pas besoin.
-- **Hors règle** : les `env[].valueFrom.secretKeyRef` d'une instance
-  managed sont montés par le kubelet, pas par l'opérateur ; leur valeur
-  n'est lue que pour valider (2.6) et n'est ni rendue ni envoyée.
+- **Pods d'une instance managed** (D10) : l'opérateur écrit les pods,
+  donc tout Secret qu'ils lisent (`env[].valueFrom.secretKeyRef`,
+  `envFrom[].secretRef`, volumes `secret` ou `projected` de
+  `extraVolumes`, `credentials`) porte le label `credential`, sinon
+  `SecretNotAllowed` — refusé par le webhook dès que le Secret existe,
+  revérifié avant chaque apply (seules ses métadonnées sont lues). Sans
+  cela, quiconque crée l'instance monterait n'importe quel Secret du
+  namespace dans un pod dont il choisit l'image. Les
+  `imagePullSecrets` ne sont pas vérifiés (présentés par le kubelet au
+  seul registre de l'image, autorisé). Une valeur lue pour valider (2.6)
+  n'est ni rendue ni envoyée.
 - **CA** : `external.tls` lit son `caSecretRef` dans le namespace de
   l'instance (type `LocalTlsOptions` du kit, dont le nom n'apparaît pas
   dans le schéma), jamais un `TlsOptions` qui porte un `SecretKeyRef`
   cross-namespace.
 - Les Secrets écrits par l'opérateur (`<name>-config`,
-  `<name>-operator-token`, `<name>-operator-auth`) portent eux-mêmes les
-  labels, puisqu'il les relit.
+  `<name>-operator-token`) portent eux-mêmes les labels, puisqu'il les
+  relit. Il n'y a pas de Secret `<name>-operator-auth` : l'entrée
+  `[[auth]]` de l'opérateur est ajoutée au fichier rendu (6.3).
 
 ## 3. Architecture et conventions
 
@@ -564,10 +600,15 @@ depuis l'apiserver**, pas depuis le cache du watch.
 | `credentials` | | `{name, key}` d'un Secret du namespace de l'instance contenant une couche `credentials.toml`, labellisé `credential` (2.11). Voir 6.4. |
 | `reload.strategy` | `Auto` | `Manual` retient une config validée jusqu'à l'approbation de son hash exact. |
 | `reload.restart` | `Rollout` | `Never` : un changement de clé à redémarrage lève l'advisory `RestartRequired` au lieu de rouler les pods. |
+| `reload.partial` | `Reload` | managed : une clé du tier `Partial` (warming, imports, worker gardent l'ancienne valeur ; tout `registries[*]`) est rechargée et signalée (`PartiallyApplied`) ; `Restart` la traite en clé à redémarrage (D11). |
 | `reload.validation` | `Strict` | `Lenient` applique une config que le parser refuse (cas où c'est une valeur factice de placeholder qui échoue). |
 | `registrySelector.selector` | | Sélecteur de labels sur les `BatleHubRegistry`. |
 | `registrySelector.namespaces.from` | `Same` | `Same`, `All` ou `Selector` (modèle de `allowedRoutes.namespaces` de la Gateway API). |
 | `registrySelector.namespaces.selector` | | Sélecteur sur les labels des Namespaces, obligatoire avec `Selector` (CEL). |
+
+Le nom d'une instance **managed** nomme son Service et le label
+`app.kubernetes.io/instance` de ses objets : règle CEL à la racine, label
+DNS-1035 d'au plus 63 caractères (rien en external).
 
 Pas de `suspend` : la pause est l'annotation `import-pending` du kit pour
 l'importeur ; un `suspend` propre n'est ajouté que si un besoin réel
@@ -578,24 +619,24 @@ de batlehub, pour qu'un `values.yaml` se traduise ligne à ligne (§8).
 
 | Champ | Défaut | Rôle |
 | --- | --- | --- |
-| `image.repository` / `tag` / `pullPolicy` | `ghcr.io/batlehub/batlehub` / version ciblée par l'opérateur (`WEEBO_BATLEHUB_DEFAULT_IMAGE`) / `IfNotPresent` | |
+| `image.repository` / `tag` / `pullPolicy` | `ghcr.io/batlehub/batlehub` / version ciblée par l'opérateur (`WEEBO_BATLEHUB_DEFAULT_IMAGE`) / `IfNotPresent` | Dépôt dans l'allow-list de l'opérateur (D10), worker compris, sinon `InvalidSpec`. `pullPolicy` est une enum (`Always`, `IfNotPresent`, `Never`). |
 | `imagePullSecrets[]` | | |
-| `replicas` | 1 | Un stockage filesystem sur volume RWO plafonne à 1. |
+| `replicas` | 1 | Un stockage filesystem sur volume RWO plafonne à 1 : au-delà, advisory `CacheVolumeSingleWriter` (le type de stockage est dans la config ouverte, le CRD ne le voit pas). |
 | `updateStrategy` | dérivé | Voir 6.2. |
 | `resources` | | |
-| `service.type` / `port` / `annotations` | `ClusterIP` / 8080 | Le port du conteneur suit toujours `config.server.port`. |
+| `service.type` / `port` / `annotations` | `ClusterIP` / 8080 | `type` est une enum (`ClusterIP`, `NodePort`, `LoadBalancer`). Le port du conteneur suit toujours `config.server.port`. |
 | `ingress.host` / `extraHosts[]` / `className` / `annotations` / `tls[]` | | Une règle par host. Les hosts ne sont **pas** dérivés de `registries[].hosts` : `server.trusted_proxies` doit être réglé en conscience. |
-| `persistence.enabled` / `size` / `storageClass` / `accessMode` / `existingClaim` / `ephemeralSizeLimit` | true / 10Gi / défaut / RWO / / 1Gi | PVC du cache d'artefacts, seulement quand le stockage par défaut est filesystem. |
-| `worker` | absent | Deployment séparé `--roles worker` ; le proxy passe alors en `--roles proxy`. Champs : `replicas`, `image`, `resources`, `runtimeClassName` (gVisor), `scratchSizeLimit` (4Gi), `nodeSelector`, `tolerations`, `autoscaling{minReplicas, maxReplicas, targetQueued, metricName}` (HPA sur la profondeur de file). Avec un stockage filesystem, le worker monte le cache du proxy ; si le volume n'est pas RWX, une pod affinity obligatoire sur `kubernetes.io/hostname` le place à côté d'un pod proxy. `TMPDIR=/tmp/batlehub`. |
+| `persistence.enabled` / `size` / `storageClass` / `accessMode` / `existingClaim` / `ephemeralSizeLimit` | true / 10Gi / défaut / RWO / / 1Gi | PVC du cache d'artefacts, seulement quand le stockage par défaut est filesystem. `accessMode` est une enum (`ReadWriteOnce`, `ReadWriteOncePod`, `ReadWriteMany`). Le PVC est créé une fois et jamais redimensionné : un `size` qui diffère de la demande du PVC lève l'advisory `CacheVolumeNotResized` (l'étendre soi-même si la StorageClass le permet). |
+| `worker` | absent | Deployment séparé `--roles worker` ; le proxy passe alors en `--roles proxy`. Champs : `replicas`, `image`, `resources`, `runtimeClassName` (gVisor), `scratchSizeLimit` (4Gi), `nodeSelector`, `tolerations`, `autoscaling{minReplicas (≥ 1), maxReplicas, targetQueued, metricName}` (HPA sur la profondeur de file). Avec un stockage filesystem, le worker monte le cache du proxy ; si le volume n'est pas RWX, une pod affinity obligatoire sur `kubernetes.io/hostname` le place à côté d'un pod proxy ; sur `ReadWriteOncePod` il ne démarre jamais (advisory `CacheVolumeSingleWriter`). `TMPDIR=/tmp/batlehub`. |
 | `podDisruptionBudget.minAvailable` / `maxUnavailable` | | Rendu seulement à partir de 2 réplicas. |
 | `networkPolicy.ingressFrom[]` / `egressTo[]` | | Sur les pods proxy et worker. Ingress sur le port HTTP ; `ingressFrom` vide = toute source ; non vide, l'opérateur y ajoute ses propres pods pour garder l'accès à l'API admin. Egress refusé par défaut sauf DNS. |
 | `serviceAccount.create` / `name` / `annotations` / `autoTokenReview` | true / nom de l'instance / / true | `autoTokenReview` lie TokenReview quand un provider d'auth `kubernetes` est configuré ; `automountServiceAccountToken` n'est activé que dans ce cas. |
 | `operatorAccess.generateToken` / `tokenSecretRef` / `userId` | true / / `weebo-batlehub-operator` | Voir 6.3. Un `tokenSecretRef` fourni doit porter le label `instance-token` (2.11). |
 | `hotReload` | true | `false` pose `BATLEHUB_DISABLE_HOT_RELOAD=1` : tout changement devient un redémarrage. |
-| `env[]` / `envFrom[]` | | Environnement des deux conteneurs ; source des `${VAR}`. |
+| `env[]` / `envFrom[]` | | Environnement des deux conteneurs ; source des `${VAR}`. Un Secret lu doit porter le label `credential` (D10). |
 | `podAnnotations`, `podLabels`, `nodeSelector`, `tolerations`, `affinity`, `runtimeClassName` | | Scheduling. |
-| `extraVolumes[]` / `extraVolumeMounts[]` | | CA bundles, `static_dir`, `cli_binary_path`. |
-| `podSecurityContext` / `securityContext` | non-root 65532, seccomp `RuntimeDefault` / rootfs en lecture seule, aucune capability, pas d'escalade | |
+| `extraVolumes[]` / `extraVolumeMounts[]` | | CA bundles, `static_dir`, `cli_binary_path`. Pas de `hostPath` ; un Secret monté porte le label `credential` (D10). |
+| `podSecurityContext` / `securityContext` | non-root 65532, seccomp `RuntimeDefault` / rootfs en lecture seule, aucune capability, pas d'escalade | Refusés : `privileged`, `allowPrivilegeEscalation: true`, `capabilities.add`, `hostProcess`, `procMount` (D10). |
 
 **spec.external**
 
@@ -616,9 +657,10 @@ de batlehub, pour qu'un `values.yaml` se traduise ligne à ligne (§8).
 | `pendingConfigHash` | Config retenue par `Manual`. |
 | `credentialsHash` | SHA-256 de la couche `credentials`. |
 | `reloadNonce` | Voir 6.1. |
-| `rejectedConfigHash` / `lastRejectionTime` | Dernière config refusée par l'instance, et quand. |
+| `rejectedConfigHash` / `lastRejectionTime` | Dernière config refusée par l'instance, et quand. Managed : sans `lastRejectionTime`, la config est en cours de nouvel essai sous un nouveau nonce (6.1). |
 | `updateStrategy` | Stratégie effective du Deployment proxy. |
-| `restartKeys[]` | Clés à redémarrage changées, tant qu'un redémarrage est en attente. |
+| `restartKeys[]` | Clés à redémarrage en attente : external, tant que le push est retenu ; managed, jusqu'à ce que les pods proxy démarrent sur la config (template = config désirée). |
+| `partialKeys[]` | Managed : clés `Partial` rechargées depuis le dernier démarrage des pods (D11). |
 | `pods[]` | `{name, configHash}` des pods proxy en retard (vide une fois appliqué). |
 | `version` | Version batlehub lue sur `/livez`. |
 | `endpoint` | URL utilisée par l'opérateur. |
@@ -712,7 +754,9 @@ Une entrée `[[registries]]` sous forme d'objet séparé, pour que chaque
     depuis l'environnement de l'instance, ce qui donnerait son mot de
     passe de base ou ses clés S3 à quiconque écrit la registry ;
   - ne peut pas compléter une registry déclarée dans la config de
-    l'instance (`DuplicateRegistryName`).
+    l'instance (`DuplicateRegistryName`), et ne prend pas son nom : une
+    registry du namespace de l'instance, même plus jeune, la complète
+    toujours.
 
 **status** : `registryName`, `instance` (`BoundInstance`),
 `instanceConfigHash` ; raisons de `Ready` : `Reconciled` (rattachée),
@@ -735,7 +779,7 @@ Une action administrative contre une instance, unique ou planifiée.
 | `action` | requis | Voir le catalogue. |
 | `params` | `{}` | `registry`, `package`, `version`, `artifact`, `path`, `packages[]`, `paths[]`, `versions`, `dryRun`, `ip`, `user`, `reason`, `durationSeconds`, `before`, `olderThanDays`, `state`, `tag`, `repo`, `message`, `level`. |
 | `schedule` | | Cron à 5 champs, UTC, jour de semaine 0-7 depuis dimanche. Absent : exécution unique. |
-| `suspend` | false | Met en pause une planification. |
+| `suspend` | false | Met en pause une planification. Remise à `false`, la planification repart de cet instant : les créneaux manqués pendant la pause sont sautés, rien ne part tout de suite (`status.suspendedTime`, `status.resumedTime`). |
 | `ttlSecondsAfterFinished` | | Supprime une exécution unique terminée après ce délai. |
 | `timeoutSeconds` | 600 | Borne le run et la requête. |
 
@@ -747,6 +791,16 @@ Une action administrative contre une instance, unique ou planifiée.
   n'est pas soumise à la gigue).
 - `params.dryRun` vaut **true par défaut** : un flag omis rapporte sans
   rien changer.
+- **Cron** : 5 champs, UTC, jour de semaine `0-7` depuis dimanche ; jour du
+  mois et jour de semaine en OU quand les deux sont restreints. Comme
+  Vixie cron, un champ qui commence par `*` (`*/2` compris) n'est pas
+  restreint : les deux doivent alors correspondre (ET).
+- **Reprise après `suspend`** : une passe qui voit la planification
+  suspendue note `status.suspendedTime` ; la première passe qui la voit
+  reprise compte depuis cet instant (`status.resumedTime`) et ne rattrape
+  pas les créneaux manqués : une purge ou un import ne part pas en rafale
+  au moment où on lève la pause. Les créneaux manqués pendant un arrêt de
+  l'opérateur (sans pause) donnent toujours un seul run.
 - **Au plus une fois** : la décision de lancer est prise sur l'objet
   relu depuis l'apiserver (pas le cache), et `status.lastRun.state:
   Running` est écrit **avant** l'action, par un patch de status
@@ -852,7 +906,13 @@ et non dans sa config (les niveaux instance et registry sont dans
 Les quatre champs de coordonnée (`instanceRef`, `registry`, `package`,
 `version`) sont **immuables** (règle CEL de transition) et ne peuvent être
 ni vides, ni `.`, ni `..` : le status mémorise ce qui a été écrit à cette
-coordonnée, la déplacer laisserait des lignes orphelines.
+coordonnée, la déplacer laisserait des lignes orphelines. Le paquet devient
+des segments de chemin de l'API admin (route de policy d'un paquet) :
+**aucune partie entre `/`** ne peut être `.` ou `..` (CEL `split('/')`),
+et `HttpAdminGateway` refuse de construire une URL dont un segment est
+`.`, `..` ou leur forme `%2e` (`InvalidSpec`) — le parser d'URL les
+résoudrait vers une autre route ; cela couvre aussi les params des
+maintenances.
 
 Écriture : `PUT /admin/registries/{registry}/grants`, un sujet à la fois.
 Le token opérateur porte le rôle admin, qui inclut `grants:*`.
@@ -930,7 +990,13 @@ les exemptions expirées).
     réconciliation reste en conflit ;
   - **seul chemin d'adoption** : l'importeur, qui crée le CR en pause
     (`import-pending`) avec le status amorcé (`applied[]`,
-    `appliedPolicyHash`), puis le relâche (`Adopter` du kit).
+    `appliedPolicyHash`), puis le relâche (`Adopter` du kit) — avec
+    `--apply` seulement : le status d'un manifeste imprimé est perdu par
+    `kubectl apply` (sous-ressource). L'importeur retire ce que les CR du
+    namespace tiennent déjà (sujets listés ou écrits d'un grant, nœud d'une
+    policy, même instance) et le dit ; il ne modifie jamais un CR adopté :
+    un sujet accordé à la console après l'adoption reste hors gestion
+    (averti), le lister dans le CR serait un `GrantConflict`.
 - **Dérive** : à chaque passe, relecture des lignes et réécriture de ce
   qui a dérivé ; remise en file par le `requeue_after` du kit (300 s ±20 %
   en régime stable). Cette relecture est la détection de dérive : pas de
@@ -977,7 +1043,7 @@ la config d'une `BatleHubRegistry`.
 | --- | --- | --- |
 | `instanceRef` | seule instance du namespace | `InstanceRef` du kit, même namespace (CEL), immuable. |
 | `registry` | requis | Nom de registry sur l'instance, ≤ 253, immuable. |
-| `prefix` | requis | Préfixe dans l'orthographe de l'écosystème, ≤ 1024, ni blanc ni `.`/`..`, immuable. |
+| `prefix` | requis | Préfixe dans l'orthographe de l'écosystème, ≤ 1024, ni blanc ni partie `.`/`..` entre `/` (`acme/..` libérerait le claim d'une autre équipe), immuable. |
 | `group` | requis | Groupe tel que le fournisseur d'auth le nomme (`oidc:web-team`), sans espace (batlehub les retire). Modifiable. |
 | `deletionPolicy` | `Delete` | `Delete` libère le préfixe à la suppression ; `Orphan` le laisse. |
 
@@ -1069,12 +1135,15 @@ lève (`needs_a_change`, reprise à 300 s, 2.10).
 | `LeavesWatchScope` | bloquant | | refus du webhook `/scope` du kit (`ScopeGuard`) : un CR qui porte encore le finalizer sortirait du `watch.labelSelector` |
 | `KubernetesApiError` | bloquant | | erreurs de l'opérateur avant le status (Event) |
 | `RestartRequired` | advisory | | `reload.restart: Never` ou external : les clés en attente dans le message |
+| `PartiallyApplied` | advisory | | managed, `reload.partial: Reload` : clés `Partial` rechargées, ce que batlehub a construit au démarrage garde l'ancienne valeur jusqu'au redémarrage (D11) |
 | `ConfigHeld` | advisory | | `reload.strategy: Manual`, hash retenu dans le message |
 | `ConfigWarnings` | advisory | | `warnings[]` non vide |
 | `UnresolvedPlaceholders` | advisory | | 2.6 |
 | `ConfigInvalidLenient` | advisory | | refus du parser ignoré par `Lenient` |
 | `RegistrySelectorIgnored` | advisory | | `registrySelector.namespaces.from` autre que `Same` sur un opérateur limité à un namespace (7.1) |
 | `TokenReviewUnavailable` | advisory | | `autoTokenReview` demandé sur un opérateur limité à un namespace : pas de ClusterRoleBinding (7.1) |
+| `CacheVolumeSingleWriter` | advisory | | managed, cache filesystem sur un claim RWO/RWOP monté par plus de pods qu'il n'en admet (plusieurs réplicas proxy, worker sur RWOP) |
+| `CacheVolumeNotResized` | advisory | | managed : `persistence.size` diffère de la demande du PVC, que l'opérateur ne redimensionne jamais |
 | `RegistrySuspended`, `MaintenanceRunning`, `MaintenanceSuspended`, `SuspiciousGrant`, `ExemptionExpired` | advisory | | par kind |
 | `ConfigReloaded`, `ConfigRolledOut`, `RestartInterrupts`, `MaintenanceStarted`, `Revoked`, `Released` | advisory | | Events seulement (`announce_change`, `finalize`) ; `RestartInterrupts` en `Warning` |
 
@@ -1130,12 +1199,26 @@ que câbler.
 - `configHash` : SHA-256 du fichier rendu complet. Quand il diffère de
   `appliedConfigHash`, l'opérateur attend que le Secret monté atteigne
   chaque pod, puis approuve le reload sur chacun.
-- **Hash de redémarrage** : SHA-256 des seules clés à redémarrage (2.4).
-  Posé sur le pod template (`batlehub.weebo.io/config-hash`) : un
-  changement de ces clés roule les pods (Event `ConfigRolledOut`), tout
-  autre changement non.
+- **Hash de redémarrage** : posé sur le pod template
+  (`batlehub.weebo.io/config-hash`), c'est le hash de la **dernière config
+  complète qui a demandé un redémarrage** (pas une projection des seules
+  clés à redémarrage) : il ne change que lorsqu'une clé à redémarrage est
+  due, et les pods roulent alors sur toute la config désirée (Event
+  `ConfigRolledOut`, publié seulement après un apply réussi).
+  - Clés dues (`status.restartKeys`) : celles que `classify` voit entre
+    l'ancien fichier et le nouveau, plus le `restart_required` du dry run
+    et de chaque reload (couche credentials, environnement) quand les
+    pods n'ont pas démarré sur la config. Elles restent dues **jusqu'à ce
+    que le template porte la config désirée** : un passage qui échoue
+    après l'écriture du Secret (PVC immuable, Service étranger, arrêt)
+    roule quand même au suivant, et passer de `Never` à `Rollout` roule
+    les clés retenues. `["*"]` (batlehub ne compare pas) est dû aussi.
+  - `Rollout` : des clés dues que seul le dry run voit roulent les pods
+    sans recharger ; vues au reload d'un pod, le reste est rechargé puis
+    les pods roulent.
   - `reload.restart: Never` : l'annotation garde sa valeur et l'advisory
     `RestartRequired` nomme les clés jusqu'au prochain redémarrage.
+  - `Partial` : D11.
   - `hotReload: false` : l'annotation porte tout le `configHash`, chaque
     changement est un redémarrage, rien n'est demandé à l'API de reload.
   - Workers (`--roles worker`, pas d'API de reload) : leur template porte
@@ -1147,7 +1230,9 @@ que câbler.
    sur le port qu'ils servent réellement (qui peut retarder sur
    `server.port` tant qu'un redémarrage est retenu ; idem pour le port du
    conteneur, les probes et le Service).
-2. Config nouvelle : quand chaque pod rapporte le fichier de l'opérateur,
+2. Config nouvelle : quand chaque pod rapporte **les octets exacts** du
+   fichier de l'opérateur (nonce compris : un pod qui a encore l'ancien
+   nonce trouverait ses octets déjà tentés),
    un seul `POST /admin/config/validate` (dry-run) — une config que tous
    refuseraient n'arrive sur aucun. Puis `POST /admin/config/reload` sur
    chaque pod : c'est l'approbation. batlehub relit le fichier et applique
@@ -1161,7 +1246,16 @@ que câbler.
 4. Un pending stagé par quelqu'un d'autre (éditeur de config web) n'est
    jamais approuvé ; quand l'opérateur a une config à appliquer, il est
    jeté (le fichier sur disque est celui de l'opérateur).
-5. `appliedConfigHash` avance quand chaque pod est passé sans refus.
+5. `appliedConfigHash` avance quand chaque pod a **chargé** la config.
+   Un 400 « no pending reload » ne le dit pas : le pod a déjà tenté ces
+   octets — il les tourne, les a refusés (son watcher les a tentés
+   d'abord) ou a laissé expirer leur pending — et n'est jamais lu comme
+   un chargement. Première fois : nonce incrémenté, octets réécrits
+   (`ConfigPropagating`), la config marquée en nouvel essai
+   (`rejectedConfigHash` sans `lastRejectionTime`) ; si un pod ne stage
+   toujours rien pour ces octets neufs, c'est un refus (`ConfigRejected`,
+   backoff). Un passage arrêté après qu'un pod a chargé réécrit aussi les
+   octets (sinon ce pod répondrait « no pending » au suivant).
    Chaque reload apparaît dans l'audit `config_changes` de batlehub sous
    le `user_id` de l'opérateur, et un Event `ConfigReloaded` est publié.
    Un pod qui refuse après que d'autres ont accepté est rapporté avec la
@@ -1187,8 +1281,12 @@ appels répondent « pas de pending » / « expiré » pour toujours. Alors :
 chargement tournerait en boucle (refus, pas de pending, re-stage, refus).
 Un refus enregistre `rejectedConfigHash` et `lastRejectionTime`, et la
 même config n'est re-stagée qu'au plus une fois toutes les 10 minutes
-(`due_in`), le refus restant dans `Ready`. Un changement de spec (nouveau
-hash) passe immédiatement. Même règle pour les push external.
+(`due_in`), le refus restant dans `Ready`. Le délai écoulé, en managed,
+le nonce est d'abord incrémenté (les pods ont déjà tenté ces octets : un
+reload ne chargerait rien et passerait pour un succès), puis la config
+est approuvée sur les octets neufs. Un changement de spec (nouveau hash)
+passe immédiatement. Même règle pour les push external (dont
+`from-content` le dit, `pending_created: false`).
 
 **Hot reload désactivé par l'environnement** : un pod qui rapporte le hot
 reload désactivé alors que la spec dit le contraire (variable posée via
@@ -1235,8 +1333,13 @@ hash et est retenue à nouveau.
   reconcile).
 - Le token brut ne quitte jamais le Secret : il n'atteint pas le pod, pas
   même en variable d'environnement.
-- Le bloc `[[auth]]` dérivé est stocké dans son propre Secret,
-  `<name>-operator-auth` (clé `auth.toml`), ré-appliqué à chaque passe.
+- L'entrée dérivée est **ajoutée à la liste `tokens` du provider
+  `[[auth]] type = "token"`** du fichier rendu (un provider est créé s'il
+  n'y en a pas), par une couche `auth` complète fusionnée par
+  `merge_layers` : pas de Secret `<name>-operator-auth` ni de couche
+  séparée, qui remplacerait la liste des tokens de l'utilisateur (la fusion
+  de batlehub identifie le provider par `type`, la liste `tokens` n'a pas
+  d'identité ; Constats du M4).
 - `operatorAccess.generateToken: false` : le token de l'utilisateur
   (`tokenSecretRef`) est utilisé, à charge pour lui de le déclarer dans
   `config.auth`.
@@ -1246,8 +1349,9 @@ hash et est retenue à nouveau.
   l'opérateur se verrouillerait dehors au prochain redémarrage. Avant tout
   apply, l'opérateur fusionne donc la couche credentials comme batlehub
   (2.3) et vérifie que son token est toujours déclaré ; sinon
-  `OperatorTokenShadowed` et rien n'est appliqué (solution : ajouter le
-  bloc de `<name>-operator-auth` à la couche credentials).
+  `OperatorTokenShadowed` et rien n'est appliqué (solution : ajouter
+  l'entrée de l'opérateur, dont le hash est dans le fichier rendu
+  `<name>-config`, au provider de la couche credentials).
 - À l'exécution, `OperatorUnauthorized` rapporte un refus de l'instance
   (401 : jeton inconnu ; 403 : sans `config:write`) ou un rôle autre
   qu'`admin` lu sur `GET /api/v1/me`.
@@ -1281,28 +1385,66 @@ hash et est retenue à nouveau.
 
 ### 6.5 Instance managed : objets possédés
 
-Secret de config, Secrets du token et du bloc `[[auth]]`, ServiceAccount,
+Secret de config, Secret du token, ServiceAccount,
 Service, PVC (stockage filesystem), Deployment proxy, Deployment worker,
 HPA, Ingress, PDB, NetworkPolicy : tous en SSA, avec owner reference sur
 l'instance (supprimer le `BatleHubLocalInstance` supprime l'instance).
 
 **Pas d'adoption implicite** (règle de forgejo, « collision → rejet ») :
 avant le premier apply d'un objet, l'opérateur le lit ; un objet du même
-nom qui existe sans owner reference vers cette instance ni label
-`app.kubernetes.io/managed-by: weebo-batlehub` n'est pas repris (le SSA le
-ferait en silence) : `Ready: False`, `OwnedObjectConflict`, le message
-nomme l'objet. Même règle pour le POST du Secret `<name>-operator-token`
-(un 409 sur un Secret étranger est ce conflit, pas un succès). Pour
-reprendre un objet existant, l'utilisateur pose lui-même le label.
+nom qui existe sans owner reference vers cette instance ni les labels
+`app.kubernetes.io/managed-by: weebo-batlehub` **et**
+`app.kubernetes.io/instance: <instance>` n'est pas repris (le SSA forcé le
+ferait en silence, owner references comprises) : `Ready: False`,
+`OwnedObjectConflict`, le message nomme l'objet. Un objet dont la
+**controller** owner reference désigne un autre UID est un conflit quels
+que soient ses labels : deux instances ne se prennent jamais un objet
+(`hub` avec un worker et `hub-worker` visent le même Deployment
+`hub-worker` ; un `serviceAccount.name` partagé serait sinon
+ré-attribué puis supprimé par le GC avec l'autre instance). Même règle
+pour le POST du Secret `<name>-operator-token` (un 409 sur un Secret
+étranger est ce conflit, pas un succès). Pour reprendre un objet
+existant, l'utilisateur pose lui-même les deux labels. Un
+`serviceAccount.name` avec `create: false` est utilisé tel quel : jamais
+créé, labellisé ni supprimé.
 
-Exception : le ClusterRoleBinding qui donne à une instance utilisant le
-provider d'auth `kubernetes` le ClusterRole `<release>-tokenreview` du
-chart (TokenReview `create`, rien d'autre). Un objet cluster-scoped ne
-peut pas avoir de propriétaire namespacé : le finalizer du kit
-(`batlehub.weebo.io/finalizer`) le supprime. Son nom est un hash du
-namespace et du nom de l'instance (unique et court). L'opérateur n'écrit
-jamais de ClusterRole lui-même ; il a le verbe `bind` sur ce seul
-ClusterRole (`resourceNames`), pas l'escalade générale.
+**Ce que peuvent être les pods** (D10) : avant d'écrire quoi que ce soit,
+l'adaptateur vérifie les pod templates (images de l'allow-list, ni
+`hostPath` ni privilège) et le label `credential` des Secrets qu'ils lisent
+(hors Secrets écrits par l'opérateur dans le même apply) ; un refus
+(`InvalidSpec`, `SecretNotAllowed`) n'écrit rien. Le webhook refuse la
+même chose plus tôt (6.8) ; la vérification de l'apply est celle de ce qui
+est réellement écrit.
+
+Exception : la liaison qui donne à une instance utilisant le provider
+d'auth `kubernetes` le ClusterRole `<release>-tokenreview` du chart
+(TokenReview `create`, rien d'autre). **Un seul** ClusterRoleBinding,
+du même nom que le ClusterRole, pour toutes les instances (revue du
+2026-10-15 bis : la 0.1.0 en créait un par instance, d'où `patch`/`delete`
+sur tous les ClusterRoleBindings du cluster) :
+
+- l'opérateur n'en édite que les sujets : `get`/`patch` limités par
+  `resourceNames` à ce nom, jamais `delete` ; `create` ne peut pas être
+  limité par nom (RBAC), le contrôle d'escalade de l'apiserver refuse
+  toujours de lier un rôle que l'opérateur ne détient pas et ne peut pas
+  `bind` — il a `bind` (et `get`) sur ce seul ClusterRole ;
+- l'annotation `batlehub.weebo.io/token-review-instances` (JSON
+  `{"<ns>/<instance>": "<ServiceAccount>"}`) dit quelle instance lie quel
+  compte ; les sujets en sont dérivés, un compte partagé par deux
+  instances reste lié tant que l'une le demande. Chaque patch porte le
+  `resourceVersion` lu (`subjects` est une liste atomique) : deux
+  instances qui écrivent en même temps se relisent au lieu de s'effacer ;
+- créé au premier besoin, avec une owner reference sur le ClusterRole du
+  chart (cluster-scoped, donc possible) : il part avec la release ; une
+  liste vide ne lie personne, il n'est jamais supprimé par l'opérateur ;
+- retiré de la liste par le finalizer (`batlehub.weebo.io/finalizer`) ou
+  quand le provider `kubernetes` disparaît de la config.
+
+Sans rôle configuré (opérateur limité à un namespace, `tokenReview.enabled:
+false`, `watch.clusterKinds: false`), l'opérateur ne lie ni ne délie rien
+et ne lit aucun ClusterRoleBinding (une lecture cluster-scoped interdite
+bloquait le finalizer) : advisory `TokenReviewUnavailable` (7.1).
+L'opérateur n'écrit jamais de ClusterRole lui-même.
 
 ### 6.6 Instance external
 
@@ -1318,7 +1460,18 @@ ClusterRole (`resourceNames`), pas l'escalade générale.
   nouveau push avec le commentaire (ignoré dans la comparaison).
 - Avec `podSelector` (instance du chart batlehub dans le cluster) : les
   réplicas ne partagent pas un reload ; le push passe par un pod, puis
-  chaque pod sélectionné est approuvé par IP comme en managed. Sans
+  chaque pod sélectionné est approuvé par IP comme en managed. Chaque pod
+  est appelé avec le schéma et le TLS de `url` : en `https`, le nom d'hôte
+  de `url` est résolu vers l'IP du pod pour l'appel et son certificat est
+  vérifié contre ce nom (CA de `tls.caSecretRef`, `insecureSkipVerify`) ;
+  `url` en IP : l'IP du pod est appelée telle quelle ; en `http`, en clair
+  comme `url`. Le token ne part que vers un pod que contrôle un
+  `ReplicaSet` ou un `StatefulSet` existant (UID relu) dont le sélecteur
+  le sélectionne — jamais un pod nu aux bons labels. Risque résiduel
+  documenté : qui peut créer un Deployment dans le namespace de l'instance
+  dont les pods correspondent au `podSelector` reçoit le token. En managed,
+  la chaîne est vérifiée jusqu'à l'instance : pod → `ReplicaSet` →
+  Deployment proxy dont la controller reference est l'instance (UID). Sans
   `podSelector`, une instance external à plusieurs réplicas n'est pas
   supportée avec `manageConfig` (advisory dans la doc, pas de détection
   possible).
@@ -1374,16 +1527,21 @@ Deux couches refusent un objet invalide avant stockage :
 - **CEL** dans les CRD (évaluées par l'apiserver seul) : un seul mode par
   instance, `schedule` non vide, params requis par action, sélecteur de
   namespaces requis avec `Selector`, coordonnées de gouvernance
-  immuables, `policy` ou `exemptions` présents.
+  immuables et sans segment `.`/`..`, `policy` ou `exemptions` présents,
+  nom d'une instance managed en label DNS-1035 ≤ 63, `service.type`,
+  `image.pullPolicy` et `persistence.accessMode` en enums,
+  `autoscaling.minReplicas ≥ 1`. Ce qui dépend du stockage (filesystem ou
+  non, dans la config ouverte et ses couches) n'est pas exprimable en CEL :
+  advisories `CacheVolumeSingleWriter` et `CacheVolumeNotResized`.
 - **Webhook** (`Admission` du kit, `params.admitted` du chart) pour ce qui
   demande un autre objet ou le parser :
 
 | Kind | Refusé (code) |
 | --- | --- |
-| `BatleHubLocalInstance` | aucune config, `spec.config` qui n'en est pas une (`InvalidSpec`, `ConfigInvalid`) ; sans `configLayers`, `spec.config` refusé par le parser en `Strict` (`ConfigInvalid`) ; managed (M4) : la couche credentials masque le token opérateur (`OperatorTokenShadowed`). Jamais pour une couche ni une registry (révisé au M2 : elles se corrigent sans toucher au CR, ou appartiennent à une autre équipe) |
-| `BatleHubMaintenance` | `schedule` ou `params.before` illisible (`InvalidSpec`) ; `restart` sur une instance external (`InvalidSpec`) ; un `params.registry` absent de la config rendue, de la couche credentials et des registries rattachées (`InvalidSpec`) |
+| `BatleHubLocalInstance` | managed : une image hors allow-list, `hostPath`, conteneur privilégié, escalade, capability ajoutée (`InvalidSpec`), un Secret existant lu par les pods sans le label `credential` (`SecretNotAllowed` ; absent : le status le dira) — D10 ; aucune config, `spec.config` qui n'en est pas une (`InvalidSpec`, `ConfigInvalid`) ; sans `configLayers` et si `spec.config` ne nomme aucune registry (aucune clé `registries` : une `BatleHubRegistry`, peut-être pas encore créée, pourrait compléter une entrée ou être la registry nommée), `spec.config` refusé par le parser en `Strict` avec l'environnement connu (`ConfigInvalid`) ; toujours une erreur de fusion ; avec des `configLayers`, rien n'est lu (seul `spec.config` est jugé) ; managed avec token généré : la couche credentials déclare un provider `token` dont la liste n'a pas l'entrée de l'opérateur (son `user_id`) ni de `${` (`OperatorTokenShadowed`). Jamais pour une couche ni une registry (révisé au M2 : elles se corrigent sans toucher au CR, ou appartiennent à une autre équipe) |
+| `BatleHubMaintenance` | `schedule` ou `params.before` illisible (`InvalidSpec`) ; `restart` sur une instance external, nommée ou seule du namespace (`InvalidSpec`) ; un `params.registry` absent de la config rendue, de la couche credentials et des registries rattachées (`InvalidSpec`) |
 | `BatleHubRegistry` | `${` dans une registry d'un autre namespace (`NamespaceNotAllowed`) ; `type` ou nom vide, fragment `configFrom` qui n'est pas du TOML (`ConfigInvalid`) |
-| `BatleHubPackageGrant` | même coordonnée et même sujet qu'un autre CR (`GrantConflict`) |
+| `BatleHubPackageGrant` | même coordonnée et même sujet qu'un autre CR (`GrantConflict`) ; sans `instanceRef`, la coordonnée vise l'instance seule du namespace (comme un CR qui la nomme) |
 | `BatleHubPackagePolicy` | même coordonnée qu'un autre CR (`PolicyConflict`) ; gate réglé et exempté (`InvalidSpec`) |
 
 - Chaque refus est un refus que les reconcilers feraient de toute façon,
@@ -1408,12 +1566,13 @@ répondent en standby ; jauge `weebo_batlehub_leader` ; drain
 ### 6.10 Nettoyage
 
 - Objets possédés : owner references (6.5).
-- ClusterRoleBinding TokenReview : finalizer (6.5).
+- Sujet du ClusterRoleBinding TokenReview : retiré par le finalizer (6.5) ;
+  le binding lui-même part avec le ClusterRole du chart.
 - Instance : finalizer, `InstanceInUse` tant que des CR y sont liés
   (4.1).
 - Gouvernance : finalizer (4.6).
 - Les séries de métriques d'une instance supprimée sont retirées au
-  nettoyage.
+  nettoyage (6.11).
 
 ### 6.11 Métriques
 
@@ -1421,13 +1580,32 @@ répondent en standby ; jauge `weebo_batlehub_leader` ; drain
   `weebo_batlehub_reconcile_duration_seconds`,
   `weebo_batlehub_webhook_decisions_total`, `weebo_batlehub_leader`.
 - Propres (OpenTelemetry, comme le kit) :
-  `weebo_batlehub_maintenance_runs_total{action,result}`,
-  `weebo_batlehub_instance_ready`, `weebo_batlehub_instance_restart_required`,
-  `weebo_batlehub_instance_config_warnings{code}` (un warning qui
-  disparaît emporte sa série), `weebo_batlehub_admin_requests_total{endpoint,status}`.
-- Déclarées dans la config de la doc pour la page « Metrics » ; alertes
-  propres (`params.alerts`) : instance non prête > 15 min, redémarrage
-  en attente > 24 h, maintenances en échec.
+  - `weebo_batlehub_maintenance_runs_total{action,result}` (`success`,
+    `failure`) ;
+  - `weebo_batlehub_instance_ready{instance_namespace,instance_name}` (0/1),
+    `weebo_batlehub_instance_restart_required{…}` (nombre de
+    `status.restartKeys`), `weebo_batlehub_instance_config_warnings{…,code}`
+    (nombre de warnings du code) : jauges observables sur une table en
+    mémoire tenue par le contrôleur d'instance après chaque passe ; une
+    série n'est rapportée que tant que son entrée existe, donc un warning
+    qui disparaît emporte sa série, et le finalizer de l'instance retire
+    les siennes. Labels `instance_namespace`/`instance_name` et non
+    `namespace`/`instance`, que Prometheus pose déjà sur chaque série
+    scrapée (ils deviendraient `exported_*`) ;
+  - `weebo_batlehub_admin_requests_total{endpoint,status}` : un décorateur
+    (`MeteredFactory`/`MeteredGateway` d'`adapters-outbound`) sur chaque
+    passerelle de la factory ; `endpoint` est la méthode du port (`reload`,
+    `put_grant`…, `maintenance` pour l'appel d'une action : jamais un nom
+    de registry, de paquet ni de pod, ensemble borné), `status` est `ok` ou
+    la classe de la `GatewayError` (`unreachable`, `unauthorized`,
+    `rejected`, `no_pending`…), pas le code HTTP (un même code n'a pas le
+    même sens partout, 2.10).
+- Noms écrits en toutes lettres dans le code : le générateur de la page
+  « Metrics » (`reference.extraMetrics` de `docs/crd-docs.config.mjs`)
+  les cherche dans les sources. Alertes propres (`params.alerts`, avec
+  `prometheusRule.enabled`) : `BatleHubInstanceNotReady` (instance non
+  prête > 15 min), `BatleHubRestartPending` (redémarrage en attente
+  > 24 h), `BatleHubMaintenanceFailing` (un run en échec dans l'heure).
 
 ### 6.12 Variables d'environnement de l'opérateur
 
@@ -1439,9 +1617,13 @@ Celles du kit (`WEEBO_METRICS_ADDR`, `LOG_FORMAT`,
 
 | Variable | Rôle |
 | --- | --- |
-| `WEEBO_BATLEHUB_DEFAULT_IMAGE` | Image batlehub par défaut des instances managed (proxy et worker). |
-| `WEEBO_BATLEHUB_TOKENREVIEW_CLUSTERROLE` | Nom du ClusterRole TokenReview du chart. |
-| `WEEBO_BATLEHUB_ADMIN_TIMEOUT_SECONDS` | Timeout des appels admin (hors maintenances, bornées par `timeoutSeconds`). |
+| `WEEBO_BATLEHUB_DEFAULT_IMAGE` | Image (`repository[:tag]`, sans digest) des pods proxy d'une instance managed dont `managed.image` n'en nomme pas (`defaults.image` du chart). Vide : l'image de la version de batlehub visée. Un champ posé par l'instance gagne, champ par champ. |
+| `WEEBO_BATLEHUB_DEFAULT_WORKER_IMAGE` | Idem pour les pods worker (`defaults.workerImage`) ; sans tag, ils suivent celui du proxy. Vide : `ghcr.io/batlehub/batlehub-worker`. |
+| `WEEBO_BATLEHUB_TOKENREVIEW_CLUSTERROLE` | Nom du ClusterRole TokenReview du chart, et du ClusterRoleBinding partagé (6.5). Posée seulement quand le chart rend ce ClusterRole (`tokenReview.enabled`, mode cluster). |
+| `WEEBO_BATLEHUB_ALLOWED_IMAGES` | Dépôts d'images (sans tag, séparés par des virgules) que peuvent faire tourner les pods d'une instance managed (D10) ; vide : `ghcr.io/batlehub/batlehub`, `ghcr.io/batlehub/batlehub-worker`. Value `managedInstances.allowedImages`. |
+| `WEEBO_BATLEHUB_ADMIN_TIMEOUT_SECONDS` | Timeout de chaque appel admin, 1–600, défaut 15 (`defaults.adminTimeoutSeconds`) ; une maintenance garde son `timeoutSeconds`. |
+
+Une valeur illisible arrête le démarrage.
 
 ## 7. Chart Helm de l'opérateur
 
@@ -1457,8 +1639,12 @@ Celles du kit (`WEEBO_METRICS_ADDR`, `LOG_FORMAT`,
   `networking.k8s.io/ingresses`, `networkpolicies`,
   `policy/poddisruptionbudgets`, `autoscaling/horizontalpodautoscalers`
   en `get/list/watch/create/patch/delete` ; `pods` en `get/list/watch` ;
-  `namespaces` en `get/list/watch` ; `clusterrolebindings` en
-  `create/patch/delete` et `bind` sur le seul ClusterRole TokenReview.
+  `apps/replicasets` et `apps/statefulsets` en `get` (contrôleur d'un pod
+  vérifié avant de lui envoyer le token, 6.6) ;
+  `namespaces` en `get/list/watch` ; avec `tokenReview.enabled` en mode
+  cluster seulement, `clusterrolebindings` en `create` et en `get/patch`
+  sur le seul `<release>-tokenreview` (`resourceNames`, jamais `delete`),
+  `clusterroles` en `get/bind` sur ce seul ClusterRole (6.5).
   Les Secrets lus par nom, les Events et les kinds (status, finalizers)
   viennent du ClusterRole du kit ; `params.clusterSecrets: true` est posé
   explicitement (l'opérateur lit et écrit des Secrets dans chaque
@@ -1466,9 +1652,21 @@ Celles du kit (`WEEBO_METRICS_ADDR`, `LOG_FORMAT`,
   (6.7) demanderait `list/watch` sur `secrets`, que le kit n'accorde
   jamais : voir D9.
 - Template propre en plus d'`operator.yaml` : le ClusterRole
-  `<release>-tokenreview` (TokenReview `create`).
-- Values propres : `defaults.image` (→ `WEEBO_BATLEHUB_DEFAULT_IMAGE`),
-  `tokenReview.enabled`, `networkPolicy.egress.batlehub`. Le reste est le
+  `<release>-tokenreview` (TokenReview `create`), rendu avec
+  `tokenReview.enabled` en mode cluster seulement (la même condition pose
+  `WEEBO_BATLEHUB_TOKENREVIEW_CLUSTERROLE` et les règles de 6.5 : la
+  variable ne nomme jamais un ClusterRole absent). Le ClusterRoleBinding
+  est créé par l'opérateur (un binding rendu par le chart verrait ses
+  sujets effacés à chaque upgrade ou sync Argo CD).
+- Values propres : `defaults.image`, `defaults.workerImage`,
+  `defaults.adminTimeoutSeconds` (6.12), `tokenReview.enabled` (défaut
+  `true`), `networkPolicy.egress.batlehub`. Montée depuis la 0.1.0 : les
+  ClusterRoleBindings par instance qu'elle a créés
+  (`weebo-batlehub-tokenreview-<hash>`) ne sont plus supprimables par
+  l'opérateur : à supprimer à la main
+  (`kubectl delete clusterrolebinding -l app.kubernetes.io/managed-by=weebo-batlehub,batlehub.weebo.io/instance-name`,
+  `managedInstances.allowedImages` (→ `WEEBO_BATLEHUB_ALLOWED_IMAGES`,
+  D10). Le reste est le
   contrat du kit (`replicaCount`, `leaderElection`, `webhook`,
   `certManager`, `metrics`, `serviceMonitor`, `prometheusRule`, `probes`,
   `resources`…).
@@ -1488,15 +1686,16 @@ cluster-scoped ; ce qu'il fait dans chaque mode :
 | Mode | Comportement |
 | --- | --- |
 | cluster (défaut) | Tout ce document. |
-| `watch.namespace` | Les 5 kinds passent dans le Role `-watch` du namespace. Refus : pas de registry cross-namespace (`RegistrySelectorIgnored` sur une instance qui demande `All`/`Selector`), pas de watch des Namespaces, pas de ClusterRoleBinding TokenReview (`autoTokenReview` demandé : advisory `TokenReviewUnavailable`, l'utilisateur lie TokenReview lui-même). Limite connue : `params.clusterRules` (Deployments, Services, PVC… du mode managed) restent dans le ClusterRole, le chart du kit n'ayant pas de règles propres pour le Role `-watch` (§11.2) : le mode limite ce que l'opérateur **réconcilie**, pas tout ce qu'il **peut** écrire. |
-| `watch.clusterKinds: false` (tout en Roles) | **Partiel**, à refuser par le chart dès que possible : sans ClusterRole, `params.clusterRules` disparaissent — couches ConfigMap, `configFrom` ConfigMap et `podSelector` échouent (`KubernetesApiError`) ; le mode managed ne pourrait rien écrire. Le `fail` dans `_params.tpl` casse le rendu de fumée du kit : il attend `params.watchRules` (§11.2). Documenté comme tel (values, guide d'installation). |
+| `watch.namespace` | Les 5 kinds passent dans le Role `-watch` du namespace. Refus : pas de registry cross-namespace (`RegistrySelectorIgnored` sur une instance qui demande `All`/`Selector`), pas de watch des Namespaces, pas de ClusterRoleBinding TokenReview (ni ClusterRole, ni variable, ni règle : `autoTokenReview` demandé donne l'advisory `TokenReviewUnavailable`, l'utilisateur lie TokenReview lui-même ; même chose avec `tokenReview.enabled: false`). Limite connue : `params.clusterRules` (Deployments, Services, PVC… du mode managed) restent dans le ClusterRole, le chart du kit n'ayant pas de règles propres pour le Role `-watch` (§11.2) : le mode limite ce que l'opérateur **réconcilie**, pas tout ce qu'il **peut** écrire. |
+| `watch.clusterKinds: false` (tout en Roles) | **Partiel**, à refuser par le chart dès que possible : sans ClusterRole, `params.clusterRules` disparaissent — couches ConfigMap, `configFrom` ConfigMap et `podSelector` échouent (`KubernetesApiError`). Le mode managed ne pourrait rien écrire : **refusé par une condition** (`Ready: False`, `InvalidSpec`, revue du 2026-10-15 bis ; pas de webhook dans ce mode, le chart du kit n'en rend pas), sans TokenReview (rien à lier ni délier : la suppression ne lit aucun binding). Le `fail` dans `_params.tpl` casse le rendu de fumée du kit : il attend `params.watchRules` (§11.2), qui lèvera aussi ce refus. Documenté comme tel (values, guide d'installation). |
 | `watch.labelSelector` | Supporté tel quel (kit) : `LeavesWatchScope` au webhook `/scope`. Pas une frontière de sécurité (RBAC ne filtre pas par label). |
 
 **Avertissement de sécurité** (dans le `NOTES.txt` et la doc) : un
 opérateur qui écrit des Deployments et lit des Secrets dans un namespace
 y détient ce que peut faire un pod avec n'importe quel ServiceAccount et
 n'importe quel Secret. Créer un `BatleHubLocalInstance` revient à pouvoir faire
-tourner un pod et lire un Secret dans ce namespace (le token admin et les
+tourner un pod batlehub (images de l'allow-list, sans privilège ni
+`hostPath`, D10) avec les Secrets labellisés `credential` de ce namespace (le token admin et les
 couches d'une instance external sont envoyés à son `url`) : les kinds se
 donnent comme on donne les pods. Le Role d'exemple du kit
 (`rbac.namespacedExample`) doit le dire. Les labels d'opt-in (2.11)
@@ -1535,7 +1734,7 @@ labellisés `instance-token` ou `credential` sont lus pour être envoyés.
 | `podAnnotations`, `nodeSelector`, `tolerations`, `affinity`, `podSecurityContext`, `securityContext`, `resources`, `env`, `envFrom` | mêmes noms sous `spec.managed` |
 | `service.*`, `ingress.*` | `spec.managed.service.*`, `ingress.*` (`enabled` → présence) |
 | `config.*` | `spec.config.*` (clés identiques ; entiers écrits en entiers) |
-| `credentials.config` | rendre en TOML dans un Secret, référencé par `spec.credentials` |
+| `credentials.config` | le Secret `<fullname>-credentials` que le chart en rend part avec la release : l'importeur le copie dans `<instance>-credentials` (labellisé `credential`, `-copy` ajouté si le nom est celui du chart), référencé par `spec.credentials` ; `--apply` fait la copie, l'impression donne les commandes `kubectl` (aucune valeur secrète sur la sortie) |
 | `credentials.existingSecret/key` | `spec.credentials.name/key` |
 | `podDisruptionBudget.*`, `persistence.*` | `spec.managed.*` |
 | `worker.*` | `spec.managed.worker.*` (`scratch.sizeLimit` → `scratchSizeLimit`) |
@@ -1558,7 +1757,7 @@ Garder une release Helm de batlehub et la piloter (`external` +
 | envtest | `weebo-kit-testkit` : vrais `etcd` + `kube-apiserver`, controllers complets avec une instance `external` vers wiremock ; CEL, SSA, sous-ressource status, watch de Secret, webhook en TLS. Pas de kubelet : le managed y est testé jusqu'aux objets écrits, pas aux pods. | `task test:all` |
 | Live | Gateway et controllers contre un **vrai batlehub** (conteneur batlehub + Postgres, `task batlehub:container:start`, `.batlehub-test.env`) : reload réel, refus réels, grants et policies. C'est ce qui a manqué à la v0.1. | `task test:live-batlehub` |
 | e2e | kind (`deploy/e2e/`, `e2e.yml` planifié et porte de `publish.yml`, 9.3), test d'upgrade compris : image et chart (2 réplicas sur la Lease), cert-manager, Postgres, instance managed jusqu'à `Ready`, maintenance, refus CEL et webhook, bascule de leader, hot reload, rotation de credentials, NetworkPolicy, changement à redémarrage sur cache RWO (`Recreate`), garbage collection, binding TokenReview à la suppression. | `task e2e` |
-| Budget | `weebo-kit-perf` : binaire release contre envtest, 200 `BatleHubPackageGrant` sur une instance external wiremock ; `Budget::small_cluster()` ; rapport commité sous `docs/perf/`, `perf.yml` du kit chaque semaine. | `task perf` |
+| Budget | `weebo-kit-perf` : binaire release contre envtest, 200 `BatleHubPackageGrant` sur une instance external wiremock ; `Budget::small_cluster()` ; rapport commité sous `docs/perf/`, `perf.yml` du kit chaque semaine. Les autres kinds (instances `manageConfig` et managed, registries, policies, claims, maintenances) n'y sont pas : reporté (§12, « Plus tard »). | `task perf` |
 
 **Cas limites du reload, à porter comme spécification** (tests de use
 case, puis live) : chaque pod proxy, propagation par pod, pending approuvé
@@ -2039,6 +2238,148 @@ mode ». Use case et constructeurs en tests unitaires.
   objet, convergence 0,4–0,6 s pour 100, croissance RSS au repos 6,6 %
   (budget 10 %).
 
+### Revue du 2026-10-15, après la 0.1.0
+
+Revue de la 0.1.0 contre le code et batlehub 1.6.0, corrigée sur la
+branche `fix/review-2026-10-15` (kit v0.15.1 inchangé).
+
+- **Rollout managed** : `status.restartKeys` était vidé et l'Event
+  `ConfigRolledOut` publié avant l'apply des objets ; un objet en échec
+  après le Secret (PVC immuable, Service étranger) laissait la passe
+  suivante voir l'ancien fichier égal au nouveau : aucun redémarrage,
+  `Ready`. Les clés restent dues jusqu'à ce que le template porte la
+  config désirée, roulées tant qu'il en reste (`Never` → `Rollout`
+  compris), l'Event après un apply réussi (6.1).
+- **`restart_required` de batlehub** : la réponse de
+  `POST …/config/reload` (et du dry run) donne les clés à redémarrage
+  contre la config de démarrage du pod, couche credentials et
+  environnement compris ; la passerelle la jetait. Une rotation de
+  `database.url` dans la couche credentials était rechargée à chaud et
+  `Ready`. Elle alimente désormais les clés dues (6.1, 2.4).
+- **« no pending reload »** : batlehub répond ainsi pour des octets déjà
+  tentés — tournés, refusés par son watcher, ou dont le pending a expiré
+  — et l'opérateur le lisait comme un chargement : après le backoff, une
+  config refusée passait pour appliquée. Jamais lu comme un succès :
+  nonce et octets neufs, puis refus si rien n'est stagé ; le délai d'un
+  refus écoulé, le nonce passe avant le nouvel essai ; les pods doivent
+  porter les octets exacts (nonce compris) avant l'approbation. Le chemin
+  external s'appuyait déjà sur `pending_created` (inchangé).
+- **Tier `Partial`** : D11.
+- **Messages** : un refus de batlehub ou de son parser cite des valeurs
+  (`invalid type: string "…"`) ; seules les lignes de source étaient
+  retirées. Valeurs citées et identifiants d'URL retirés dès qu'un Secret
+  entre dans ce qui est jugé (2.6).
+- **Rendu** : l'environnement `env`/`envFrom` d'une instance managed sert
+  enfin à la validation (`UnresolvedPlaceholders` ne liste plus une
+  variable posée) ; une registry d'un autre namespace prenait le nom
+  d'une entrée statique avant d'être refusée et bloquait celle du
+  namespace de l'instance ; message propre au managed sans config.
+- **Webhook** : une entrée `[[registries]]` sans `type` qu'une
+  `BatleHubRegistry` complète était refusée (validation sans les
+  registries) : une config qui nomme des registries n'est plus jugée par
+  le parser à l'admission ; les couches ne sont plus lues pour rien ; le
+  masquage du token généré par la couche credentials et `restart` sur une
+  instance external, promis par 6.8, sont refusés ; un CR sans
+  `instanceRef` et un CR nommant l'instance seule du namespace sont la
+  même coordonnée.
+- **Pods managed (D10)** : un `BatleHubLocalInstance` managed faisait
+  tourner n'importe quelle image, `hostPath`, conteneur privilégié, et
+  montait n'importe quel Secret du namespace (`env`/`envFrom`/volumes),
+  contournant l'opt-in `credential` (§2.11). Restreint : allow-list
+  d'images (`WEEBO_BATLEHUB_ALLOWED_IMAGES`,
+  `managedInstances.allowedImages`, batlehub et batlehub-worker par
+  défaut ; un miroir posé dans `defaults.image` doit y figurer), refus
+  des privilèges et de `hostPath`, label `credential` exigé sur tout
+  Secret lu par les pods — au webhook et avant tout apply (`KubeWorkloads`,
+  rien n'est écrit). L'e2e labellise le Secret de la base.
+- **Objets d'une autre instance** : un objet labellisé `managed-by` seul
+  était repris par n'importe quelle instance (SSA forcé : owner
+  references remplacées) — `hub` (worker) et `hub-worker` se battaient
+  pour `hub-worker`. Il faut aussi `app.kubernetes.io/instance:
+  <instance>`, et une controller reference vers un autre UID est toujours
+  un conflit ; un ServiceAccount `create: false` n'est jamais écrit ni
+  supprimé (envtest).
+- **Token vers les pods** : avec `podSelector`, les appels par pod
+  ignoraient `external.tls` (token en `http://`) et tout pod aux bons
+  labels recevait le token. Désormais schéma et TLS de `url` (nom d'hôte
+  résolu vers l'IP du pod, certificat vérifié contre ce nom), et seuls les
+  pods contrôlés par un `ReplicaSet`/`StatefulSet` existant qui les
+  sélectionne (managed : chaîne jusqu'au Deployment de l'instance, UID
+  compris) ; RBAC `get` sur `replicasets`/`statefulsets`. Risque
+  résiduel : qui peut créer un Deployment aux bons labels dans le
+  namespace reçoit encore le token (guide).
+- **Segments `.`/`..`** : `PathSegmentsMut::extend` du crate `url` ignore
+  un segment `.` ou `..` (et résout `%2e`) : un préfixe `acme/..` visait
+  la route du préfixe parent. CEL `split('/')` sur `package` et `prefix`
+  (aucune partie `.`/`..`), `version` ni `.` ni `..` ; `HttpAdminGateway`
+  refuse toute URL dont un segment est un point (`.`, `..`, `%2e`…) —
+  `GatewayError::InvalidPath` → `InvalidSpec`, ce qui couvre les params
+  des maintenances. `split` est accepté par l'apiserver d'envtest 1.36.
+- **Schéma managed** : `service.type`, `image.pullPolicy`,
+  `persistence.accessMode` en enums (orthographes Kubernetes,
+  `ExternalName` exclu), `autoscaling.minReplicas ≥ 1` ; CEL à la racine :
+  le nom d'une instance managed est un label DNS-1035 d'au plus 63
+  caractères (Service, label `app.kubernetes.io/instance`).
+- **Volume du cache** : ce qui dépend d'un stockage filesystem (config
+  ouverte et couches) n'est pas exprimable en CEL. Advisories
+  `CacheVolumeSingleWriter` (plusieurs réplicas proxy sur RWO/RWOP,
+  worker sur RWOP ; un worker sur RWO reste possible grâce à l'affinité)
+  et `CacheVolumeNotResized` (`persistence.size` ≠ demande du PVC, créé
+  une fois et jamais redimensionné, lue par `Workloads::claim_size`).
+- **Liaison TokenReview** : un seul ClusterRoleBinding
+  `<release>-tokenreview` partagé, sujets dérivés de l'annotation
+  `batlehub.weebo.io/token-review-instances`, patch conditionné par le
+  `resourceVersion` (5 essais), owner reference sur le ClusterRole du
+  chart ; RBAC réduit à `create` + `get/patch` par `resourceNames`, plus
+  de `delete` (la 0.1.0 pouvait supprimer ou modifier tout
+  ClusterRoleBinding du cluster). Les liaisons par instance de la 0.1.0
+  sont à supprimer à la main (NOTES de l'upgrade, guide managed). envtest
+  avec le seul RBAC du chart.
+- **Sans rôle TokenReview** (namespace, `tokenReview.enabled: false`,
+  `clusterKinds: false`) : ni liaison ni lecture d'un binding ; le
+  finalizer d'une instance managed restait bloqué sur un GET cluster
+  interdit. `WEEBO_BATLEHUB_TOKENREVIEW_CLUSTERROLE` n'est posée que si le
+  chart rend le ClusterRole.
+- **`watch.clusterKinds: false`** : une instance managed est refusée
+  (`InvalidSpec`) au lieu d'échouer en boucle en `KubernetesApiError` ; à
+  lever avec `params.watchRules` du kit (prochaine release du kit).
+- **Métriques du §6.11 livrées** : jauges d'instance (labels
+  `instance_namespace`/`instance_name`, séries retirées avec le warning
+  ou l'instance), `admin_requests_total` par décorateur (`endpoint` =
+  méthode du port, `status` = classe d'erreur) ; noms écrits en clair (le
+  générateur de la doc les cherche dans les sources) ; trois alertes du
+  chart.
+- **Réglages** : `WEEBO_BATLEHUB_DEFAULT_IMAGE`,
+  `WEEBO_BATLEHUB_DEFAULT_WORKER_IMAGE` (ajoutée : l'image worker est un
+  autre dépôt), `WEEBO_BATLEHUB_ADMIN_TIMEOUT_SECONDS` (`defaults.*` du
+  chart) ; valeur illisible = arrêt au démarrage.
+- **Budget perf** limité aux grants : extension aux autres kinds reportée
+  à « Plus tard » (faux batlehub et scénarios propres à écrire).
+- **Importeur, couche credentials** : en managed, le Secret
+  `<fullname>-credentials` rendu par le chart part avec la release ;
+  l'instance lit une copie `<instance>-credentials` (labellisée
+  `credential`, `-copy` si le nom est celui du chart). `--apply` la fait
+  (refus si un autre Secret porte ce nom) ; l'impression ne sort aucune
+  valeur secrète et donne les commandes `kubectl`. `existingSecret` reste
+  référencé tel quel.
+- **Importeur, gouvernance déjà tenue** : les sujets qu'un
+  `BatleHubPackageGrant` du namespace liste ou a écrits, et les nœuds
+  qu'une `BatleHubPackagePolicy` écrit, sont retirés de l'import
+  (avertissement) : le webhook aurait refusé le CR. Un CR adopté n'est
+  jamais modifié ; un sujet accordé à la console après l'adoption est
+  signalé, pas adopté.
+- **Importeur, impression** : seul `--apply` adopte, `kubectl apply` perd
+  le status imprimé (sous-ressource) ; le token est lu dans
+  `BATLEHUB_TOKEN` seulement (plus d'argument `--token`, visible dans la
+  liste des processus).
+- **Maintenance** : lever `suspend` ne déclenche plus tout de suite le
+  créneau manqué ; la planification repart de la reprise
+  (`status.suspendedTime`/`resumedTime`). Cron : un champ jour commençant
+  par `*` (`*/2`) n'est pas restreint (Vixie), d'où ET et non OU.
+- **`task test`** : comme celui du kit — unitaires, tests de contrat sans
+  cluster (`admin_gateway_contract`, `in_sync`, `cli`) et doctests ;
+  l'envtest reste à `test:integration`.
+
 ## 11. Évolutions proposées
 
 ### 11.1 Côté batlehub (nous le maintenons aussi)
@@ -2103,6 +2444,13 @@ retire du code subtil de l'opérateur.
 - Plugin `kubectl batlehub` sur `api` + `batlehub-client` (ex.
   `kubectl batlehub warm hub npm typescript` crée la maintenance et
   attend).
+- Budget `weebo-kit-perf` étendu aux autres kinds (revue du 2026-10-15
+  bis) : aujourd'hui 200 `BatleHubPackageGrant` seulement. Les instances
+  `manageConfig` (rendu + parser + Argon2 par passe), les registries (une
+  registry relance toutes les instances), les instances managed (SSA de
+  ~10 objets, pas de kubelet sous envtest), policies, claims et
+  maintenances demandent chacune un faux batlehub plus riche et un
+  scénario propre : pas un ajout trivial.
 
 ## 13. Points d'attention
 

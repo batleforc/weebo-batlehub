@@ -1,11 +1,13 @@
 {{- /*
 What a managed BatleHubLocalInstance with a `kubernetes` auth provider is
 bound to (managed.serviceAccount.autoTokenReview): TokenReview create,
-nothing else. The operator binds it (verb `bind` on this ClusterRole only)
-and never writes a ClusterRole itself. Cluster-wide only: limited to one
-namespace, the operator binds nothing (TokenReviewUnavailable).
+nothing else. The operator binds it through one ClusterRoleBinding of the
+same name, whose subjects it edits (verb `bind` on this ClusterRole only),
+and never writes a ClusterRole itself. tokenReview.enabled and
+cluster-wide only: otherwise the operator binds nothing
+(TokenReviewUnavailable).
 */ -}}
-{{- if and (include "weebo-operator.watchClusterKinds" .) (not (include "weebo-operator.watchNamespace" .)) }}
+{{- if include "operator.tokenReview" . }}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:

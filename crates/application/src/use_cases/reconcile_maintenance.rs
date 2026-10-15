@@ -118,9 +118,20 @@ pub fn decide(plan: &Plan<'_>, status: &MaintenanceStatus, now: Timestamp) -> De
     if plan.suspend {
         return Decision::Suspended;
     }
-    let base = last
-        .and_then(|r| parse_time(&r.start_time))
-        .unwrap_or(plan.created);
+    // A schedule running again after a suspension counts from now: the
+    // runs missed meanwhile are skipped, never fired at once on resume.
+    let base = if status.suspended_time.is_some() {
+        now
+    } else {
+        [
+            last.and_then(|r| parse_time(&r.start_time)),
+            status.resumed_time.as_deref().and_then(parse_time),
+        ]
+        .into_iter()
+        .flatten()
+        .max()
+        .unwrap_or(plan.created)
+    };
     match schedule.next_after(base) {
         None => Decision::Invalid(Failure::new(
             ReasonCode::InvalidSpec,
@@ -141,6 +152,9 @@ pub fn settle(
     mut status: MaintenanceStatus,
     now: Timestamp,
 ) -> (Outcome, MaintenanceStatus) {
+    if !plan.suspend && status.suspended_time.take().is_some() {
+        status.resumed_time = Some(now.to_string());
+    }
     match decision {
         Decision::Interrupted => {
             let message =
@@ -162,6 +176,9 @@ pub fn settle(
         }
         Decision::Suspended => {
             status.next_run_time = None;
+            if status.suspended_time.is_none() {
+                status.suspended_time = Some(now.to_string());
+            }
             let outcome = last_outcome(&status, plan).advise(
                 ReasonCode::MaintenanceSuspended,
                 "the schedule is suspended",
@@ -968,6 +985,59 @@ mod tests {
             decide(&p, &late, at("2026-10-15T04:10:00Z")),
             Decision::Invalid(_)
         ));
+    }
+
+    #[test]
+    fn a_schedule_resumed_skips_the_runs_missed_while_suspended() {
+        let params = MaintenanceParams::default();
+        let mut p = plan(MaintenanceAction::CacheEvict, &params, Some("0 * * * *"));
+        let last = finished("2026-10-15T01:00:00Z", RunState::Succeeded);
+        // Suspended: recorded once, kept.
+        p.suspend = true;
+        let at_suspend = at("2026-10-15T01:30:00Z");
+        let decision = decide(&p, &last, at_suspend);
+        let (_, suspended) = settle(&decision, &p, last, at_suspend);
+        assert_eq!(
+            suspended.suspended_time.as_deref(),
+            Some("2026-10-15T01:30:00Z")
+        );
+        let later = at("2026-10-15T03:00:00Z");
+        let (_, still) = settle(&decide(&p, &suspended, later), &p, suspended, later);
+        assert_eq!(
+            still.suspended_time.as_deref(),
+            Some("2026-10-15T01:30:00Z")
+        );
+
+        // Resumed hours later: nothing fires at once, the next slot after
+        // the resume is armed.
+        p.suspend = false;
+        let resume = at("2026-10-15T05:10:00Z");
+        let decision = decide(&p, &still, resume);
+        assert_eq!(
+            decision,
+            Decision::Wait {
+                next_run: Some(at("2026-10-15T06:00:00Z")),
+                wake: Some(at("2026-10-15T06:00:00Z"))
+            }
+        );
+        let (_, resumed) = settle(&decision, &p, still, resume);
+        assert_eq!(resumed.suspended_time, None);
+        assert_eq!(
+            resumed.resumed_time.as_deref(),
+            Some("2026-10-15T05:10:00Z")
+        );
+        // The next passes count from the resume, not from the last run.
+        assert_eq!(
+            decide(&p, &resumed, at("2026-10-15T05:30:00Z")),
+            Decision::Wait {
+                next_run: Some(at("2026-10-15T06:00:00Z")),
+                wake: Some(at("2026-10-15T06:00:00Z"))
+            }
+        );
+        assert_eq!(
+            decide(&p, &resumed, at("2026-10-15T06:00:00Z")),
+            Decision::Run
+        );
     }
 
     #[test]

@@ -264,6 +264,75 @@ async fn the_configuration_endpoints_send_the_content_and_read_the_answer() {
 }
 
 #[tokio::test]
+async fn a_reload_reports_what_it_loaded_or_that_it_had_tried_these_bytes() {
+    use application::ports::Reloaded;
+    let answer =
+        |status: u16, body: serde_json::Value| ResponseTemplate::new(status).set_body_json(body);
+    let cases = [
+        (
+            answer(
+                200,
+                json!({
+                    "diff": {
+                        "added_registries": [], "removed_registries": [], "changed_registries": [],
+                        "access_config_changed": false, "limits_changed": false,
+                        "applied": ["server.trusted_proxies"],
+                        "partially_applied": ["registries[npm]"],
+                        "restart_required": ["database.url"],
+                    },
+                    "warnings": [],
+                    "pending_created": false,
+                }),
+            ),
+            Ok(Reloaded::Loaded {
+                restart_required: vec!["database.url".into()],
+                partially_applied: vec!["registries[npm]".into()],
+            }),
+        ),
+        (
+            answer(
+                400,
+                json!({"error": "Bad Request", "message": "no pending reload"}),
+            ),
+            Ok(Reloaded::AlreadyTried),
+        ),
+    ];
+    for (template, want) in cases {
+        let (server, gateway) = setup().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/admin/config/reload"))
+            .respond_with(template)
+            .expect(1)
+            .mount(&server)
+            .await;
+        assert_eq!(gateway.reload().await, want);
+    }
+    let refusals = [
+        ("pending reload expired", "expired"),
+        (
+            "[worker] registries names 'npm', which is not a configured registry",
+            "refused",
+        ),
+    ];
+    for (message, kind) in refusals {
+        let (server, gateway) = setup().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/admin/config/reload"))
+            .respond_with(answer(
+                400,
+                json!({"error": "Bad Request", "message": message}),
+            ))
+            .mount(&server)
+            .await;
+        match (gateway.reload().await, kind) {
+            (Err(GatewayError::NoPending(_)), "expired") => {}
+            (Err(GatewayError::Rejected(why)), "refused") => assert!(why.contains("npm"), "{why}"),
+            (other, _) => panic!("{message}: {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
 async fn configuration_answers_map_per_endpoint() {
     let (server, gateway) = setup().await;
     // BatleHub's error bodies (`AppError`).

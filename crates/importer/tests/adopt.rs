@@ -58,6 +58,7 @@ fn ctx(client: &Client, gateway: Arc<FakeGateway>) -> Arc<Ctx> {
         shutdown: Shutdown::never(),
         health: Arc::new(Health::default()),
         scope: WatchScope::cluster(),
+        images: Default::default(),
     })
 }
 
@@ -184,4 +185,69 @@ async fn imported_governance_is_adopted_and_reconciles_without_writing() {
         (summary.adopted, summary.skipped, summary.failed),
         (0, 2, 0)
     );
+}
+
+#[tokio::test]
+async fn a_release_s_credentials_secret_is_copied_labelled() {
+    use k8s_openapi::ByteString;
+    use k8s_openapi::api::core::v1::Secret;
+    let cluster = testkit::envtest::start().await;
+    let client = cluster.client();
+    Api::<Namespace>::all(client.clone())
+        .create(
+            &PostParams::default(),
+            &Namespace {
+                metadata: ObjectMeta {
+                    name: Some(NS.into()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let secrets: Api<Secret> = Api::namespaced(client.clone(), NS);
+    let toml = ByteString(b"[database]\nurl = \"postgres://x\"\n".to_vec());
+    secrets
+        .create(
+            &PostParams::default(),
+            &Secret {
+                metadata: ObjectMeta {
+                    name: Some("registry-batlehub-credentials".into()),
+                    ..Default::default()
+                },
+                data: Some([("credentials.toml".to_string(), toml.clone())].into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let copy = importer::CredentialsCopy {
+        from: "registry-batlehub-credentials".into(),
+        to: "registry-credentials".into(),
+        key: "credentials.toml".into(),
+    };
+    importer::copy_credentials(&client, NS, &copy)
+        .await
+        .unwrap();
+    let copied = secrets.get("registry-credentials").await.unwrap();
+    assert_eq!(copied.data.unwrap()["credentials.toml"], toml);
+    assert_eq!(
+        copied.metadata.labels.unwrap()[api::CREDENTIAL_LABEL],
+        "true"
+    );
+    // Again: the same copy is fine.
+    importer::copy_credentials(&client, NS, &copy)
+        .await
+        .unwrap();
+    // A different Secret under that name is never overwritten.
+    let other = importer::CredentialsCopy {
+        to: "registry-batlehub-credentials".into(),
+        from: "registry-credentials".into(),
+        key: "credentials.toml".into(),
+    };
+    let err = importer::copy_credentials(&client, NS, &other)
+        .await
+        .unwrap_err();
+    assert!(err.contains("exists already"), "{err}");
 }

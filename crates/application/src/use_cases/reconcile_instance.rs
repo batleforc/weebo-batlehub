@@ -102,6 +102,8 @@ pub struct ConfigStatus {
     pub rejection_message: Option<String>,
     pub unpersisted_hash: Option<String>,
     pub restart_keys: Vec<String>,
+    /// `managed`: keys partially applied since the pods started.
+    pub partial_keys: Vec<String>,
     pub pods: Vec<PodConfig>,
     /// Unix seconds.
     pub reloaded_at: Option<i64>,
@@ -120,6 +122,7 @@ impl ConfigStatus {
             rejection_message: state.rejection_message.clone(),
             unpersisted_hash: state.unpersisted_hash.clone(),
             restart_keys: Vec::new(),
+            partial_keys: Vec::new(),
             pods: state.pods.clone(),
             reloaded_at: None,
         }
@@ -395,6 +398,16 @@ async fn push_to(
     loaded: &mut bool,
 ) -> Result<(), Stop> {
     let fail = |e: GatewayError| (Failure::new(e.reason(), e.to_string()), None);
+    // BatleHub quotes values in its refusals: a Secret's, or one its
+    // environment gives a placeholder.
+    let sensitive = rendered.sensitive || rendered.document.contains("${");
+    let said = |message: String| {
+        if sensitive {
+            crate::redact::values(&message)
+        } else {
+            message
+        }
+    };
     let mut behind = Vec::new();
     let mut pods = Vec::new();
     for (name, target) in targets {
@@ -448,7 +461,7 @@ async fn push_to(
         Err(GatewayError::Rejected(message)) => {
             return Err(rejected(
                 status,
-                format!("the instance refuses it: {message}"),
+                format!("the instance refuses it: {}", said(message)),
             ));
         }
         Err(e) => return Err(fail(e)),
@@ -499,7 +512,7 @@ async fn push_to(
             Err(GatewayError::Rejected(message)) => {
                 return Err(rejected(
                     status,
-                    format!("{name} refuses it: {message}{}", partial(&done)),
+                    format!("{name} refuses it: {}{}", said(message), partial(&done)),
                 ));
             }
             Err(e) => return Err(fail(e)),
@@ -521,7 +534,11 @@ async fn push_to(
             Err(GatewayError::Rejected(message)) => {
                 return Err(rejected(
                     status,
-                    format!("{name} failed to load it: {message}{}", partial(&done)),
+                    format!(
+                        "{name} failed to load it: {}{}",
+                        said(message),
+                        partial(&done)
+                    ),
                 ));
             }
             Err(e) => return Err(fail(e)),
@@ -606,6 +623,7 @@ mod tests {
             document: document.into(),
             hash: sha256(document),
             advisories: vec![],
+            sensitive: false,
         }
     }
 

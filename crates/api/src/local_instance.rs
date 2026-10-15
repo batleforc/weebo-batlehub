@@ -36,7 +36,12 @@ pub use self::BatleHubLocalInstanceStatus as LocalInstanceStatus;
     printcolumn = r#"{"name":"Version","type":"string","jsonPath":".status.version"}"#,
     printcolumn = r#"{"name":"Ready","type":"string","jsonPath":".status.conditions[?(@.type=='Ready')].status"}"#,
     printcolumn = r#"{"name":"Reason","type":"string","jsonPath":".status.conditions[?(@.type=='Ready')].reason"}"#,
-    printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#
+    printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#,
+    // A managed instance's name is its Service's (a DNS-1035 label) and
+    // the `app.kubernetes.io/instance` label of every object it owns.
+    validation = Rule::new(
+        "!has(self.spec.managed) || (size(self.metadata.name) <= 63 && self.metadata.name.matches('^[a-z]([-a-z0-9]*[a-z0-9])?$'))"
+    ).message("a managed instance's name names its Service: a DNS-1035 label (lowercase letters, digits and '-', starting with a letter), at most 63 characters")
 )]
 #[serde(rename_all = "camelCase")]
 #[schemars(extend("x-kubernetes-validations" = [
@@ -136,6 +141,22 @@ pub struct Reload {
     /// the keys, until the pods restart otherwise.
     #[serde(default)]
     pub restart: RestartPolicy,
+    /// `managed`: what a change of a key BatleHub applies to requests but
+    /// not to the components it built at startup (warming, release
+    /// imports, the scan worker — BatleHub's `Partial` tier, every
+    /// `registries[*]` among them) is. `Reload` (default) hot-reloads it
+    /// and raises `PartiallyApplied`, naming the keys, until the pods
+    /// restart; `Restart` treats it as a key read at startup
+    /// (`reload.restart` decides).
+    #[serde(default)]
+    pub partial: PartialPolicy,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq, JsonSchema)]
+pub enum PartialPolicy {
+    #[default]
+    Reload,
+    Restart,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq, JsonSchema)]
@@ -275,7 +296,9 @@ pub struct BatleHubLocalInstanceStatus {
     pub reload_nonce: u64,
     /// The last configuration the instance refused (or loaded without
     /// being able to write it, `unpersistedConfigHash`), and when: the same
-    /// one is pushed again at most every 10 minutes.
+    /// one is pushed again at most every 10 minutes. `managed`: without a
+    /// time, it is being retried under a new `reloadNonce` — a pod that
+    /// stages nothing for those new bytes refused them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rejected_config_hash: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -287,10 +310,16 @@ pub struct BatleHubLocalInstanceStatus {
     /// configuration file (`ConfigReadOnly`): lost on its next restart.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unpersisted_config_hash: Option<String>,
-    /// The keys needing a restart the instance doesn't run yet, while the
-    /// push is held back.
+    /// The keys needing a restart the instance doesn't run yet: external,
+    /// while the push is held back; managed, until the proxy pods start on
+    /// the configuration (rolled out, or `RestartRequired`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub restart_keys: Vec<String>,
+    /// `managed`: keys of BatleHub's `Partial` tier changed since the proxy
+    /// pods started, hot-reloaded (`reload.partial: Reload`): what was
+    /// built at startup keeps their old value until a restart.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub partial_keys: Vec<String>,
     /// The pods (with `external.podSelector`) not running the desired
     /// configuration yet; empty once it is applied.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

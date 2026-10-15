@@ -14,7 +14,7 @@ CR is deleted.
 | --- | --- | --- | --- | --- |
 | A reconcile ends on `Ready: False` — every time, not only the first | `Warning` | the failure's code | `Reconcile` | the condition's message |
 | `Ready` turns `True`, or stays `True` with another reason | `Normal` | `Reconciled` | `Reconcile` | the condition's message |
-| An advisory condition appears or changes | `Normal` | `RestartRequired`, `ConfigHeld`, `ConfigWarnings`, `UnresolvedPlaceholders`, `ConfigInvalidLenient`, `RegistrySelectorIgnored`, `TokenReviewUnavailable`, `RegistrySuspended`, `MaintenanceRunning`, `MaintenanceSuspended`, `SuspiciousGrant`, `ExemptionExpired` | `Reconcile` | its message |
+| An advisory condition appears or changes | `Normal` | `RestartRequired`, `PartiallyApplied`, `ConfigHeld`, `ConfigWarnings`, `UnresolvedPlaceholders`, `ConfigInvalidLenient`, `RegistrySelectorIgnored`, `TokenReviewUnavailable`, `RegistrySuspended`, `MaintenanceRunning`, `MaintenanceSuspended`, `SuspiciousGrant`, `ExemptionExpired`, `CacheVolumeNotResized`, `CacheVolumeSingleWriter` | `Reconcile` | its message |
 | An advisory condition goes away | `Normal` | its code | `Reconcile` | `<type> no longer applies: <message>` |
 | A new configuration was rolled out by restarting the pods. | `Normal` | `ConfigRolledOut` | `Reconcile` | what happened, with the remote object's id |
 | The instance reloaded a new configuration. | `Normal` | `ConfigReloaded` | `Reconcile` | what happened, with the remote object's id |

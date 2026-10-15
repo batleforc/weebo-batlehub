@@ -39,6 +39,10 @@ pub struct Rendered {
     pub hash: String,
     /// `UnresolvedPlaceholders`, `ConfigInvalidLenient`.
     pub advisories: Vec<Advisory>,
+    /// A Secret's text went into it or into its validation (a layer, a
+    /// registry's `configFrom`, an environment value): messages about it
+    /// keep key paths and positions only ([`crate::redact::values`]).
+    pub sensitive: bool,
 }
 
 /// What became of a registry bound to the instance.
@@ -51,6 +55,8 @@ pub struct RegistryDecision {
     pub bound: BoundInstance,
     /// `Ok(true)`: rendered; `Ok(false)`: suspended; `Err`: left out.
     pub rendered: Result<bool, Failure>,
+    /// Its `configFrom` reads a Secret.
+    pub from_secret: bool,
 }
 
 /// SHA-256 of `text`, hex.
@@ -107,12 +113,9 @@ pub async fn render_registries(
                     ),
                 ));
             }
-            // Attached: the oldest holds the name, rendered or not (its
-            // fault fixed, it would take the name back from a younger one).
-            taken.insert(
-                registry_name.clone(),
-                format!("BatleHubRegistry {}/{}", registry.namespace, registry.name),
-            );
+            // Before it takes the name: a registry of another namespace
+            // never holds the name of one the instance declares, which a
+            // registry of its own namespace may complete.
             if foreign && statics.contains(&registry_name) {
                 return Err(Failure::new(
                     ReasonCode::DuplicateRegistryName,
@@ -122,6 +125,12 @@ pub async fn render_registries(
                     ),
                 ));
             }
+            // Attached: the oldest holds the name, rendered or not (its
+            // fault fixed, it would take the name back from a younger one).
+            taken.insert(
+                registry_name.clone(),
+                format!("BatleHubRegistry {}/{}", registry.namespace, registry.name),
+            );
             let entry = registry_entry(&registry, &registry_name, sources, parser).await?;
             if foreign && contains_placeholder(&entry) {
                 return Err(Failure::new(
@@ -143,12 +152,18 @@ pub async fn render_registries(
             Ok(None) => Ok(false),
             Err(failure) => Err(failure),
         };
+        let from_secret = registry
+            .spec
+            .config_from
+            .iter()
+            .any(|s| s.secret_ref.is_some());
         decisions.push(RegistryDecision {
             namespace: registry.namespace,
             name: registry.name,
             registry_name,
             bound: bound.clone(),
             rendered,
+            from_secret,
         });
     }
     entries.sort_by(|a, b| (&a.0, &a.1).cmp(&(&b.0, &b.1)));
@@ -308,25 +323,117 @@ pub async fn base_layers(
     if layers.is_empty() {
         return Err(Failure::new(
             ReasonCode::InvalidSpec,
-            "external.manageConfig needs spec.config or spec.configLayers: the operator \
-             would replace the instance's configuration with nothing",
+            if spec.managed.is_some() {
+                "a managed instance needs spec.config or spec.configLayers: BatleHub doesn't \
+                 start without a configuration"
+            } else {
+                "external.manageConfig needs spec.config or spec.configLayers: the operator \
+                 would replace the instance's configuration with nothing"
+            },
         ));
     }
     Ok(layers)
 }
 
+/// What a managed instance's environment answers the parser: each name
+/// its `env`/`envFrom` set, with its value when the operator can read it
+/// (`value`, a `ConfigMap`'s, a labelled `Secret`'s), `None` when set
+/// otherwise (`fieldRef`, a source not readable yet). Validation only:
+/// never rendered nor sent.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct InstanceEnv {
+    pub values: BTreeMap<String, Option<String>>,
+    /// A value came from a Secret.
+    pub secret: bool,
+}
+
+/// The environment of `instance`'s pods, as Kubernetes builds it: every
+/// `envFrom` in order, then every `env` (the later wins). External
+/// instances: none known.
+pub async fn instance_env(
+    instance: &LocalInstance,
+    namespace: &str,
+    sources: &dyn ConfigSources,
+) -> InstanceEnv {
+    use api::config::ConfigSource;
+    let mut env = InstanceEnv::default();
+    let Some(managed) = &instance.spec.managed else {
+        return env;
+    };
+    for from in &managed.env_from {
+        let prefix = from.prefix.clone().unwrap_or_default();
+        let (source, secret) = match (&from.config_map_ref, &from.secret_ref) {
+            (Some(r), _) => (ConfigSource::config_map(&r.name, ""), false),
+            (None, Some(r)) => (ConfigSource::secret(&r.name, ""), true),
+            (None, None) => continue,
+        };
+        // Unreadable: its names are unknown, they stay unresolved.
+        if let Ok(values) = sources.read_all(namespace, &source).await {
+            env.secret |= secret && !values.is_empty();
+            for (name, value) in values {
+                env.values.insert(format!("{prefix}{name}"), Some(value));
+            }
+        }
+    }
+    for var in &managed.env {
+        let value = match (&var.value, &var.value_from) {
+            (Some(value), _) => Some(value.clone()),
+            (None, Some(from)) => {
+                let read = match (&from.secret_key_ref, &from.config_map_key_ref) {
+                    (Some(r), _) => Some((ConfigSource::secret(&r.name, &r.key), true)),
+                    (None, Some(r)) => Some((ConfigSource::config_map(&r.name, &r.key), false)),
+                    _ => None,
+                };
+                match read {
+                    Some((source, secret)) => match sources.read(namespace, &source).await {
+                        Ok(value) => {
+                            env.secret |= secret;
+                            Some(value)
+                        }
+                        Err(_) => None,
+                    },
+                    // `fieldRef`, `resourceFieldRef`: set by the kubelet.
+                    None => None,
+                }
+            }
+            (None, None) => Some(String::new()),
+        };
+        env.values.insert(var.name.clone(), value);
+    }
+    env
+}
+
 /// The configuration of `instance`: its `base` layers ([`base_layers`]),
 /// then `registries` (the entries [`render_registries`] returns), merged
 /// and validated.
+/// `secret_registries`: a rendered registry read a Secret.
 pub fn render_config(
     instance: &LocalInstance,
     base: &[String],
     registries: Vec<Value>,
+    secret_registries: bool,
+    env: &InstanceEnv,
     parser: &dyn ConfigParser,
 ) -> Result<Rendered, Failure> {
+    let sensitive = secret_registries
+        || env.secret
+        || instance
+            .spec
+            .config_layers
+            .iter()
+            .any(|l| l.secret_ref.is_some());
+    let shown = |e: &ConfigError| {
+        if sensitive {
+            crate::redact::values(&e.to_string())
+        } else {
+            e.to_string()
+        }
+    };
     let invalid = |what: &str| {
         let what = what.to_string();
-        move |e: ConfigError| Failure::new(ReasonCode::ConfigInvalid, format!("{what}: {e}"))
+        move |e: ConfigError| {
+            Failure::new(ReasonCode::ConfigInvalid, format!("{what}: {}", shown(&e)))
+        }
     };
     let mut layers = base.to_vec();
     if !registries.is_empty() {
@@ -341,13 +448,22 @@ pub fn render_config(
         .map_err(invalid("merging the configuration"))?;
 
     let mut advisories = Vec::new();
-    // `env` answers the placeholders, with a stand-in; the overrides
-    // BatleHub also reads from it (`PROXY_CACHE__*`…) are unknown here, so
-    // not set — a stand-in would override the file.
-    let unresolved = placeholders(&document);
-    let env = |name: &str| unresolved.contains(name).then(|| STAND_IN.to_string());
-    if let Err(e) = parser.validate(&[&document], &env) {
-        let message = format!("BatleHub's parser refuses the configuration: {e}");
+    // `env` answers with the instance's environment where the operator
+    // knows it (`managed.env`), the placeholders it doesn't with a
+    // stand-in; an override (`PROXY_CACHE__*`…) it doesn't know is not set
+    // — a stand-in would override the file.
+    let named = placeholders(&document);
+    let unresolved: std::collections::BTreeSet<String> = named
+        .iter()
+        .filter(|name| !env.values.contains_key(*name))
+        .cloned()
+        .collect();
+    let answer = |name: &str| match env.values.get(name) {
+        Some(Some(value)) => Some(value.clone()),
+        Some(None) | None => named.contains(name).then(|| STAND_IN.to_string()),
+    };
+    if let Err(e) = parser.validate(&[&document], &answer) {
+        let message = format!("BatleHub's parser refuses the configuration: {}", shown(&e));
         match instance.spec.reload.validation {
             Validation::Strict => return Err(Failure::new(ReasonCode::ConfigInvalid, message)),
             Validation::Lenient => advisories.push(Advisory {
@@ -372,6 +488,7 @@ pub fn render_config(
         document,
         hash,
         advisories,
+        sensitive,
     })
 }
 
@@ -456,7 +573,7 @@ mod tests {
         token: Option<&str>,
     ) -> Result<Rendered, Failure> {
         let base = base_layers(hub, "ns", sources, parser).await?;
-        let rendered = render_config(hub, &base, vec![], parser)?;
+        let rendered = render_config(hub, &base, vec![], false, &InstanceEnv::default(), parser)?;
         if let Some(token) = token {
             check_token(&rendered, token, parser)?;
         }

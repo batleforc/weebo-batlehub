@@ -88,9 +88,19 @@ kubectl -n infra annotate bhli main --overwrite \
 
 BatleHub's replicas don't share a reload. When the instance runs in the
 same namespace (the BatleHub chart), `external.podSelector` selects its
-proxy pods: the operator pushes and approves on each ready pod, over plain
-HTTP on its IP (container port `http`). Without it, an instance of several
-replicas is not supported with `manageConfig`.
+proxy pods: the operator pushes and approves on each ready pod, on its IP
+(container port `http`), with `url`'s scheme and `tls`: over `https`, the
+pod's certificate is verified against `url`'s host name (which the call
+resolves to the pod's IP), so the pods must serve a certificate for it;
+over `http`, in clear, as `url` already is. Without it, an instance of
+several replicas is not supported with `manageConfig`.
+
+The admin token goes only to the selected pods that a `ReplicaSet` or a
+`StatefulSet` controls and selects (read and checked by UID): never to a
+bare pod someone created with matching labels. Whoever may create a
+Deployment in the instance's namespace whose pods match `podSelector`
+still receives the token: keep that right to those who may read the
+token's Secret.
 
 Select the proxy pods only: the chart's worker pods carry the same labels
 plus `app.kubernetes.io/component: worker`, and have no reload to approve.

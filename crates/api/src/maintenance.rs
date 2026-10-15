@@ -428,6 +428,14 @@ pub struct BatleHubMaintenanceStatus {
     /// answered.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_now: Option<String>,
+    /// When the schedule was first seen suspended; cleared once it runs
+    /// again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suspended_time: Option<String>,
+    /// When the schedule was last seen running again after a suspension:
+    /// it counts from there, the runs missed meanwhile are skipped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resumed_time: Option<String>,
 }
 
 #[cfg(test)]

@@ -109,10 +109,16 @@ tasks:
       - task: helm:lint
 
   test:
-    desc: "Fast unit + contract tests (lib-level, no cluster)"
+    desc: "Every test that needs no cluster, as the kit's: unit, contract (the admin gateway against wiremock, the CLI, the committed CRDs) and doctests"
     cmds:
       # --no-fail-fast: one failing crate must not hide the others' results.
-      - mise exec -- cargo test --workspace --lib --bins --no-fail-fast
+      # The test targets under crates/*/tests that run without envtest;
+      # the others are test:integration's.
+      - >-
+        mise exec -- cargo test --workspace --lib --bins --no-fail-fast
+        --test admin_gateway_contract --test in_sync --test cli
+      # Doctests can't be mixed with other targets.
+      - mise exec -- cargo test --workspace --doc --no-fail-fast
 
   test:integration:
     desc: "Every test target, including the envtest integration tests under crates/*/tests"

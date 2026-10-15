@@ -181,6 +181,7 @@ async fn governance_written_elsewhere_is_imported_and_adopted() {
         shutdown: Shutdown::never(),
         health: Arc::new(Health::default()),
         scope: WatchScope::cluster(),
+        images: Default::default(),
     });
     tokio::spawn(controller::package_grant::run(client.clone(), ctx.clone()));
     tokio::spawn(controller::package_policy::run(client.clone(), ctx));

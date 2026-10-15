@@ -60,7 +60,8 @@ pub fn registry_name(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
     })
 }
 
-/// A package name: immutable, never blank, `.` nor `..`.
+/// A package name: immutable, never blank, and no `/`-separated part of it
+/// `.` nor `..` (its parts become segments of the admin API's paths).
 pub fn package_name(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
     schemars::json_schema!({
         "type": "string",
@@ -68,12 +69,12 @@ pub fn package_name(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
         "maxLength": 1024,
         "x-kubernetes-validations": [
             {"rule": "self == oldSelf", "message": "package is immutable"},
-            {"rule": "self == self.trim() && self != '.' && self != '..'", "message": "package may not be blank, `.` or `..`, nor start or end with a space"},
+            {"rule": "self == self.trim() && self.split('/').all(s, s != '.' && s != '..')", "message": "package may not be blank, have a `.` or `..` part between slashes, nor start or end with a space"},
         ],
     })
 }
 
-/// A version: immutable, never `.`, `..`, nor containing a path separator.
+/// A version: immutable, never `.`, nor containing `..` or a path separator.
 pub fn version_name(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
     schemars::json_schema!({
         "type": "string",
@@ -81,7 +82,7 @@ pub fn version_name(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
         "maxLength": 256,
         "x-kubernetes-validations": [
             {"rule": "self == oldSelf", "message": "version is immutable"},
-            {"rule": "self == self.trim() && !self.contains('..') && !self.contains('/') && !self.contains('\\\\')", "message": "version may not contain `..`, `/` or `\\`, nor start or end with a space"},
+            {"rule": "self == self.trim() && self != '.' && !self.contains('..') && !self.contains('/') && !self.contains('\\\\')", "message": "version may not be `.`, contain `..`, `/` or `\\`, nor start or end with a space"},
         ],
     })
 }

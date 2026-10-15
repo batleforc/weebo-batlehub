@@ -66,6 +66,40 @@ export default defineConfig({
   // metrics & health, resource budget (measured from M5).
   reference: {
     metricsPrefix: "weebo_batlehub",
+    // The operator's own metrics (spec §6.11); each name is checked in
+    // crates/.
+    extraMetrics: [
+      {
+        name: "weebo_batlehub_instance_ready",
+        type: "gauge",
+        labels: "`instance_namespace`, `instance_name`",
+        description: "1 when the BatleHubLocalInstance is `Ready`, 0 otherwise; gone with the instance",
+      },
+      {
+        name: "weebo_batlehub_instance_restart_required",
+        type: "gauge",
+        labels: "`instance_namespace`, `instance_name`",
+        description: "Keys waiting for a restart (`status.restartKeys`): `reload.restart: Never`, or a restart key held back on an external instance",
+      },
+      {
+        name: "weebo_batlehub_instance_config_warnings",
+        type: "gauge",
+        labels: "`instance_namespace`, `instance_name`, `code`",
+        description: "BatleHub's warnings on its configuration (`status.warnings`), by code; a warning that goes takes its series with it",
+      },
+      {
+        name: "weebo_batlehub_admin_requests_total",
+        type: "counter",
+        labels: "`endpoint` (the call: `reload`, `put_grant`…, `maintenance` for an action's), `status` (`ok`, or the error class: `unreachable`, `unauthorized`, `rejected`…)",
+        description: "Calls of BatleHub's admin API",
+      },
+      {
+        name: "weebo_batlehub_maintenance_runs_total",
+        type: "counter",
+        labels: "`action`, `result`",
+        description: "BatleHubMaintenance runs",
+      },
+    ],
     // `task perf`'s report (target/perf/weebo-batlehub.json), copied here.
     perfReport: "perf/weebo-batlehub.json",
     // Refreshed every week by .github/workflows/perf.yml; the report

@@ -403,6 +403,12 @@ spec:
                 format: int64
                 nullable: true
                 type: integer
+              resumedTime:
+                description: |-
+                  When the schedule was last seen running again after a suspension:
+                  it counts from there, the runs missed meanwhile are skipped.
+                nullable: true
+                type: string
               runCount:
                 default: 0
                 format: int64
@@ -411,6 +417,12 @@ spec:
                 description: |-
                   The last value of the `batlehub.weebo.io/run-now` annotation a run
                   answered.
+                nullable: true
+                type: string
+              suspendedTime:
+                description: |-
+                  When the schedule was first seen suspended; cleared once it runs
+                  again.
                 nullable: true
                 type: string
             type: object

@@ -31,7 +31,7 @@ use opentelemetry::metrics::Counter;
 use serde_json::{Map, Value, json};
 use weebo_kit_runtime::events;
 
-use super::{Ctx, Error, FIELD_MANAGER, METRIC_PREFIX, error_policy};
+use super::{Ctx, Error, FIELD_MANAGER, error_policy};
 
 pub const KIND: &str = "BatleHubMaintenance";
 
@@ -49,7 +49,8 @@ fn runs() -> &'static Counter<u64> {
     static RUNS: OnceLock<Counter<u64>> = OnceLock::new();
     RUNS.get_or_init(|| {
         opentelemetry::global::meter(FIELD_MANAGER)
-            .u64_counter(format!("{METRIC_PREFIX}_maintenance_runs_total"))
+            // Spelled out: the docs' Metrics page checks the name in the sources.
+            .u64_counter("weebo_batlehub_maintenance_runs_total")
             .with_description("Maintenance runs, by action and result")
             .build()
     })
@@ -194,6 +195,8 @@ fn fields(status: &api::MaintenanceStatus) -> Map<String, Value> {
     fields.insert("runCount".into(), json!(status.run_count));
     fields.insert("failureCount".into(), json!(status.failure_count));
     fields.insert("runNow".into(), json!(status.run_now));
+    fields.insert("suspendedTime".into(), json!(status.suspended_time));
+    fields.insert("resumedTime".into(), json!(status.resumed_time));
     fields
 }
 

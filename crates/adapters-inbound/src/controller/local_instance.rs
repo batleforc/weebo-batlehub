@@ -36,8 +36,8 @@ use application::use_cases::reconcile_managed::{
 };
 use application::use_cases::reconcile_registry::rendered_outcome;
 use application::use_cases::render_config::{
-    RegistryDecision, Rendered, base_layers, check_token, render_config, render_registries,
-    static_registry_names,
+    RegistryDecision, Rendered, base_layers, check_token, instance_env, render_config,
+    render_registries, static_registry_names,
 };
 use domain::Failure;
 use domain::error::ReasonCode;
@@ -247,6 +247,7 @@ fn config_status_kept(obj: &LocalInstance) -> ConfigStatus {
         rejection_message: previous.rejection_message,
         unpersisted_hash: previous.unpersisted_config_hash,
         restart_keys: previous.restart_keys,
+        partial_keys: previous.partial_keys,
         pods: previous.pods,
         reloaded_at: unix(&previous.last_reload_time),
     }
@@ -280,7 +281,20 @@ pub(crate) async fn render(
         ctx.config.as_ref(),
     )
     .await;
-    let rendered = base.and_then(|base| render_config(obj, &base, entries, ctx.config.as_ref()));
+    let secret_registries = decisions
+        .iter()
+        .any(|d| d.from_secret && d.rendered == Ok(true));
+    let env = instance_env(obj, &namespace, ctx.sources.as_ref()).await;
+    let rendered = base.and_then(|base| {
+        render_config(
+            obj,
+            &base,
+            entries,
+            secret_registries,
+            &env,
+            ctx.config.as_ref(),
+        )
+    });
     Ok((rendered, decisions))
 }
 
@@ -326,7 +340,24 @@ async fn apply(
     };
     let mut workload = None;
     let mut rolled_out = None;
-    let report = if let (Some(managed), Some(rendered)) = (&obj.spec.managed, rendered.clone()) {
+    let report = if obj.spec.managed.is_some() && !ctx.scope.cluster_kinds() {
+        // Fully namespaced (`watch.clusterKinds: false`): no ClusterRole, so
+        // none of the rules a managed instance's objects need — every write
+        // would be forbidden. Said once, not retried as an API error.
+        InstanceReport {
+            outcome: Outcome::failed(Failure::new(
+                ReasonCode::InvalidSpec,
+                "managed mode needs the operator's cluster rules (Deployments, Services, \
+                 PersistentVolumeClaims…), which a fully namespaced operator \
+                 (watch.clusterKinds: false) doesn't have: use external mode, or an operator \
+                 installed with watch.clusterKinds: true",
+            )),
+            observed: None,
+            config: Some(config_status_kept(&obj)),
+            due_in: None,
+            reloaded: false,
+        }
+    } else if let (Some(managed), Some(rendered)) = (&obj.spec.managed, rendered.clone()) {
         let report = managed_pass(&obj, managed, &bound, rendered, ctx).await;
         workload = Some(report.workload);
         rolled_out = report.rolled_out;
@@ -353,6 +384,7 @@ async fn apply(
         );
     }
     super::record_reconcile(KIND, started, &outcome);
+    super::metrics::record_instance(&bound, series(&obj, &report, &outcome));
     let mut status = fields(&obj, &report);
     if let Some(workload) = &workload {
         status.insert("credentialsHash".into(), json!(workload.credentials_hash));
@@ -421,6 +453,32 @@ async fn apply(
         outcome.steady(),
         report.due_in,
     ))
+}
+
+/// What the instance gauges report after a pass: the warnings as last
+/// read (kept while the instance doesn't answer, like the status).
+fn series(
+    obj: &LocalInstance,
+    report: &InstanceReport,
+    outcome: &Outcome,
+) -> super::metrics::InstanceSeries {
+    let warnings = match &report.observed {
+        Some(observed) => observed.warnings.clone(),
+        None => obj
+            .status
+            .as_ref()
+            .map(|s| s.warnings.clone())
+            .unwrap_or_default(),
+    };
+    let mut by_code = std::collections::BTreeMap::new();
+    for warning in warnings {
+        *by_code.entry(warning.code).or_insert(0) += 1;
+    }
+    super::metrics::InstanceSeries {
+        ready: outcome.ready.is_ok(),
+        restart_keys: report.config.as_ref().map_or(0, |c| c.restart_keys.len()),
+        warnings: by_code,
+    }
 }
 
 /// External mode: the instance at `url`, with `manageConfig` the
@@ -501,6 +559,7 @@ async fn managed_pass(
         ),
         None => None,
     };
+    let managed = &ctx.images.fill(managed);
     let pass = ManagedPass {
         owner: Owner {
             namespace,
@@ -516,6 +575,11 @@ async fn managed_pass(
             .status
             .as_ref()
             .map(|s| s.restart_keys.clone())
+            .unwrap_or_default(),
+        partial_keys: obj
+            .status
+            .as_ref()
+            .map(|s| s.partial_keys.clone())
             .unwrap_or_default(),
         operator_namespace: ctx.operator_namespace.clone(),
         token_review_role: ctx.token_review_role.clone(),
@@ -578,6 +642,10 @@ fn fields(obj: &LocalInstance, report: &InstanceReport) -> Map<String, Value> {
         list_or_null(json!(config.restart_keys)),
     );
     fields.insert(
+        "partialKeys".into(),
+        list_or_null(json!(config.partial_keys)),
+    );
+    fields.insert(
         "pods".into(),
         list_or_null(serde_json::to_value(&config.pods).expect("pods serialize")),
     );
@@ -633,16 +701,24 @@ async fn cleanup(
     let Err(in_use) = release_instance(&bound.to_string(), &dependents) else {
         // Its namespaced objects go with it (owner references); the
         // cluster-scoped TokenReview binding is the operator's to remove.
-        if instance.spec.managed.is_some() {
+        // Without a role (limited to one namespace, no cluster rules) it
+        // bound nothing: no cluster-scoped read, which would be forbidden.
+        if instance.spec.managed.is_some()
+            && let Some(role) = &ctx.token_review_role
+        {
             ctx.workloads
-                .unbind_token_review(&Owner {
-                    namespace: bound.namespace.clone().unwrap_or_default(),
-                    name: bound.name.clone(),
-                    uid: instance.uid().unwrap_or_default(),
-                })
+                .unbind_token_review(
+                    &Owner {
+                        namespace: bound.namespace.clone().unwrap_or_default(),
+                        name: bound.name.clone(),
+                        uid: instance.uid().unwrap_or_default(),
+                    },
+                    role,
+                )
                 .await
                 .map_err(|e| Error::Cleanup(Failure::new(e.reason(), e.to_string())))?;
         }
+        super::metrics::forget_instance(&bound);
         return Ok(());
     };
     // `InstanceInUse` replaces whatever `Ready` said while the deletion

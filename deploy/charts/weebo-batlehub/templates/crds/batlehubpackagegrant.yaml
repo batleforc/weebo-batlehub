@@ -129,8 +129,8 @@ spec:
                 x-kubernetes-validations:
                 - message: package is immutable
                   rule: self == oldSelf
-                - message: package may not be blank, `.` or `..`, nor start or end with a space
-                  rule: self == self.trim() && self != '.' && self != '..'
+                - message: package may not be blank, have a `.` or `..` part between slashes, nor start or end with a space
+                  rule: self == self.trim() && self.split('/').all(s, s != '.' && s != '..')
               registry:
                 description: The registry's name on the instance. Immutable.
                 maxLength: 253
@@ -151,8 +151,8 @@ spec:
                 x-kubernetes-validations:
                 - message: version is immutable
                   rule: self == oldSelf
-                - message: version may not contain `..`, `/` or `\`, nor start or end with a space
-                  rule: self == self.trim() && !self.contains('..') && !self.contains('/') && !self.contains('\\')
+                - message: version may not be `.`, contain `..`, `/` or `\`, nor start or end with a space
+                  rule: self == self.trim() && self != '.' && !self.contains('..') && !self.contains('/') && !self.contains('\\')
             required:
             - grants
             - package

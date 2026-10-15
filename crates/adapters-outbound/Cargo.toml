@@ -17,6 +17,7 @@ async-trait = { workspace = true }
 batlehub-config = { workspace = true }
 k8s-openapi = { workspace = true }
 kube = { workspace = true }
+opentelemetry = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -28,5 +29,6 @@ weebo-kit-api = { workspace = true }
 weebo-kit-application = { workspace = true }
 
 [dev-dependencies]
+application = { workspace = true, features = ["test-support"] }
 argon2 = { workspace = true, features = ["getrandom"] }
 wiremock = { workspace = true }

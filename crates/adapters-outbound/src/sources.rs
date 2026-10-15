@@ -5,6 +5,7 @@
 //! BatleHub —, and the `BatleHubRegistry`s in the operator's scope, each
 //! resolved to its instance.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use api::Registry;
@@ -63,6 +64,33 @@ impl KubeConfigSources {
         String::from_utf8(bytes.0).map_err(|_| SourceError::Missing(format!("{what}: not UTF-8")))
     }
 
+    /// The `Secret` `name`, if labelled for BatleHub.
+    async fn consenting_secret(
+        &self,
+        namespace: &str,
+        name: &str,
+        what: &str,
+    ) -> Result<Secret, SourceError> {
+        let secret = Api::<Secret>::namespaced(self.client.clone(), namespace)
+            .get_opt(name)
+            .await
+            .map_err(|e| SourceError::Kubernetes(format!("reading {what}: {e}")))?
+            .ok_or_else(|| SourceError::Missing(format!("{what}: not found")))?;
+        let consents = secret
+            .labels()
+            .get(api::CREDENTIAL_LABEL)
+            .is_some_and(|v| v == "true");
+        if !consents {
+            return Err(SourceError::NotAllowed(format!(
+                "secret {namespace}/{name} lacks the label {}=\"true\": its content would be sent \
+                 to BatleHub, so it must opt in (kubectl label secret -n {namespace} {name} {}=true)",
+                api::CREDENTIAL_LABEL,
+                api::CREDENTIAL_LABEL
+            )));
+        }
+        Ok(secret)
+    }
+
     async fn secret(&self, namespace: &str, r: &ConfigKeyRef) -> Result<String, SourceError> {
         let what = format!("secret {namespace}/{} key {:?}", r.name, r.key);
         let secret = Api::<Secret>::namespaced(self.client.clone(), namespace)
@@ -98,6 +126,44 @@ impl ConfigSources for KubeConfigSources {
         match (&source.config_map_ref, &source.secret_ref) {
             (Some(r), None) => self.config_map(namespace, r).await,
             (None, Some(r)) => self.secret(namespace, r).await,
+            _ => Err(SourceError::Missing(
+                "set exactly one of configMapRef and secretRef".into(),
+            )),
+        }
+    }
+
+    async fn read_all(
+        &self,
+        namespace: &str,
+        source: &ConfigSource,
+    ) -> Result<BTreeMap<String, String>, SourceError> {
+        let text = |bytes: Vec<u8>| String::from_utf8(bytes).ok();
+        match (&source.config_map_ref, &source.secret_ref) {
+            (Some(r), None) => {
+                let what = format!("configmap {namespace}/{}", r.name);
+                let map = Api::<ConfigMap>::namespaced(self.client.clone(), namespace)
+                    .get_opt(&r.name)
+                    .await
+                    .map_err(|e| SourceError::Kubernetes(format!("reading {what}: {e}")))?
+                    .ok_or_else(|| SourceError::Missing(format!("{what}: not found")))?;
+                let mut all: BTreeMap<String, String> = map.data.unwrap_or_default();
+                for (k, v) in map.binary_data.unwrap_or_default() {
+                    if let Some(v) = text(v.0) {
+                        all.insert(k, v);
+                    }
+                }
+                Ok(all)
+            }
+            (None, Some(r)) => {
+                let what = format!("secret {namespace}/{}", r.name);
+                let secret = self.consenting_secret(namespace, &r.name, &what).await?;
+                Ok(secret
+                    .data
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|(k, v)| Some((k, text(v.0)?)))
+                    .collect())
+            }
             _ => Err(SourceError::Missing(
                 "set exactly one of configMapRef and secretRef".into(),
             )),
@@ -141,5 +207,24 @@ impl ConfigSources for KubeConfigSources {
             });
         }
         Ok(views)
+    }
+
+    async fn secret_consents(
+        &self,
+        namespace: &str,
+        name: &str,
+    ) -> Result<Option<bool>, SourceError> {
+        // Metadata only: its content is never read here.
+        let meta = Api::<Secret>::namespaced(self.client.clone(), namespace)
+            .get_metadata_opt(name)
+            .await
+            .map_err(|e| {
+                SourceError::Kubernetes(format!("reading secret {namespace}/{name}: {e}"))
+            })?;
+        Ok(meta.map(|m| {
+            m.labels()
+                .get(api::CREDENTIAL_LABEL)
+                .is_some_and(|v| v == "true")
+        }))
     }
 }

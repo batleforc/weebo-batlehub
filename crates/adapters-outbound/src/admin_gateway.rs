@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use application::ports::{
     AdminGateway, AdminRequest, ConfigWarning, Exemption, GatewayError, GrantWrite, InstanceInfo,
-    Method, PackageNode, PendingSource, ReloadCheck, StoredGrant, TeamNamespace,
+    Method, PackageNode, PendingSource, ReloadCheck, Reloaded, StoredGrant, TeamNamespace,
 };
 use batlehub_client::apis::configuration::Configuration;
 use batlehub_client::apis::{Error as ClientError, back_office_api, front_office_api};
@@ -25,6 +25,21 @@ use serde_json::{Value, json};
 
 /// Per-request timeout: a hung instance must not hold a reconcile forever.
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// The operator's `WEEBO_BATLEHUB_ADMIN_TIMEOUT_SECONDS`, set once at start:
+/// what every [`HttpAdminGateway::client`] built afterwards uses instead of
+/// [`REQUEST_TIMEOUT`] (a maintenance's call still has its own).
+static DEFAULT_TIMEOUT: std::sync::OnceLock<Duration> = std::sync::OnceLock::new();
+
+/// Sets the timeout of the admin calls; `false` when one was set already.
+pub fn set_request_timeout(timeout: Duration) -> bool {
+    DEFAULT_TIMEOUT.set(timeout).is_ok()
+}
+
+/// The timeout of the admin calls.
+pub fn request_timeout() -> Duration {
+    DEFAULT_TIMEOUT.get().copied().unwrap_or(REQUEST_TIMEOUT)
+}
 
 /// How much of an unexpected answer's body a message keeps.
 const BODY_EXCERPT: usize = 200;
@@ -62,7 +77,21 @@ impl HttpAdminGateway {
     /// certificate is an error, never a silent fallback to the platform
     /// store alone.
     pub fn client(ca_pem: Option<&[u8]>, insecure_skip_verify: bool) -> Result<Client, String> {
-        let mut builder = Client::builder().timeout(REQUEST_TIMEOUT);
+        Self::client_resolving(ca_pem, insecure_skip_verify, None)
+    }
+
+    /// [`Self::client`], `resolve`'s host name reaching its address: a pod
+    /// called on its IP while its certificate is verified against the
+    /// instance's host name.
+    pub fn client_resolving(
+        ca_pem: Option<&[u8]>,
+        insecure_skip_verify: bool,
+        resolve: Option<(&str, std::net::SocketAddr)>,
+    ) -> Result<Client, String> {
+        let mut builder = Client::builder().timeout(request_timeout());
+        if let Some((host, addr)) = resolve {
+            builder = builder.resolve(host, addr);
+        }
         if let Some(pem) = ca_pem {
             let certs = reqwest::Certificate::from_pem_bundle(pem)
                 .map_err(|e| format!("tls.caSecretRef: {e}"))?;
@@ -81,15 +110,23 @@ impl HttpAdminGateway {
             .map_err(|e| format!("building the HTTP client: {e}"))
     }
 
-    /// `{url}/<segments…>`, each segment percent-encoded.
-    fn url(&self, segments: &[&str]) -> Url {
+    /// `{url}/<segments…>`, each segment percent-encoded. A dot segment
+    /// (`.`, `..`, or their `%2e` spellings) is refused: the URL would drop
+    /// or resolve it, and the request would reach another route than the
+    /// one named (a claim prefix `acme/..` releasing another team's).
+    fn url(&self, segments: &[&str]) -> Result<Url, GatewayError> {
+        if let Some(segment) = segments.iter().find(|s| is_dot_segment(s)) {
+            return Err(GatewayError::InvalidPath(format!(
+                "{segment:?} can't be a segment of an admin API path"
+            )));
+        }
         let mut url = self.base.clone();
         url.path_segments_mut()
             // Checked in `new`.
             .expect("an http(s) URL is a base")
             .pop_if_empty()
             .extend(segments);
-        url
+        Ok(url)
     }
 
     /// `request` with the token and user agent the generated client sends.
@@ -108,7 +145,7 @@ impl HttpAdminGateway {
         let response = self
             .config
             .client
-            .get(self.url(&["livez"]))
+            .get(self.url(&["livez"])?)
             .send()
             .await
             .map_err(|e| GatewayError::Unreachable(e.to_string()))?;
@@ -163,7 +200,7 @@ impl HttpAdminGateway {
         timeout: Option<Duration>,
     ) -> Result<(StatusCode, String), GatewayError> {
         let mut request = self
-            .authorized(self.config.client.request(method, self.url(segments)))
+            .authorized(self.config.client.request(method, self.url(segments)?))
             .query(query);
         if let Some(timeout) = timeout {
             request = request.timeout(timeout);
@@ -206,6 +243,13 @@ impl HttpAdminGateway {
             ),
         }
     }
+}
+
+/// `.` or `..`, also percent-encoded (`%2e`, `.%2E`…): what a URL parser
+/// takes for a dot segment.
+fn is_dot_segment(segment: &str) -> bool {
+    let decoded = segment.to_ascii_lowercase().replace("%2e", ".");
+    decoded == "." || decoded == ".."
 }
 
 /// `endpoint: <BatleHub's message>` — its `{"error", "message"}` decoded,
@@ -423,10 +467,24 @@ impl AdminGateway for HttpAdminGateway {
 
     /// `POST /api/v1/admin/config/reload` (`config:write`): BatleHub reads
     /// its files and applies them — or the pending its watcher staged from
-    /// them. Bytes it has already tried leave nothing to apply: 400 "no
-    /// pending reload".
-    async fn reload(&self) -> Result<bool, GatewayError> {
+    /// them — and answers the diff it applied, `restart_required` against
+    /// the configuration it started on. Bytes it has already tried leave
+    /// nothing to apply: 400 "no pending reload", which doesn't say whether
+    /// it runs them, refused them or let them expire.
+    async fn reload(&self) -> Result<Reloaded, GatewayError> {
         const ENDPOINT: &str = "/api/v1/admin/config/reload";
+        #[derive(Deserialize, Default)]
+        struct Diff {
+            #[serde(default)]
+            restart_required: Vec<String>,
+            #[serde(default)]
+            partially_applied: Vec<String>,
+        }
+        #[derive(Deserialize)]
+        struct Answer {
+            #[serde(default)]
+            diff: Diff,
+        }
         let (status, body) = self
             .raw(
                 reqwest::Method::POST,
@@ -436,14 +494,18 @@ impl AdminGateway for HttpAdminGateway {
             )
             .await?;
         if status.is_success() {
-            return Ok(true);
+            let answer: Answer = decode(ENDPOINT, &body)?;
+            return Ok(Reloaded::Loaded {
+                restart_required: answer.diff.restart_required,
+                partially_applied: answer.diff.partially_applied,
+            });
         }
         let message = serde_json::from_str::<Value>(&body)
             .ok()
             .and_then(|v| v.get("message")?.as_str().map(String::from))
             .unwrap_or_default();
         match status {
-            StatusCode::BAD_REQUEST if message == "no pending reload" => Ok(false),
+            StatusCode::BAD_REQUEST if message == "no pending reload" => Ok(Reloaded::AlreadyTried),
             StatusCode::BAD_REQUEST if message.contains("expired") => {
                 Err(GatewayError::NoPending(format!("{ENDPOINT}: {message}")))
             }
@@ -474,7 +536,7 @@ impl AdminGateway for HttpAdminGateway {
             .authorized(
                 self.config
                     .client
-                    .get(self.url(&["api", "v1", "admin", "health"])),
+                    .get(self.url(&["api", "v1", "admin", "health"])?),
             )
             .send()
             .await
@@ -563,7 +625,7 @@ impl AdminGateway for HttpAdminGateway {
         let mut segments = vec!["api", "v1", "admin", "registries", registry, "namespaces"];
         segments.extend(prefix.split('/'));
         let response = self
-            .authorized(self.config.client.delete(self.url(&segments)))
+            .authorized(self.config.client.delete(self.url(&segments)?))
             .send()
             .await
             .map_err(|e| GatewayError::Unreachable(e.to_string()))?;
@@ -971,11 +1033,35 @@ mod tests {
     #[test]
     fn paths_hang_off_the_base_url() {
         let gw = gateway("https://example.com/sub/").unwrap();
-        assert_eq!(gw.url(&["livez"]).as_str(), "https://example.com/sub/livez");
+        assert_eq!(
+            gw.url(&["livez"]).unwrap().as_str(),
+            "https://example.com/sub/livez"
+        );
         assert_eq!(gw.config.base_path, "https://example.com/sub");
         let gw = gateway("https://example.com").unwrap();
-        assert_eq!(gw.url(&["livez"]).as_str(), "https://example.com/livez");
+        assert_eq!(
+            gw.url(&["livez"]).unwrap().as_str(),
+            "https://example.com/livez"
+        );
         assert_eq!(gw.config.base_path, "https://example.com");
+    }
+
+    #[test]
+    fn dot_segments_are_refused_never_resolved() {
+        let gw = gateway("https://example.com").unwrap();
+        for dot in [".", "..", "%2e", "%2E%2e", ".%2e"] {
+            let err = gw.url(&["api", "acme", dot, "x"]).unwrap_err();
+            assert!(
+                matches!(err, GatewayError::InvalidPath(_)),
+                "{dot}: {err:?}"
+            );
+            assert_eq!(err.reason(), domain::error::ReasonCode::InvalidSpec);
+        }
+        // Dots inside a segment are a name; a slash stays inside its
+        // segment.
+        let url = gw.url(&["a..b", "...", "x/y", "%2e%2e%2e"]).unwrap();
+        assert_eq!(url.path().split('/').count(), 5, "{url}");
+        assert!(!url.path().ends_with("/x/y"), "{url}");
     }
 
     #[test]

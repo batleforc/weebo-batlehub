@@ -175,6 +175,14 @@ weebo_kit_domain::reason_codes! {
         /// the pods (`reload.restart: Never`, or an external instance): the
         /// keys are in the message.
         RestartRequired,
+        /// `managed`, `reload.partial: Reload`: keys BatleHub applies to
+        /// requests but not to what it built at startup (warming, release
+        /// imports, the scan worker — every `registries[*]` change among
+        /// them) were hot-reloaded; those components keep the old values
+        /// until the proxy pods restart (keys in the message and
+        /// `status.partialKeys`). Restart them (the `restart` maintenance)
+        /// when it matters, or set `reload.partial: Restart`.
+        PartiallyApplied,
         /// `reload.strategy: Manual`: a validated configuration waits for
         /// the approval of its hash (in the message).
         ConfigHeld,
@@ -204,6 +212,17 @@ weebo_kit_domain::reason_codes! {
         /// Exemptions past their `exemptUntil` (listed in the message):
         /// reported, not rewritten.
         ExemptionExpired,
+        /// `managed.persistence.size` differs from what the cache's
+        /// `PersistentVolumeClaim` requested: the operator creates the
+        /// claim once and never resizes it. Expand it yourself when its
+        /// StorageClass allows (`kubectl patch pvc`), or set the size back.
+        CacheVolumeNotResized,
+        /// The filesystem cache's claim admits a single writer
+        /// (`persistence.accessMode`) while more pods mount it: several
+        /// proxy replicas on `ReadWriteOnce` (pods on other nodes wait for
+        /// the volume), or a separate worker on `ReadWriteOncePod` (it never
+        /// starts). Use `ReadWriteMany`, one replica, or an object store.
+        CacheVolumeSingleWriter,
 
         // --- Events only ---
         /// The instance reloaded a new configuration (Event only).
@@ -244,6 +263,7 @@ impl ReasonCode {
         match self {
             ReasonCode::Reconciled
             | ReasonCode::RestartRequired
+            | ReasonCode::PartiallyApplied
             | ReasonCode::ConfigHeld
             | ReasonCode::ConfigWarnings
             | ReasonCode::UnresolvedPlaceholders
@@ -255,6 +275,8 @@ impl ReasonCode {
             | ReasonCode::MaintenanceSuspended
             | ReasonCode::SuspiciousGrant
             | ReasonCode::ExemptionExpired
+            | ReasonCode::CacheVolumeNotResized
+            | ReasonCode::CacheVolumeSingleWriter
             | ReasonCode::ConfigReloaded
             | ReasonCode::ConfigRolledOut
             | ReasonCode::RestartInterrupts

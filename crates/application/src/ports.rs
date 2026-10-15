@@ -66,6 +66,11 @@ pub enum GatewayError {
     /// `gates:exempt` there.
     #[error("{0}")]
     NotPermitted(String),
+    /// A request the operator won't send: a name that would be a dot
+    /// segment of its path (`.`, `..`), which the URL would resolve to
+    /// another route.
+    #[error("{0}")]
+    InvalidPath(String),
 }
 
 impl GatewayError {
@@ -82,6 +87,7 @@ impl GatewayError {
             GatewayError::NotFound(_) => ReasonCode::RemoteNotFound,
             GatewayError::Refused(_) => ReasonCode::RemoteRejected,
             GatewayError::NotPermitted(_) => ReasonCode::ExemptionNotPermitted,
+            GatewayError::InvalidPath(_) => ReasonCode::InvalidSpec,
         }
     }
 }
@@ -120,11 +126,9 @@ pub trait AdminGateway: Send + Sync {
     async fn pending(&self) -> Result<Option<PendingSource>, GatewayError>;
     /// Drops the reload staged on the instance (none is fine).
     async fn discard_pending(&self) -> Result<(), GatewayError>;
-    /// Reloads the instance's configuration files from its disk: `true`
-    /// when it loaded them, `false` when it had already tried these exact
-    /// bytes (it runs them, or refused them before). An expired pending
-    /// is [`GatewayError::NoPending`].
-    async fn reload(&self) -> Result<bool, GatewayError>;
+    /// Reloads the instance's configuration files from its disk. An
+    /// expired pending is [`GatewayError::NoPending`].
+    async fn reload(&self) -> Result<Reloaded, GatewayError>;
     /// The names of the registries the instance serves.
     async fn registry_names(&self) -> Result<Vec<String>, GatewayError>;
     /// The team namespaces claimed on `registry`.
@@ -303,6 +307,25 @@ pub struct ReloadCheck {
     pub restart_required: Vec<String>,
 }
 
+/// What `POST …/config/reload` did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Reloaded {
+    /// The instance loaded its files.
+    Loaded {
+        /// The keys needing a restart the process doesn't have, against
+        /// the configuration it **started** on (credentials layer and
+        /// environment included; `["*"]`: BatleHub couldn't compare).
+        restart_required: Vec<String>,
+        /// The keys a component built at startup (warming, imports, the
+        /// scan worker) keeps the old value of until a restart.
+        partially_applied: Vec<String>,
+    },
+    /// Nothing loaded: the instance had already tried these exact bytes —
+    /// it runs them, refused them (its file watcher tried them first), or
+    /// let their pending reload expire. It doesn't say which.
+    AlreadyTried,
+}
+
 /// Who staged a pending reload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PendingSource {
@@ -419,6 +442,14 @@ pub enum WorkloadError {
     Conflict(String),
     #[error("Kubernetes API error: {0}")]
     Kubernetes(String),
+    /// A pod the operator doesn't run (an image off its allow-list, a
+    /// `hostPath`, a privilege): nothing is applied.
+    #[error("{0}")]
+    Refused(String),
+    /// A pod would read a `Secret` without the
+    /// `batlehub.weebo.io/credential` label: nothing is applied.
+    #[error("{0}")]
+    SecretNotAllowed(String),
 }
 
 impl WorkloadError {
@@ -426,6 +457,8 @@ impl WorkloadError {
         match self {
             WorkloadError::Conflict(_) => ReasonCode::OwnedObjectConflict,
             WorkloadError::Kubernetes(_) => ReasonCode::KubernetesApiError,
+            WorkloadError::Refused(_) => ReasonCode::InvalidSpec,
+            WorkloadError::SecretNotAllowed(_) => ReasonCode::SecretNotAllowed,
         }
     }
 }
@@ -479,17 +512,24 @@ pub trait Workloads: Send + Sync {
     /// The `Deployment` `name`, `None` when absent.
     async fn rollout(&self, owner: &Owner, name: &str) -> Result<Option<Rollout>, WorkloadError>;
     /// Binds the account `service_account` of the owner's namespace to the
-    /// `ClusterRole` `cluster_role` (TokenReview): a `ClusterRoleBinding`,
-    /// cluster-scoped, so without owner reference — named after the owner,
-    /// labelled, and removed by [`Self::unbind_token_review`].
+    /// `ClusterRole` `cluster_role` (TokenReview): a subject of the one
+    /// `ClusterRoleBinding` named after the role, shared by every instance
+    /// (the operator may write that binding only), recorded there for the
+    /// owner and removed by [`Self::unbind_token_review`].
     async fn bind_token_review(
         &self,
         owner: &Owner,
         service_account: &str,
         cluster_role: &str,
     ) -> Result<(), WorkloadError>;
-    /// Removes the owner's TokenReview binding (none is fine).
-    async fn unbind_token_review(&self, owner: &Owner) -> Result<(), WorkloadError>;
+    /// Removes the owner's subject from the TokenReview binding of
+    /// `cluster_role` — kept while another instance binds the same
+    /// account (none is fine).
+    async fn unbind_token_review(
+        &self,
+        owner: &Owner,
+        cluster_role: &str,
+    ) -> Result<(), WorkloadError>;
     /// Restarts the pods of the `Deployment` `name` (its template's
     /// `kubectl.kubernetes.io/restartedAt`), its `config-hash` set to
     /// `config_hash` when given; `false` when it doesn't exist.
@@ -499,6 +539,16 @@ pub trait Workloads: Send + Sync {
         name: &str,
         config_hash: Option<&str>,
     ) -> Result<bool, WorkloadError>;
+    /// The storage the `PersistentVolumeClaim` `name` of the owner's
+    /// namespace requests (`spec.resources.requests.storage`), `None` when
+    /// absent.
+    async fn claim_size(
+        &self,
+        _owner: &Owner,
+        _name: &str,
+    ) -> Result<Option<String>, WorkloadError> {
+        Ok(None)
+    }
 }
 
 /// The CRs bound to an instance, which hold its deletion.
@@ -520,6 +570,18 @@ pub trait InstanceDependents: Send + Sync {
 pub struct ConfigVerdict {
     /// Legal but probably unintended settings.
     pub warnings: Vec<String>,
+}
+
+/// The changed keys a reload doesn't fully apply (BatleHub's tiers).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct KeyChanges {
+    /// Read at startup only (`Restart`): a running process doesn't apply
+    /// them.
+    pub restart: Vec<String>,
+    /// Applied to requests, while a component built at startup — warming,
+    /// release imports, the scan worker — keeps the old value until a
+    /// restart (`Partial`).
+    pub partial: Vec<String>,
 }
 
 /// Why a configuration couldn't be accepted.
@@ -562,9 +624,9 @@ pub trait ConfigParser: Send + Sync {
     /// with the admin role.
     fn token_check(&self, document: &str, token: &str) -> TokenCheck;
     /// The changed keys between two documents (as [`Self::merge`] returns
-    /// them) that BatleHub reads at startup only: a running process
-    /// doesn't apply them.
-    fn restart_keys(&self, before: &str, after: &str) -> Result<Vec<String>, ConfigError>;
+    /// them) that a reload doesn't fully apply: BatleHub's own
+    /// `reload_keys::classify`.
+    fn classify(&self, before: &str, after: &str) -> Result<KeyChanges, ConfigError>;
     /// `token` as BatleHub's `hash-token` writes it (Argon2id, its
     /// parameters), salted from the token itself: the same token, the same
     /// hash, the same rendered file.
@@ -614,8 +676,23 @@ pub trait ConfigSources: Send + Sync {
     /// The text of a `ConfigMap`/`Secret` key of `namespace`: a `Secret`
     /// only when labelled `batlehub.weebo.io/credential: "true"`.
     async fn read(&self, namespace: &str, source: &ConfigSource) -> Result<String, SourceError>;
+    /// Every key of a `ConfigMap`/`Secret` of `namespace` (the key of
+    /// `source` aside), on the same terms as [`Self::read`]: an `envFrom`.
+    async fn read_all(
+        &self,
+        namespace: &str,
+        source: &ConfigSource,
+    ) -> Result<std::collections::BTreeMap<String, String>, SourceError>;
     /// Every `BatleHubRegistry` the operator sees, resolved.
     async fn registries(&self) -> Result<Vec<RegistryView>, String>;
+    /// Whether the `Secret` `name` of `namespace` carries
+    /// `batlehub.weebo.io/credential: "true"` (its metadata only, its
+    /// content never read); `None` when it doesn't exist.
+    async fn secret_consents(
+        &self,
+        namespace: &str,
+        name: &str,
+    ) -> Result<Option<bool>, SourceError>;
 }
 
 /// The instance a `BatleHubRegistry` attaches to: the kit's resolution,

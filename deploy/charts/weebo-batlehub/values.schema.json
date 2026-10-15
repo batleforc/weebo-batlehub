@@ -179,11 +179,11 @@
         },
         "duration": {
           "type": "string",
-          "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|\u00b5s|ms|s|m|h))+$"
+          "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$"
         },
         "renewBefore": {
           "type": "string",
-          "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|\u00b5s|ms|s|m|h))+$"
+          "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$"
         }
       }
     },
@@ -222,11 +222,11 @@
         },
         "interval": {
           "type": "string",
-          "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|\u00b5s|ms|s|m|h))+$"
+          "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$"
         },
         "scrapeTimeout": {
           "type": "string",
-          "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|\u00b5s|ms|s|m|h))+$"
+          "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$"
         },
         "metricRelabelings": {
           "type": "array",
@@ -718,6 +718,56 @@
         "json"
       ],
       "description": "Log line format (LOG_FORMAT)."
+    },
+    "managedInstances": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "What a managed BatleHubLocalInstance may deploy.",
+      "properties": {
+        "allowedImages": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[^:@]+(:[0-9]+/[^:@]+)?$"
+          },
+          "description": "Image repositories (no tag nor digest) the pods of a managed instance may run (WEEBO_BATLEHUB_ALLOWED_IMAGES)."
+        }
+      }
+    },
+    "defaults": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "weebo-batlehub's own settings.",
+      "properties": {
+        "image": {
+          "type": "string",
+          "pattern": "^([^@\\s]+)?$",
+          "description": "Default image (repository[:tag]) of a managed instance's proxy pods; empty: the targeted BatleHub release."
+        },
+        "workerImage": {
+          "type": "string",
+          "pattern": "^([^@\\s]+)?$",
+          "description": "Default image (repository[:tag]) of its worker pods."
+        },
+        "adminTimeoutSeconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 600,
+          "description": "Timeout of each admin API call, in seconds."
+        }
+      }
+    },
+    "tokenReview": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Render the TokenReview ClusterRole and let the operator bind it."
+        }
+      }
     }
   }
 }

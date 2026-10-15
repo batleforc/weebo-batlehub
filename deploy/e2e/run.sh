@@ -332,6 +332,8 @@ kind: Secret
 metadata:
   name: managed-db
   namespace: team-a
+  # The pods of a managed instance read only Secrets that opt in.
+  labels: { batlehub.weebo.io/credential: "true" }
 stringData:
   url: postgresql://batlehub:batlehub@postgres:5432/batlehub
 ---

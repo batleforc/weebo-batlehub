@@ -30,9 +30,13 @@ the run count and the next run.
 
 - **The operator is the scheduler**: no Job, no pod. A schedule is a
   5-field cron expression (minute, hour, day of month, month, day of week
-  0-7 from Sunday), in UTC; when both day fields are set, a day matching
-  either runs. Runs missed while the operator was down make one run, not
-  one per slot. `suspend: true` pauses the schedule.
+  0-7 from Sunday), in UTC; when both day fields are restricted, a day
+  matching either runs (as in Vixie cron, a field starting with `*`, such
+  as `*/2`, is not restricted: then a day must match both). Runs missed
+  while the operator was down make one run, not one per slot.
+  `suspend: true` pauses the schedule; set back to `false`, it counts from
+  that moment (`status.resumedTime`): the runs missed while suspended are
+  skipped, nothing fires at once.
 - **Without a schedule**, the action runs once. A new `spec` (a new
   `metadata.generation`) is a new run; so is a new value of the
   `batlehub.weebo.io/run-now` annotation, on any maintenance:

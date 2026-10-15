@@ -100,15 +100,16 @@ spec:
                 description: |-
                   The package name prefix, in the ecosystem's own spelling: an npm
                   scope (`@acme`), a Go module or Maven path, an OpenVSX publisher… A
-                  claim covers `prefix` itself and every package under it. Immutable.
+                  claim covers `prefix` itself and every package under it. No part
+                  between slashes may be `.` or `..`. Immutable.
                 maxLength: 1024
                 minLength: 1
                 type: string
                 x-kubernetes-validations:
                 - message: prefix is immutable
                   rule: self == oldSelf
-                - message: prefix may not be blank, `.` or `..`, nor start or end with a space
-                  rule: self == self.trim() && self != '.' && self != '..'
+                - message: prefix may not be blank, have a `.` or `..` part between slashes, nor start or end with a space
+                  rule: self == self.trim() && self.split('/').all(s, s != '.' && s != '..')
               registry:
                 description: |-
                   The registry's name on the instance (a `[[registries]]` entry, from

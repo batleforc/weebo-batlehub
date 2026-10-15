@@ -150,6 +150,107 @@ fn grant_of(node: PackageNode, rows: Vec<StoredGrant>) -> ImportedGrant {
     }
 }
 
+/// A governance CR already in the cluster, on one node.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwningCr {
+    /// Its `metadata.name`.
+    pub name: String,
+    /// Grants: the subjects it lists or recorded as written.
+    pub subjects: Vec<String>,
+    /// Policies: `status.observedPolicyHash`, what it last read back.
+    pub observed_policy_hash: Option<String>,
+}
+
+/// What the governance CRs already in the cluster hold, by node: the
+/// importer leaves it out, or the webhook would refuse the CR it builds
+/// (`GrantConflict`, `PolicyConflict`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Owned {
+    pub grants: BTreeMap<PackageNode, Vec<OwningCr>>,
+    pub policies: BTreeMap<PackageNode, Vec<OwningCr>>,
+}
+
+/// `imported` without what `owned` holds, each row left out said in a
+/// warning. `name_of` is the name the importer gives a node's CR: one of
+/// that name is an earlier import's, which already holds what it adopted —
+/// rows granted on its node since then are not added to it (adoption
+/// seeds a status once; the importer never edits an adopted CR).
+pub fn without_owned(
+    imported: &mut Imported,
+    owned: &Owned,
+    name_of: &dyn Fn(&PackageNode) -> String,
+) {
+    let mut warnings = Vec::new();
+    imported.grants.retain_mut(|grant| {
+        let Some(crs) = owned.grants.get(&grant.node) else {
+            return true;
+        };
+        let own_name = name_of(&grant.node);
+        let mut left = Vec::new();
+        grant.grants.retain(|row| {
+            match crs
+                .iter()
+                .find(|cr| cr.subjects.iter().any(|s| s == &row.subject))
+            {
+                Some(cr) if cr.name == own_name => false,
+                Some(cr) => {
+                    warnings.push(format!(
+                        "{}: {} is already granted by BatleHubPackageGrant {}: left out",
+                        grant.node, row.subject, cr.name
+                    ));
+                    false
+                }
+                None => {
+                    left.push(row.subject.clone());
+                    true
+                }
+            }
+        });
+        grant
+            .applied
+            .retain(|a| grant.grants.iter().any(|g| g.subject == a.subject));
+        if crs.iter().any(|cr| cr.name == own_name) {
+            if !left.is_empty() {
+                warnings.push(format!(
+                    "{}: adopted earlier as BatleHubPackageGrant {own_name}; {} granted since \
+                     (console, CLI) is not adopted: that CR leaves subjects it doesn't list \
+                     alone, and listing them in it is a GrantConflict (a row it didn't write). \
+                     Revoke them at the console and list them in the CR, or leave them \
+                     unmanaged",
+                    grant.node,
+                    left.join(", ")
+                ));
+            }
+            return false;
+        }
+        !grant.grants.is_empty()
+    });
+    imported.policies.retain(|policy| {
+        let Some(crs) = owned.policies.get(&policy.node) else {
+            return true;
+        };
+        let own_name = name_of(&policy.node);
+        for cr in crs {
+            if cr.name != own_name {
+                warnings.push(format!(
+                    "{}: its policy is already written by BatleHubPackagePolicy {}: left out",
+                    policy.node, cr.name
+                ));
+            } else if cr.observed_policy_hash.is_some()
+                && cr.observed_policy_hash != policy.observed_policy_hash
+            {
+                warnings.push(format!(
+                    "{}: its policy changed since BatleHubPackagePolicy {own_name} adopted it: \
+                     that CR rewrites it (drift) — edit the CR to keep the change",
+                    policy.node
+                ));
+            }
+        }
+        false
+    });
+    imported.warnings.extend(warnings);
+}
+
 pub async fn import_governance(
     gateway: &dyn AdminGateway,
     scope: &Scope,
@@ -226,6 +327,86 @@ mod tests {
             package: "@acme/billing".into(),
             version: version.map(String::from),
         }
+    }
+
+    fn imported_row(node: PackageNode, subjects: &[&str]) -> ImportedGrant {
+        grant_of(
+            node,
+            subjects
+                .iter()
+                .map(|s| StoredGrant {
+                    subject: s.to_string(),
+                    actions: vec!["releases:read".into()],
+                    ..Default::default()
+                })
+                .collect(),
+        )
+    }
+
+    fn owning(name: &str, subjects: &[&str], hash: Option<&str>) -> OwningCr {
+        OwningCr {
+            name: name.into(),
+            subjects: subjects.iter().map(|s| s.to_string()).collect(),
+            observed_policy_hash: hash.map(String::from),
+        }
+    }
+
+    #[test]
+    fn rows_other_crs_own_are_left_out() {
+        let mut imported = Imported {
+            grants: vec![
+                imported_row(node(None), &["user:alice", "user:bob"]),
+                imported_row(node(Some("1.0.0")), &["user:carol", "user:dave"]),
+                imported_row(node(Some("2.0.0")), &["user:erin"]),
+            ],
+            policies: vec![
+                split(&node(None), json!({"visibility": "team"}), &mut vec![]),
+                split(
+                    &node(Some("1.0.0")),
+                    json!({"visibility": "public"}),
+                    &mut vec![],
+                ),
+                split(
+                    &node(Some("2.0.0")),
+                    json!({"visibility": "team"}),
+                    &mut vec![],
+                ),
+            ],
+            warnings: vec![],
+        };
+        let mut owned = Owned::default();
+        // Someone else's CR on the package node: alice is theirs.
+        owned
+            .grants
+            .insert(node(None), vec![owning("theirs", &["user:alice"], None)]);
+        // An earlier import adopted 1.0.0 with carol; dave was granted since.
+        owned.grants.insert(
+            node(Some("1.0.0")),
+            vec![owning("own-1.0.0", &["user:carol"], None)],
+        );
+        owned
+            .policies
+            .insert(node(None), vec![owning("theirs", &[], Some("x"))]);
+        owned.policies.insert(
+            node(Some("1.0.0")),
+            vec![owning("own-1.0.0", &[], Some("old"))],
+        );
+        let name_of = |n: &PackageNode| format!("own-{}", n.version.as_deref().unwrap_or("pkg"));
+        without_owned(&mut imported, &owned, &name_of);
+
+        let nodes: Vec<_> = imported.grants.iter().map(|g| g.node.clone()).collect();
+        assert_eq!(nodes, [node(None), node(Some("2.0.0"))]);
+        assert_eq!(imported.grants[0].grants.len(), 1);
+        assert_eq!(imported.grants[0].grants[0].subject, "user:bob");
+        assert_eq!(imported.grants[0].applied.len(), 1);
+        let policies: Vec<_> = imported.policies.iter().map(|p| p.node.clone()).collect();
+        assert_eq!(policies, [node(Some("2.0.0"))]);
+        let warnings = imported.warnings.join("\n");
+        assert!(warnings.contains("user:alice is already granted by BatleHubPackageGrant theirs"));
+        assert!(warnings.contains("user:dave granted since"), "{warnings}");
+        assert!(warnings.contains("already written by BatleHubPackagePolicy theirs"));
+        assert!(warnings.contains("changed since BatleHubPackagePolicy own-1.0.0"));
+        assert_eq!(imported.warnings.len(), 4, "{warnings}");
     }
 
     #[tokio::test]
