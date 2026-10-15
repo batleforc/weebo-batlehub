@@ -554,6 +554,66 @@ impl AdminGateway for FakeGateway {
         Ok(())
     }
 
+    /// Every package node holding a grant or a policy, with the versions
+    /// of the version nodes.
+    async fn packages(
+        &self,
+        registry: &str,
+    ) -> Result<BTreeMap<String, Vec<String>>, GatewayError> {
+        self.check()?;
+        let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let grants = self.grants.lock().unwrap();
+        let policies = self.policies.lock().unwrap();
+        for node in grants.keys().chain(policies.keys()) {
+            if node.registry != registry {
+                continue;
+            }
+            let versions = out.entry(node.package.clone()).or_default();
+            if let Some(v) = &node.version
+                && !versions.contains(v)
+            {
+                versions.push(v.clone());
+            }
+        }
+        Ok(out)
+    }
+
+    async fn package_grants(
+        &self,
+        registry: &str,
+        package: &str,
+    ) -> Result<Vec<(Option<String>, StoredGrant)>, GatewayError> {
+        self.check()?;
+        Ok(self
+            .grants
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(node, _)| node.registry == registry && node.package == package)
+            .flat_map(|(node, rows)| {
+                rows.values()
+                    .map(move |g| (node.version.clone(), g.clone()))
+            })
+            .collect())
+    }
+
+    async fn exemption_nodes(&self, registry: &str) -> Result<Vec<(String, String)>, GatewayError> {
+        self.check()?;
+        Ok(self
+            .policies
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(node, policy)| {
+                node.registry == registry
+                    && policy["rules"]
+                        .as_array()
+                        .is_some_and(|r| r.iter().any(|r| r["settings"]["exempt"] == true))
+            })
+            .filter_map(|(node, _)| Some((node.package.clone(), node.version.clone()?)))
+            .collect())
+    }
+
     async fn whoami(&self) -> Result<Option<String>, GatewayError> {
         self.check()?;
         Ok(Some("operator".into()))

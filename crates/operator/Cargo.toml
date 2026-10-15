@@ -32,4 +32,5 @@ rcgen = "0.14.10"
 reqwest = { workspace = true }
 serde_json = { workspace = true }
 testkit = { workspace = true }
+weebo-kit-perf = { workspace = true }
 wiremock = { workspace = true }

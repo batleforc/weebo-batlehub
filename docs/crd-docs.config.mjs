@@ -66,5 +66,10 @@ export default defineConfig({
   // metrics & health, resource budget (measured from M5).
   reference: {
     metricsPrefix: "weebo_batlehub",
+    // `task perf`'s report (target/perf/weebo-batlehub.json), copied here.
+    perfReport: "perf/weebo-batlehub.json",
+    // Refreshed every week by .github/workflows/perf.yml; the report
+    // page says so.
+    perfScheduled: true,
   },
 });

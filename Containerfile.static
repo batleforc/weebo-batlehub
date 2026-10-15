@@ -21,25 +21,27 @@ RUN find crates -name '*.rs' -delete && \
     for crate in crates/*/; do \
       mkdir -p "$crate/src" && echo "pub fn _stub() {}" > "$crate/src/lib.rs"; \
     done && \
-    for bin in operator crdgen; do echo "fn main() {}" > "crates/$bin/src/main.rs"; done
+    for bin in operator crdgen importer; do echo "fn main() {}" > "crates/$bin/src/main.rs"; done
 
 # --locked: build exactly what Cargo.lock resolves. Failure is tolerated
 # here only because stubs may not satisfy every crate; the real build below
 # is the one that gates.
-RUN cargo build --locked --release -p operator --target "$(uname -m)-unknown-linux-musl" \
+RUN cargo build --locked --release -p operator -p importer --target "$(uname -m)-unknown-linux-musl" \
     2>/dev/null; exit 0
 
 COPY crates/ crates/
 RUN find crates -name '*.rs' -exec touch {} + && \
     target="$(uname -m)-unknown-linux-musl" && \
-    cargo build --locked --release -p operator --target "$target" && \
-    mkdir /out && cp "target/$target/release/weebo-batlehub-operator" /out/operator
+    cargo build --locked --release -p operator -p importer --target "$target" && \
+    mkdir /out && cp "target/$target/release/weebo-batlehub-operator" /out/operator && \
+    cp "target/$target/release/weebo-batlehub-importer" /out/importer
 
 # ── Runtime image ─────────────────────────────────────────────────────────────
 # Red Hat Hummingbird static: CA certificates and passwd only.
 FROM registry.access.redhat.com/hi/static:latest@sha256:85fafe17d51d330089d4f39a9716bcc0eacfbda0c15ecb39f669cbfcd815ff8b AS runtime
 
 COPY --from=builder /out/operator /usr/local/bin/operator
+COPY --from=builder /out/importer /usr/local/bin/weebo-batlehub-importer
 
 # The same numeric UID as Containerfile's: the chart pins one `runAsUser`.
 USER 65532:65532

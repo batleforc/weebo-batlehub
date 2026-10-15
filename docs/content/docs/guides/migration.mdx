@@ -1,0 +1,84 @@
+---
+title: Import an existing BatleHub
+description: Describe a Helm release of BatleHub and the grants and policies of a live instance as CRs, with the importer.
+---
+
+`weebo-batlehub-importer` ships in the operator's images (both of them).
+It prints the CRs that describe what already exists. With `--apply`, it
+creates them in the current kube context instead.
+
+## A Helm release → a `BatleHubLocalInstance`
+
+Give it the release's values, defaults included:
+
+```bash
+helm get values --all -o yaml registry -n infra > values.yaml
+```
+
+Then pick one of two paths.
+
+**Keep the release, pilot it** (`--mode external`, the default). The
+release keeps deploying BatleHub. The operator reaches its Service and
+approves configurations pod by pod, selecting the chart's proxy pods (its
+workers are left out). It needs an admin token in a Secret labelled for
+it:
+
+```bash
+weebo-batlehub-importer instance --values values.yaml --release registry -n infra \
+  --token-secret batlehub-admin/token --manage-config
+```
+
+With `--manage-config`, the configuration of the values becomes the
+instance's `spec.config`, and the operator pushes it from then on. The
+chart mounts its file from a ConfigMap: give each pod a writable copy
+first (an `emptyDir` filled by an init container), or the operator reports
+`ConfigReadOnly`.
+
+**Let the operator deploy it** (`--mode managed`). Every value maps to its
+field of `spec.managed`, following the [table of the plan](/docs/guides/managed-instance):
+replicas, image, service, ingress, persistence, worker and its autoscaling,
+PDB, NetworkPolicy, scheduling, environment, `credentials.existingSecret`.
+The importer warns about what it can't carry over: `externalManifest`,
+`trivy`, the worker's YARA rules. Its objects take the names of the
+release's. Uninstall the release first, or pick another name (`--name`):
+the operator never takes over an object it didn't create
+(`OwnedObjectConflict`). A PVC kept with `helm.sh/resource-policy` can be
+reused through `persistence.existingClaim`.
+
+## Grants and policies → adopted CRs
+
+The package and version tiers of BatleHub's access model live in its
+database, written at the console or with the CLI. The operator never takes
+over a grant or a policy it didn't write (`GrantConflict`,
+`PolicyConflict`). The importer is the only way to bring them under it:
+
+```bash
+export BATLEHUB_URL=https://batlehub.example.com BATLEHUB_TOKEN=<an admin token>
+weebo-batlehub-importer governance -n infra --instance-ref registry          # prints
+weebo-batlehub-importer governance -n infra --instance-ref registry --apply  # adopts
+```
+
+It reads every package the instance lists (one entry per version), every
+version holding an exemption, and the packages you name with `--package`.
+A policy on a package the instance never cached isn't listed: name it.
+Narrow the run with `--registry`.
+
+For each node, it writes one `BatleHubPackageGrant` (its subjects and
+their stored actions) and one `BatleHubPackagePolicy` (its policy and its
+exemptions). The rows of package ownership are left out: they belong to
+ownership. Each CR is **adopted**:
+
+1. it is created paused (`batlehub.weebo.io/import-pending`);
+2. its status is seeded with what it holds: `status.applied`, or the
+   policy's hashes and exemptions, exactly as the operator would have
+   recorded them;
+3. it is unpaused.
+
+The operator then finds these grants and policies its own: it reports
+`Reconciled` and writes nothing again. From then on, the CRs are the
+source of truth, drift is rewritten, and deleting a CR revokes what it
+holds.
+
+A re-run adopts nothing twice. A CR that already exists and is bound to
+nothing is refused, because the operator may be writing its object right
+now. `--force` takes it over.

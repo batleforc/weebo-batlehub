@@ -20,16 +20,16 @@ RUN find crates -name '*.rs' -delete && \
     for crate in crates/*/; do \
       mkdir -p "$crate/src" && echo "pub fn _stub() {}" > "$crate/src/lib.rs"; \
     done && \
-    for bin in operator crdgen; do echo "fn main() {}" > "crates/$bin/src/main.rs"; done
+    for bin in operator crdgen importer; do echo "fn main() {}" > "crates/$bin/src/main.rs"; done
 
 # --locked: build exactly what Cargo.lock resolves. Failure is tolerated
 # here only because stubs may not satisfy every crate; the real build below
 # is the one that gates.
-RUN cargo build --locked --release -p operator 2>/dev/null; exit 0
+RUN cargo build --locked --release -p operator -p importer 2>/dev/null; exit 0
 
 COPY crates/ crates/
 RUN find crates -name '*.rs' -exec touch {} + && \
-    cargo build --locked --release -p operator
+    cargo build --locked --release -p operator -p importer
 
 # ── Runtime image ─────────────────────────────────────────────────────────────
 # Red Hat Hummingbird core runtime: minimal, continuously rebuilt for CVEs.
@@ -38,6 +38,9 @@ RUN find crates -name '*.rs' -exec touch {} + && \
 FROM registry.access.redhat.com/hi/core-runtime:latest@sha256:1abbb3f306dd1df28c46415def816056247cf850b861655097d46af971746f9b AS runtime
 
 COPY --from=builder /build/target/release/weebo-batlehub-operator /usr/local/bin/operator
+# The importer ships in the same image (`kubectl run … --command --
+# weebo-batlehub-importer`): one artifact, one version.
+COPY --from=builder /build/target/release/weebo-batlehub-importer /usr/local/bin/weebo-batlehub-importer
 
 # Numeric so Kubernetes can enforce `runAsNonRoot` without resolving names;
 # the Helm chart pins the same UID, valid for the `-static` image too.

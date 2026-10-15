@@ -171,6 +171,21 @@ pub trait AdminGateway: Send + Sync {
     /// Removes the exemption of the version `node` from `gate` (none is
     /// fine).
     async fn delete_exemption(&self, node: &PackageNode, gate: &str) -> Result<(), GatewayError>;
+    /// The packages of `registry` the instance knows, with their versions
+    /// (every page of its admin listing).
+    async fn packages(
+        &self,
+        registry: &str,
+    ) -> Result<std::collections::BTreeMap<String, Vec<String>>, GatewayError>;
+    /// Every grant of `package` in `registry`: the package node's (`None`)
+    /// and each version's.
+    async fn package_grants(
+        &self,
+        registry: &str,
+        package: &str,
+    ) -> Result<Vec<(Option<String>, StoredGrant)>, GatewayError>;
+    /// The `(package, version)` nodes of `registry` holding an exemption.
+    async fn exemption_nodes(&self, registry: &str) -> Result<Vec<(String, String)>, GatewayError>;
     /// The user the operator's token authenticates as, if it has one.
     async fn whoami(&self) -> Result<Option<String>, GatewayError>;
     /// A call of the admin API: its JSON answer (`null` when empty).

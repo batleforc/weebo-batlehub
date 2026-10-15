@@ -74,3 +74,4 @@ jobs:
           tags: weebo-batlehub-operator:ci
       # The image runs, not just builds (glibc ABI of each base).
       - run: docker run --rm --entrypoint /usr/local/bin/operator weebo-batlehub-operator:ci --version
+      - run: docker run --rm --entrypoint /usr/local/bin/weebo-batlehub-importer weebo-batlehub-operator:ci --version
