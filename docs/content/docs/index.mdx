@@ -5,9 +5,8 @@ description: A Kubernetes operator that drives BatleHub instances as CRDs.
 
 `weebo-batlehub` drives [BatleHub](https://github.com/batlehub/batlehub),
 the package registry proxy-cache, from Kubernetes: its instances, their
-configuration and registries, the team namespaces of its registries, and
-in the coming releases the grants and policies of its packages, and its
-maintenance tasks.
+configuration and registries, the team namespaces of its registries, the
+grants and policies of its packages, and its maintenance tasks.
 
 <Callout type="warn">
   Alpha: a `BatleHubLocalInstance` connects an existing BatleHub and, with
@@ -23,5 +22,7 @@ maintenance tasks.
   <Card title="Connect a BatleHub instance" description="Point the operator at your BatleHub." href="/docs/guides/connect-instance" />
   <Card title="Manage the configuration" description="Push the configuration and its registries." href="/docs/guides/manage-config" />
   <Card title="Team namespaces" description="Reserve a package prefix to a group." href="/docs/guides/team-namespaces" />
+  <Card title="Package grants and policies" description="Who may do what on a package, its policy, a version's exemptions." href="/docs/guides/package-governance" />
+  <Card title="Maintenance" description="Run an admin action, once or on a schedule." href="/docs/guides/maintenance" />
   <Card title="CRD reference" description="Every field of every resource." href="/docs/crds/batlehublocalinstance" />
 </Cards>

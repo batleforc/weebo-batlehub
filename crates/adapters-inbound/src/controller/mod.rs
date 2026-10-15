@@ -8,16 +8,18 @@ use std::time::Instant;
 
 use api::status::Condition;
 use application::ports::{
-    BoundInstance, ConfigParser, ConfigSources, GatewayFactory, InstanceDependents,
-    InstanceDirectory, RegistryResolver,
+    BoundInstance, ConfigParser, ConfigSources, GatewayFactory, GatewayFactoryError,
+    InstanceAccess, InstanceDependents, InstanceDirectory, InstanceError, InstanceRef, Ledger,
+    RegistryResolver, ResolveError,
 };
-use application::use_cases::Outcome;
+use application::use_cases::{Outcome, instance_failure};
 use domain::Failure;
 use domain::error::ReasonCode;
-use kube::api::Api;
+use kube::api::{Api, Patch, PatchParams};
 use kube::runtime::controller::Action;
 use kube::runtime::events::Recorder;
-use kube::{Client, Resource};
+use kube::runtime::reflector::ObjectRef;
+use kube::{Client, Resource, ResourceExt};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use weebo_kit_runtime::events;
@@ -36,7 +38,10 @@ pub use weebo_kit_runtime::Shutdown;
 pub use weebo_kit_runtime::controller::{controller, drive};
 
 pub mod local_instance;
+pub mod maintenance;
 pub mod namespace_claim;
+pub mod package_grant;
+pub mod package_policy;
 pub mod registry;
 
 /// Field manager of the status patches, meter and Event reporter name.
@@ -197,6 +202,45 @@ impl HasStatus for api::NamespaceClaim {
     }
 }
 
+impl HasStatus for api::PackageGrant {
+    fn conditions(&self) -> &[Condition] {
+        self.status
+            .as_ref()
+            .map(|s| s.conditions.as_slice())
+            .unwrap_or_default()
+    }
+
+    fn bound_instance(&self) -> Option<&BoundInstance> {
+        self.status.as_ref().and_then(|s| s.instance.as_ref())
+    }
+}
+
+impl HasStatus for api::PackagePolicy {
+    fn conditions(&self) -> &[Condition] {
+        self.status
+            .as_ref()
+            .map(|s| s.conditions.as_slice())
+            .unwrap_or_default()
+    }
+
+    fn bound_instance(&self) -> Option<&BoundInstance> {
+        self.status.as_ref().and_then(|s| s.instance.as_ref())
+    }
+}
+
+impl HasStatus for api::Maintenance {
+    fn conditions(&self) -> &[Condition] {
+        self.status
+            .as_ref()
+            .map(|s| s.conditions.as_slice())
+            .unwrap_or_default()
+    }
+
+    fn bound_instance(&self) -> Option<&BoundInstance> {
+        self.status.as_ref().and_then(|s| s.instance.as_ref())
+    }
+}
+
 impl HasStatus for api::Registry {
     fn conditions(&self) -> &[Condition] {
         self.status
@@ -245,6 +289,104 @@ where
     )
     .await
     .map(|_| ())
+}
+
+/// `controller`, also triggered for every CR of a namespace when one of
+/// its `BatleHubLocalInstance`s appears, goes or changes (its token, its
+/// readiness): the kinds bound to an instance of their own namespace.
+pub fn with_instances<K>(
+    controller: kube::runtime::Controller<K>,
+    scope: &WatchScope,
+    client: Client,
+) -> kube::runtime::Controller<K>
+where
+    K: Resource<DynamicType = ()> + Clone + Debug + DeserializeOwned + Send + Sync + 'static,
+{
+    let store = controller.store();
+    controller.watches(
+        scope.api::<api::LocalInstance>(client),
+        scope.watcher_config(),
+        move |instance| {
+            let namespace = instance.namespace();
+            store
+                .state()
+                .iter()
+                .filter(|o| o.namespace() == namespace)
+                .map(|o| ObjectRef::from_obj(o.as_ref()))
+                .collect::<Vec<_>>()
+        },
+    )
+}
+
+/// The instance of a CR bound to an instance of its own namespace, and
+/// the gateway to it.
+pub async fn local_access(
+    ctx: &Ctx,
+    namespace: &str,
+    instance_ref: Option<&InstanceRef>,
+    recorded: Option<&BoundInstance>,
+) -> Result<(BoundInstance, Result<InstanceAccess, GatewayFactoryError>), InstanceError> {
+    let bound = ctx
+        .instances
+        .resolve(Some(namespace), instance_ref, recorded)
+        .await?;
+    let access = ctx.gateways.gateway_for(&bound).await;
+    Ok((bound, access))
+}
+
+/// The gateway a cleanup removes through; `None` when the instance is
+/// gone (deleted with `force-orphan`): nothing is left to remove on, the
+/// finalizer goes.
+pub async fn cleanup_access(
+    ctx: &Ctx,
+    namespace: &str,
+    instance_ref: Option<&InstanceRef>,
+    recorded: Option<&BoundInstance>,
+    what: &str,
+) -> Result<Option<InstanceAccess>, Error> {
+    match local_access(ctx, namespace, instance_ref, recorded).await {
+        Ok((_, Ok(access))) => Ok(Some(access)),
+        Err(InstanceError::Resolve(ResolveError::NotFound { .. } | ResolveError::NoInstance)) => {
+            tracing::warn!("{what}: its instance is gone, nothing removed");
+            Ok(None)
+        }
+        Ok((bound, Err(GatewayFactoryError::InstanceNotFound(_)))) => {
+            tracing::warn!("{what}: {bound} is gone, nothing removed");
+            Ok(None)
+        }
+        Ok((_, Err(err))) => Err(Error::Cleanup(err.into())),
+        Err(err) => Err(Error::Cleanup(instance_failure(err))),
+    }
+}
+
+/// A [`Ledger`] writing into the status of one CR, by merge patch: what a
+/// governance reconcile wrote, recorded right after each write.
+pub struct StatusLedger<K> {
+    pub api: Api<K>,
+    pub name: String,
+    /// The `status` field written (`applied`…); `None`: the record's own
+    /// fields, merged into `status`.
+    pub field: Option<&'static str>,
+}
+
+#[async_trait::async_trait]
+impl<K, T> Ledger<T> for StatusLedger<K>
+where
+    K: Resource<DynamicType = ()> + Clone + Debug + DeserializeOwned + Send + Sync,
+    T: Serialize + Send + Sync,
+{
+    async fn record(&self, written: &T) -> Result<(), String> {
+        let status = match self.field {
+            Some(field) => serde_json::json!({ field: written }),
+            None => serde_json::to_value(written).map_err(|e| e.to_string())?,
+        };
+        let patch = Patch::Merge(serde_json::json!({ "status": status }));
+        self.api
+            .patch_status(&self.name, &PatchParams::apply(FIELD_MANAGER), &patch)
+            .await
+            .map(|_| ())
+            .map_err(|e| format!("recording the status: {e}"))
+    }
 }
 
 /// A finalizer's cleanup — unless the CR carries

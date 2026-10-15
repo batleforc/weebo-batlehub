@@ -233,7 +233,7 @@ fn config_status_kept(obj: &LocalInstance) -> ConfigStatus {
 /// The configuration of a `manageConfig` instance, rendered from its spec
 /// and the registries bound to it (their fate in the decisions), before
 /// the token is known.
-async fn render(
+pub(crate) async fn render(
     obj: &LocalInstance,
     bound: &BoundInstance,
     ctx: &Ctx,

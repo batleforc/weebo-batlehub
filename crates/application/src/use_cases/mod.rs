@@ -3,7 +3,10 @@
 //! `ReasonCode`, never a free string.
 
 pub mod reconcile_instance;
+pub mod reconcile_maintenance;
 pub mod reconcile_namespace_claim;
+pub mod reconcile_package_grant;
+pub mod reconcile_package_policy;
 pub mod reconcile_registry;
 pub mod render_config;
 

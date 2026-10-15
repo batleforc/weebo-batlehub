@@ -8,10 +8,24 @@ use std::sync::Mutex;
 use serde_json::Value;
 
 use crate::ports::{
-    AdminGateway, BoundInstance, ConfigError, ConfigParser, ConfigSource, ConfigSources,
-    ConfigVerdict, ConfigWarning, GatewayError, InstanceDependents, InstanceInfo, PendingSource,
-    RegistryView, ReloadCheck, SourceError, TeamNamespace, TokenCheck,
+    AdminGateway, AdminRequest, BoundInstance, ConfigError, ConfigParser, ConfigSource,
+    ConfigSources, ConfigVerdict, ConfigWarning, Exemption, GatewayError, GrantWrite,
+    InstanceDependents, InstanceInfo, Ledger, PackageNode, PendingSource, RegistryView,
+    ReloadCheck, SourceError, StoredGrant, TeamNamespace, TokenCheck,
 };
+
+/// What `releases:*` expands to, as BatleHub stores it.
+pub const RELEASES: [&str; 6] = [
+    "releases:read",
+    "releases:list",
+    "releases:publish",
+    "releases:overwrite",
+    "releases:yank",
+    "releases:delete",
+];
+
+/// The rows of the ownership projection.
+const OWNERSHIP: [&str; 3] = ["owners:read", "owners:write", "releases:publish"];
 
 /// A BatleHub that answers, as version 1.6.0 with no configuration
 /// warning, until told otherwise — and whose configuration endpoints
@@ -39,6 +53,15 @@ pub struct FakeGateway {
     registries: Mutex<Vec<String>>,
     /// The team namespaces, by `(registry, prefix)`.
     claims: Mutex<BTreeMap<(String, String), TeamNamespace>>,
+    /// The grants, by node then subject.
+    grants: Mutex<BTreeMap<PackageNode, BTreeMap<String, StoredGrant>>>,
+    /// The policies, by node.
+    policies: Mutex<BTreeMap<PackageNode, Value>>,
+    /// Whether the operator holds `gates:exempt`.
+    exempt_allowed: Mutex<bool>,
+    /// The admin calls made (`call`), and the answer they get.
+    requests: Mutex<Vec<AdminRequest>>,
+    answer: Mutex<Option<Result<Value, GatewayError>>>,
 }
 
 impl FakeGateway {
@@ -126,6 +149,90 @@ impl FakeGateway {
             .unwrap()
             .get(&(registry.into(), prefix.into()))
             .cloned()
+    }
+
+    /// A grant in place, as if written by someone else.
+    pub fn put_grant_row(&self, node: &PackageNode, grant: StoredGrant) {
+        self.grants
+            .lock()
+            .unwrap()
+            .entry(node.clone())
+            .or_default()
+            .insert(grant.subject.clone(), grant);
+    }
+
+    /// `subject`'s grant on `node`, if any.
+    pub fn grant_row(&self, node: &PackageNode, subject: &str) -> Option<StoredGrant> {
+        self.grants
+            .lock()
+            .unwrap()
+            .get(node)
+            .and_then(|g| g.get(subject))
+            .cloned()
+    }
+
+    /// Removes `subject`'s grant, as the console would.
+    pub fn remove_grant_row(&self, node: &PackageNode, subject: &str) {
+        if let Some(g) = self.grants.lock().unwrap().get_mut(node) {
+            g.remove(subject);
+        }
+    }
+
+    /// `subject` becomes an owner of the package `node`: the ownership
+    /// projection writes its row.
+    pub fn own(&self, node: &PackageNode, subject: &str) {
+        self.put_grant_row(
+            node,
+            StoredGrant {
+                subject: subject.into(),
+                actions: OWNERSHIP.iter().map(|a| a.to_string()).collect(),
+                from_ownership: true,
+                granted_by: None,
+            },
+        );
+    }
+
+    /// The policy of `node` as stored (exemptions included).
+    pub fn stored_policy(&self, node: &PackageNode) -> Option<Value> {
+        self.policies.lock().unwrap().get(node).cloned()
+    }
+
+    /// A policy in place, as if written by someone else.
+    pub fn put_policy_row(&self, node: &PackageNode, policy: Value) {
+        self.policies.lock().unwrap().insert(node.clone(), policy);
+    }
+
+    /// Whether the operator's identity holds `gates:exempt`.
+    pub fn allow_exemptions(&self, allowed: bool) {
+        *self.exempt_allowed.lock().unwrap() = allowed;
+    }
+
+    /// The admin calls made through `call`.
+    pub fn requests(&self) -> Vec<AdminRequest> {
+        self.requests.lock().unwrap().clone()
+    }
+
+    /// What `call` answers from now on (`{"ok": true}` by default).
+    pub fn answer(&self, answer: Option<Result<Value, GatewayError>>) {
+        *self.answer.lock().unwrap() = answer;
+    }
+
+    /// A governance call: recorded, failing with `failure` when set, and
+    /// 404 on a registry the instance doesn't serve.
+    fn governance_call(&self, name: &str, registry: &str) -> Result<(), GatewayError> {
+        self.claim_call(name)?;
+        if !self
+            .registries
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|r| r == registry)
+        {
+            return Err(GatewayError::NotFound(format!(
+                "registry '{registry}' is not configured"
+            )));
+        }
+        Ok(())
     }
 
     /// A claim call: recorded, failing with `failure` when set.
@@ -270,6 +377,215 @@ impl AdminGateway for FakeGateway {
             .lock()
             .unwrap()
             .remove(&(registry.to_string(), prefix.to_string()));
+        Ok(())
+    }
+
+    async fn grants(&self, node: &PackageNode) -> Result<Vec<StoredGrant>, GatewayError> {
+        self.claim_call("grants")?;
+        Ok(self
+            .grants
+            .lock()
+            .unwrap()
+            .get(node)
+            .map(|g| g.values().cloned().collect())
+            .unwrap_or_default())
+    }
+
+    async fn put_grant(
+        &self,
+        node: &PackageNode,
+        subject: &str,
+        actions: &[String],
+    ) -> Result<GrantWrite, GatewayError> {
+        self.governance_call("put-grant", &node.registry)?;
+        let mut stored: Vec<String> = Vec::new();
+        for action in actions {
+            let expanded: Vec<String> = match action.as_str() {
+                "releases:*" => RELEASES.iter().map(|a| a.to_string()).collect(),
+                a if a.starts_with("releases:")
+                    || a.starts_with("owners:")
+                    || a.starts_with("gates:") =>
+                {
+                    vec![a.to_string()]
+                }
+                a => return Err(GatewayError::Refused(format!("unknown action '{a}'"))),
+            };
+            for a in expanded {
+                if !stored.contains(&a) {
+                    stored.push(a);
+                }
+            }
+        }
+        let owned = self
+            .grant_row(node, subject)
+            .is_some_and(|g| g.from_ownership);
+        if owned && !OWNERSHIP.iter().all(|a| stored.iter().any(|s| s == a)) {
+            return Err(GatewayError::HeldByOwnership(format!(
+                "'{subject}' holds owners:read, owners:write, releases:publish through ownership"
+            )));
+        }
+        let warnings = if subject == "*" {
+            vec!["subject already holds releases:read from a broader tier".to_string()]
+        } else {
+            Vec::new()
+        };
+        self.put_grant_row(
+            node,
+            StoredGrant {
+                subject: subject.into(),
+                actions: stored.clone(),
+                from_ownership: false,
+                granted_by: Some("operator".into()),
+            },
+        );
+        Ok(GrantWrite { stored, warnings })
+    }
+
+    async fn delete_grant(&self, node: &PackageNode, subject: &str) -> Result<bool, GatewayError> {
+        self.claim_call("delete-grant")?;
+        if self
+            .grant_row(node, subject)
+            .is_some_and(|g| g.from_ownership)
+        {
+            return Err(GatewayError::HeldByOwnership(format!(
+                "'{subject}' holds this grant through ownership"
+            )));
+        }
+        let existed = self.grant_row(node, subject).is_some();
+        self.remove_grant_row(node, subject);
+        Ok(existed)
+    }
+
+    async fn policy(&self, node: &PackageNode) -> Result<Option<Value>, GatewayError> {
+        self.claim_call("policy")?;
+        // As BatleHub reads it back: the defaults of a section filled.
+        Ok(self.stored_policy(node).map(|mut policy| {
+            if let Some(Value::Object(quota)) = policy.get_mut("quota") {
+                quota.entry("block").or_insert(Value::Bool(false));
+            }
+            policy
+        }))
+    }
+
+    async fn put_policy(&self, node: &PackageNode, policy: &Value) -> Result<(), GatewayError> {
+        self.governance_call("put-policy", &node.registry)?;
+        if policy.get("visibility").is_some_and(|v| v == "nope") {
+            return Err(GatewayError::Refused("unknown visibility 'nope'".into()));
+        }
+        self.put_policy_row(node, policy.clone());
+        Ok(())
+    }
+
+    async fn delete_policy(&self, node: &PackageNode) -> Result<(), GatewayError> {
+        self.claim_call("delete-policy")?;
+        self.policies.lock().unwrap().remove(node);
+        Ok(())
+    }
+
+    async fn set_exemption(
+        &self,
+        node: &PackageNode,
+        exemption: &Exemption,
+    ) -> Result<(), GatewayError> {
+        self.governance_call("exempt", &node.registry)?;
+        if !*self.exempt_allowed.lock().unwrap() {
+            return Err(GatewayError::NotPermitted(
+                "gates:exempt required on this coordinate".into(),
+            ));
+        }
+        let mut policies = self.policies.lock().unwrap();
+        let policy = policies
+            .entry(node.clone())
+            .or_insert_with(|| serde_json::json!({}));
+        let rules = policy
+            .as_object_mut()
+            .expect("a policy is an object")
+            .entry("rules")
+            .or_insert_with(|| Value::Array(Vec::new()))
+            .as_array_mut()
+            .expect("rules is an array");
+        rules.retain(|r| r["gate"] != exemption.gate.as_str());
+        rules.push(serde_json::json!({
+            "gate": exemption.gate,
+            "settings": {
+                "exempt": true,
+                "exempt_until": exemption.exempt_until,
+                "reason": exemption.reason,
+                "granted_by": "operator",
+                "self_approved": false,
+            },
+        }));
+        Ok(())
+    }
+
+    async fn delete_exemption(&self, node: &PackageNode, gate: &str) -> Result<(), GatewayError> {
+        self.claim_call("unexempt")?;
+        if !*self.exempt_allowed.lock().unwrap() {
+            return Err(GatewayError::NotPermitted(
+                "gates:exempt required on this coordinate".into(),
+            ));
+        }
+        if let Some(rules) = self
+            .policies
+            .lock()
+            .unwrap()
+            .get_mut(node)
+            .and_then(|p| p.get_mut("rules"))
+            .and_then(Value::as_array_mut)
+        {
+            rules.retain(|r| r["gate"] != gate);
+        }
+        Ok(())
+    }
+
+    async fn whoami(&self) -> Result<Option<String>, GatewayError> {
+        self.check()?;
+        Ok(Some("operator".into()))
+    }
+
+    async fn call(&self, request: &AdminRequest) -> Result<Value, GatewayError> {
+        self.requests.lock().unwrap().push(request.clone());
+        self.check()?;
+        self.answer
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or_else(|| Ok(serde_json::json!({"ok": true})))
+    }
+}
+
+/// Records every write, failing when told to.
+pub struct FakeLedger<T> {
+    records: Mutex<Vec<T>>,
+    fail: Mutex<bool>,
+}
+
+impl<T> Default for FakeLedger<T> {
+    fn default() -> Self {
+        Self {
+            records: Mutex::new(Vec::new()),
+            fail: Mutex::new(false),
+        }
+    }
+}
+
+impl<T: Clone> FakeLedger<T> {
+    pub fn records(&self) -> Vec<T> {
+        self.records.lock().unwrap().clone()
+    }
+
+    pub fn fail(&self, fail: bool) {
+        *self.fail.lock().unwrap() = fail;
+    }
+}
+
+#[async_trait::async_trait]
+impl<T: Clone + Send + Sync> Ledger<T> for FakeLedger<T> {
+    async fn record(&self, written: &T) -> Result<(), String> {
+        if *self.fail.lock().unwrap() {
+            return Err("status patch refused".into());
+        }
+        self.records.lock().unwrap().push(written.clone());
         Ok(())
     }
 }

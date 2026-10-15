@@ -293,6 +293,11 @@ impl ReasonCode {
                 | ReasonCode::OwnedObjectConflict
                 | ReasonCode::SecretNotAllowed
                 | ReasonCode::TokenSecretNotAllowed
+                // A failed run is never retried: a new one comes from the
+                // schedule, `run-now` or a new spec.
+                | ReasonCode::MaintenanceFailed
+                | ReasonCode::MaintenanceTimeout
+                | ReasonCode::MaintenanceInterrupted
         )
     }
 }

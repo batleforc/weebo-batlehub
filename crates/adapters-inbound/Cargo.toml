@@ -10,6 +10,7 @@ domain = { workspace = true }
 api = { workspace = true }
 application = { workspace = true }
 async-trait = { workspace = true }
+opentelemetry = { workspace = true }
 axum = { workspace = true }
 k8s-openapi = { workspace = true }
 kube = { workspace = true }

@@ -1,0 +1,56 @@
+---
+title: BatleHubMaintenance
+description: >-
+  An administrative action against the instance of this namespace, run once or
+  on a schedule: warming or clearing a cache, a retention pass, a configuration
+  reload, blocking an IP…
+full: true
+---
+
+- **API version:** `batlehub.weebo.io/v1alpha1`
+- **Scope:** Namespaced
+- **Short names:** `bhm`
+- **Guide:** [Maintenance](/docs/guides/maintenance)
+
+An administrative action against the instance of this namespace, run
+once or on a schedule: warming or clearing a cache, a retention pass, a
+configuration reload, blocking an IP…
+
+The operator is the scheduler (no Job, no pod): it calls BatleHub's
+admin API at the time due, at most once per run — a run interrupted by
+a restart of the operator is closed as failed, never replayed. Actions
+that respect `params.dryRun` only report unless it is set to `false`.
+
+## Example
+
+```yaml
+apiVersion: batlehub.weebo.io/v1alpha1
+kind: BatleHubMaintenance
+metadata:
+  name: my-maintenance
+  namespace: team-a
+spec:
+  action: retentionRun
+  params:
+    registry: npm
+    dryRun: false
+  schedule: 30 3 * * 0
+```
+
+## Spec fields
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `action` | `string` | yes |  | What to run (the guide lists each action's endpoint and params). |
+| `instanceRef` | `object` | no |  | The `BatleHubLocalInstance` of this namespace to act on; unset, the only one of this namespace. Immutable. |
+| `params` | `object` | no | `{}` | The action's parameters: which ones an action needs is checked when the object is written. |
+| `schedule` | `string` | no |  | A 5-field cron expression (minute hour day-of-month month day-of-week, UTC; day-of-week 0-7 from Sunday). Unset: one run. |
+| `suspend` | `boolean` | no | `false` | Pauses the schedule. |
+| `timeoutSeconds` | `integer` | no | `600` | Bounds the run, and the request to BatleHub. |
+| `ttlSecondsAfterFinished` | `integer` | no |  | Deletes a single run's object this long after it finished. |
+
+## Build a manifest
+
+Answer the questions and fill in the fields: the YAML preview updates as you type, ready to copy or download and `kubectl apply`.
+
+<CrdForm kind="BatleHubMaintenance" />

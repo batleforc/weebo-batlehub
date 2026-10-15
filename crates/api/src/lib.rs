@@ -7,9 +7,13 @@
 //! through short re-exports ([`LocalInstance`]). The instance is
 //! namespaced only: there is no cluster-scoped kind in `v1alpha1`.
 
+pub mod common;
 pub mod config;
 pub mod local_instance;
+pub mod maintenance;
 pub mod namespace_claim;
+pub mod package_grant;
+pub mod package_policy;
 pub mod registry;
 pub mod status;
 
@@ -26,11 +30,18 @@ pub const ANNOTATIONS: weebo_kit_api::Annotations = weebo_kit_api::Annotations::
 /// BatleHub (`configLayers`, a registry's `configFrom`): `"true"`.
 pub const CREDENTIAL_LABEL: &str = "batlehub.weebo.io/credential";
 
+/// On a `BatleHubMaintenance`: a run right away whenever its value
+/// changes.
+pub const RUN_NOW: &str = "batlehub.weebo.io/run-now";
+
 /// On a `BatleHubLocalInstance` with `reload.strategy: Manual`: the exact
 /// `status.pendingConfigHash` to apply.
 pub const APPROVED_CONFIG_HASH: &str = "batlehub.weebo.io/approved-config-hash";
 
 pub use local_instance::{LocalInstance, LocalInstanceStatus};
+pub use maintenance::{Maintenance, MaintenanceStatus};
 pub use namespace_claim::{NamespaceClaim, NamespaceClaimStatus};
+pub use package_grant::{PackageGrant, PackageGrantStatus};
+pub use package_policy::{PackagePolicy, PackagePolicyStatus};
 pub use registry::{Registry, RegistryStatus};
 pub use status::Status;

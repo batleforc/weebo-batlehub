@@ -36,7 +36,7 @@
           "type": "string"
         },
         "namespace": {
-          "description": "Not allowed: the instance is in the claim's namespace.",
+          "description": "Not allowed: the instance is in this object's namespace.",
           "type": "string"
         }
       },
@@ -50,7 +50,7 @@
           "rule": "self == oldSelf"
         },
         {
-          "message": "the instance must be in the claim's namespace",
+          "message": "the instance must be in this object's namespace",
           "rule": "!has(self.__namespace__)"
         }
       ]

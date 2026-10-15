@@ -48,7 +48,7 @@ dump() {
   step "diagnostics"
   kubectl -n "$OPERATOR_NS" get pods -o wide
   kubectl -n "$OPERATOR_NS" logs -l app.kubernetes.io/name=weebo-batlehub --tail=200 --prefix --all-containers
-  kubectl -n team-a get batlehublocalinstances,batlehubregistries,batlehubnamespaceclaims -o yaml
+  kubectl -n team-a get batlehublocalinstances,batlehubregistries,batlehubnamespaceclaims,batlehubpackagegrants,batlehubpackagepolicies,batlehubmaintenances -o yaml
   kubectl -n team-a get pods -o wide
   kubectl -n team-a logs deploy/batlehub --tail=50
   kubectl get events -A --sort-by=.lastTimestamp | tail -n 50
@@ -223,6 +223,97 @@ done
 claimed="$(kubectl -n team-a get batlehubnamespaceclaim web -o jsonpath='{.status.claimedGroup}')"
 [ "$claimed" = oidc:web-team ] || fail "claim web: claimedGroup is ${claimed:-<none>}"
 kubectl -n team-a delete batlehubnamespaceclaim web --timeout=60s
+
+# `kind` `name`'s Ready reason, waited for (3 minutes).
+cr_reason_is() {
+  for _ in $(seq 1 90); do
+    got="$(kubectl -n team-a get "$1" "$2" \
+      -o jsonpath='{.status.conditions[?(@.type=="Ready")].reason}' 2>/dev/null || true)"
+    [ "$got" = "$3" ] && return 0
+    sleep 2
+  done
+  fail "$1 $2: Ready reason is ${got:-<none>}, expected $3"
+}
+
+step "a package's grants and policy written, revoked on deletion"
+kubectl apply -f - <<'YAML'
+apiVersion: batlehub.weebo.io/v1alpha1
+kind: BatleHubPackageGrant
+metadata:
+  name: billing
+  namespace: team-a
+spec:
+  instanceRef: { name: hub }
+  registry: npm
+  package: "@acme/billing"
+  grants:
+    - subject: group:oidc:finance
+      actions: ["releases:*"]
+---
+apiVersion: batlehub.weebo.io/v1alpha1
+kind: BatleHubPackagePolicy
+metadata:
+  name: billing
+  namespace: team-a
+spec:
+  instanceRef: { name: hub }
+  registry: npm
+  package: "@acme/billing"
+  policy:
+    visibility: team
+YAML
+cr_reason_is batlehubpackagegrant billing Reconciled
+cr_reason_is batlehubpackagepolicy billing Reconciled
+stored="$(kubectl -n team-a get batlehubpackagegrant billing -o jsonpath='{.status.applied[0].stored}')"
+printf '%s' "$stored" | grep -q 'releases:publish' || fail "grant billing: stored actions $stored"
+# A second grant of the same subject on the node: refused by the webhook.
+if kubectl apply -f - <<'YAML' 2>/dev/null
+apiVersion: batlehub.weebo.io/v1alpha1
+kind: BatleHubPackageGrant
+metadata:
+  name: billing-again
+  namespace: team-a
+spec:
+  instanceRef: { name: hub }
+  registry: npm
+  package: "@acme/billing"
+  grants:
+    - subject: group:oidc:finance
+      actions: [releases:read]
+YAML
+then fail "a second grant of one subject on one node was admitted"; fi
+kubectl -n team-a delete batlehubpackagegrant,batlehubpackagepolicy billing --timeout=60s
+
+step "a maintenance runs once; the CRD and the webhook refuse what can't run"
+kubectl apply -f - <<'YAML'
+apiVersion: batlehub.weebo.io/v1alpha1
+kind: BatleHubMaintenance
+metadata:
+  name: health
+  namespace: team-a
+spec:
+  instanceRef: { name: hub }
+  action: healthCheck
+  ttlSecondsAfterFinished: 20
+YAML
+cr_reason_is batlehubmaintenance health Reconciled
+runs="$(kubectl -n team-a get batlehubmaintenance health -o jsonpath='{.status.runCount}')"
+[ "$runs" = 1 ] || fail "maintenance health: runCount $runs"
+# Deleted by the operator once its TTL is over (its RBAC allows it).
+kubectl -n team-a wait --for=delete batlehubmaintenance/health --timeout=90s \
+  || fail "maintenance health: not deleted after its TTL"
+for bad in '{"action":"packageBlock","params":{"registry":"npm"}}' \
+  '{"action":"healthCheck","schedule":"every night"}'; do
+  if kubectl apply -f - 2>/dev/null <<YAML
+apiVersion: batlehub.weebo.io/v1alpha1
+kind: BatleHubMaintenance
+metadata:
+  name: refused
+  namespace: team-a
+spec: $bad
+YAML
+  then fail "maintenance $bad was admitted"; fi
+done
 
 step "leader election"
 holder="$(kubectl -n "$OPERATOR_NS" get lease "$LEASE" -o jsonpath='{.spec.holderIdentity}')"

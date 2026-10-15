@@ -4,12 +4,13 @@ Kubernetes operator driving [BatleHub](https://github.com/batlehub/batlehub)
 (package registry proxy-cache) instances as CRDs, built on
 [weebo-operator-kit](https://github.com/batleforc/weebo-operator-kit).
 
-> **M2 — configuration management.** The operator connects a
+> **M3 — governance and maintenance.** The operator connects a
 > `BatleHubLocalInstance`, checks that it answers and that its token
 > carries the admin role, and with `external.manageConfig` pushes the
 > configuration rendered from the CR and its `BatleHubRegistry`s (to each
 > pod with `external.podSelector`), validated by BatleHub's own parser.
-> The first alpha (0.1.0-alpha.1) closes M2. The design and the
+> It writes the team namespaces, grants and policies of packages through
+> the admin API, and runs maintenance actions. The design and the
 > milestones are in [`.prompt/plan.md`](.prompt/plan.md).
 
 | Kind                    | Scope      | What it does                                                    |
@@ -17,10 +18,12 @@ Kubernetes operator driving [BatleHub](https://github.com/batlehub/batlehub)
 | `BatleHubLocalInstance` | Namespaced | A BatleHub instance: its URL and admin token (`external.adminTokenSecretRef`), and its configuration (`config`, `configLayers`, `external.manageConfig`) |
 | `BatleHubRegistry`      | Namespaced | One `[[registries]]` entry of an instance, as its own object (possibly from another namespace the instance accepts) |
 | `BatleHubNamespaceClaim` | Namespaced | A team namespace of a registry: a package name prefix reserved to a group, claimed through the admin API |
+| `BatleHubPackageGrant`  | Namespaced | The grants of a package or a version, one per subject, written through the admin API |
+| `BatleHubPackagePolicy` | Namespaced | The policy of a package or a version, and a version's exemptions from its gates |
+| `BatleHubMaintenance`   | Namespaced | An admin action (cache, retention, reload, blocks, banner…) run once or on a schedule, at most once per run |
 
-Planned (see the plan): `BatleHubMaintenance`, `BatleHubPackageGrant`,
-`BatleHubPackagePolicy`, and the managed mode (the operator deploys
-BatleHub).
+Planned (see the plan): the managed mode (the operator deploys BatleHub)
+and the importer.
 
 The token Secret must be labelled `batlehub.weebo.io/instance-token: "true"`:
 the operator reads Secrets with its own rights and sends the token to the

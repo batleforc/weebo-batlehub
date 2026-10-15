@@ -9,8 +9,8 @@
 use std::time::Duration;
 
 use application::ports::{
-    AdminGateway, ConfigWarning, GatewayError, InstanceInfo, PendingSource, ReloadCheck,
-    TeamNamespace,
+    AdminGateway, AdminRequest, ConfigWarning, Exemption, GatewayError, GrantWrite, InstanceInfo,
+    Method, PackageNode, PendingSource, ReloadCheck, StoredGrant, TeamNamespace,
 };
 use batlehub_client::apis::configuration::Configuration;
 use batlehub_client::apis::{Error as ClientError, back_office_api, front_office_api};
@@ -21,6 +21,7 @@ use reqwest::{Client, StatusCode, Url};
 
 use crate::redact::without_source;
 use serde::Deserialize;
+use serde_json::{Value, json};
 
 /// Per-request timeout: a hung instance must not hold a reconcile forever.
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
@@ -137,6 +138,115 @@ impl HttpAdminGateway {
         }
         Ok(())
     }
+}
+
+impl HttpAdminGateway {
+    /// One call by path, its status and body; no answer is
+    /// [`GatewayError::Unreachable`].
+    async fn raw(
+        &self,
+        method: reqwest::Method,
+        segments: &[&str],
+        query: &[(&str, &str)],
+        body: Option<&Value>,
+    ) -> Result<(StatusCode, String), GatewayError> {
+        self.raw_within(method, segments, query, body, None).await
+    }
+
+    /// [`Self::raw`], `timeout` replacing the client's.
+    async fn raw_within(
+        &self,
+        method: reqwest::Method,
+        segments: &[&str],
+        query: &[(&str, &str)],
+        body: Option<&Value>,
+        timeout: Option<Duration>,
+    ) -> Result<(StatusCode, String), GatewayError> {
+        let mut request = self
+            .authorized(self.config.client.request(method, self.url(segments)))
+            .query(query);
+        if let Some(timeout) = timeout {
+            request = request.timeout(timeout);
+        }
+        if let Some(body) = body {
+            request = request.json(body);
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|e| GatewayError::Unreachable(e.to_string()))?;
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .map_err(|e| GatewayError::Unreachable(e.to_string()))?;
+        Ok((status, body))
+    }
+
+    /// `/api/v1/admin/registries/{registry}/<rest…>`.
+    fn registry_path<'a>(registry: &'a str, rest: &[&'a str]) -> Vec<&'a str> {
+        let mut path = vec!["api", "v1", "admin", "registries", registry];
+        path.extend_from_slice(rest);
+        path
+    }
+
+    /// The policy route of `node`: the package's slashes stay separators
+    /// on the package route (it takes the rest of the path), the package
+    /// is one (encoded) segment on the version route.
+    fn policy_path(node: &PackageNode) -> Vec<&str> {
+        match &node.version {
+            None => {
+                let mut rest = vec!["policy", "package"];
+                rest.extend(node.package.split('/'));
+                Self::registry_path(&node.registry, &rest)
+            }
+            Some(version) => Self::registry_path(
+                &node.registry,
+                &["policy", "version", &node.package, version],
+            ),
+        }
+    }
+}
+
+/// `endpoint: <BatleHub's message>` — its `{"error", "message"}` decoded,
+/// cut.
+fn refusal(endpoint: &str, body: &str) -> String {
+    let message = serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|v| v.get("message")?.as_str().map(String::from))
+        .unwrap_or_else(|| body.to_string());
+    format!(
+        "{endpoint}: {}",
+        message.chars().take(BODY_EXCERPT * 2).collect::<String>()
+    )
+}
+
+/// A governance endpoint's answer: 400 a refusal, 404 an unknown
+/// registry, 409 an ownership row, 503 no grant storage; anything else as
+/// [`unexpected_status`].
+fn governance_error(endpoint: &str, status: StatusCode, body: &str) -> GatewayError {
+    match status {
+        StatusCode::BAD_REQUEST => GatewayError::Refused(refusal(endpoint, body)),
+        StatusCode::NOT_FOUND => GatewayError::NotFound(refusal(endpoint, body)),
+        StatusCode::CONFLICT => GatewayError::HeldByOwnership(refusal(endpoint, body)),
+        StatusCode::SERVICE_UNAVAILABLE => {
+            GatewayError::StorageUnavailable(refusal(endpoint, body))
+        }
+        status => unexpected_status(status, body),
+    }
+}
+
+/// An exemption endpoint's answer: 403 is the missing `gates:exempt`.
+fn exemption_error(endpoint: &str, status: StatusCode, body: &str) -> GatewayError {
+    match status {
+        StatusCode::FORBIDDEN => GatewayError::NotPermitted(refusal(endpoint, body)),
+        status => governance_error(endpoint, status, body),
+    }
+}
+
+fn decode<T: serde::de::DeserializeOwned>(endpoint: &str, body: &str) -> Result<T, GatewayError> {
+    serde_json::from_str(body)
+        .map_err(|e| GatewayError::Remote(format!("{endpoint}: unexpected answer: {e}")))
 }
 
 /// 401/403 refuse the token, 502/503/504 mean no answer, anything else is
@@ -423,6 +533,247 @@ impl AdminGateway for HttpAdminGateway {
         }
         let body = response.text().await.unwrap_or_default();
         Err(unexpected_status(status, &body))
+    }
+
+    /// `GET /api/v1/admin/registries/{registry}/grants` (`grants:read`):
+    /// a package node's listing also has its versions' rows, left out.
+    async fn grants(&self, node: &PackageNode) -> Result<Vec<StoredGrant>, GatewayError> {
+        const ENDPOINT: &str = "/api/v1/admin/registries/{registry}/grants";
+        #[derive(Deserialize)]
+        struct Row {
+            node_kind: String,
+            node_key: String,
+            subject: String,
+            actions: Vec<String>,
+            #[serde(default)]
+            from_ownership: bool,
+            #[serde(default)]
+            granted_by: Option<String>,
+        }
+        #[derive(Deserialize)]
+        struct Listing {
+            grants: Vec<Row>,
+        }
+        let mut query = vec![("package", node.package.as_str())];
+        if let Some(version) = &node.version {
+            query.push(("version", version));
+        }
+        let (status, body) = self
+            .raw(
+                reqwest::Method::GET,
+                &Self::registry_path(&node.registry, &["grants"]),
+                &query,
+                None,
+            )
+            .await?;
+        if !status.is_success() {
+            return Err(governance_error(ENDPOINT, status, &body));
+        }
+        let (kind, key) = match &node.version {
+            Some(v) => ("version", format!("{}@{v}", node.package)),
+            None => ("package", node.package.clone()),
+        };
+        Ok(decode::<Listing>(ENDPOINT, &body)?
+            .grants
+            .into_iter()
+            .filter(|r| r.node_kind == kind && r.node_key == key)
+            .map(|r| StoredGrant {
+                subject: r.subject,
+                actions: r.actions,
+                from_ownership: r.from_ownership,
+                granted_by: r.granted_by,
+            })
+            .collect())
+    }
+
+    /// `PUT /api/v1/admin/registries/{registry}/grants` (`grants:write`).
+    async fn put_grant(
+        &self,
+        node: &PackageNode,
+        subject: &str,
+        actions: &[String],
+    ) -> Result<GrantWrite, GatewayError> {
+        const ENDPOINT: &str = "PUT /api/v1/admin/registries/{registry}/grants";
+        #[derive(Deserialize)]
+        struct Written {
+            actions: Vec<String>,
+            #[serde(default)]
+            warnings: Vec<String>,
+        }
+        let body = json!({
+            "package": node.package,
+            "version": node.version,
+            "subject": subject,
+            "actions": actions,
+        });
+        let (status, body) = self
+            .raw(
+                reqwest::Method::PUT,
+                &Self::registry_path(&node.registry, &["grants"]),
+                &[],
+                Some(&body),
+            )
+            .await?;
+        if !status.is_success() {
+            return Err(governance_error(ENDPOINT, status, &body));
+        }
+        let written: Written = decode(ENDPOINT, &body)?;
+        Ok(GrantWrite {
+            stored: written.actions,
+            warnings: written.warnings,
+        })
+    }
+
+    /// `DELETE /api/v1/admin/registries/{registry}/grants`
+    /// (`grants:write`): absent is a success.
+    async fn delete_grant(&self, node: &PackageNode, subject: &str) -> Result<bool, GatewayError> {
+        const ENDPOINT: &str = "DELETE /api/v1/admin/registries/{registry}/grants";
+        #[derive(Deserialize)]
+        struct Removed {
+            removed: bool,
+        }
+        let body = json!({
+            "package": node.package,
+            "version": node.version,
+            "subject": subject,
+        });
+        let (status, body) = self
+            .raw(
+                reqwest::Method::DELETE,
+                &Self::registry_path(&node.registry, &["grants"]),
+                &[],
+                Some(&body),
+            )
+            .await?;
+        if !status.is_success() {
+            return Err(governance_error(ENDPOINT, status, &body));
+        }
+        Ok(decode::<Removed>(ENDPOINT, &body)?.removed)
+    }
+
+    /// `GET …/policy/package/{package}` or `…/policy/version/{package}/{version}`
+    /// (`owners:read`): 404 is no policy on the node.
+    async fn policy(&self, node: &PackageNode) -> Result<Option<Value>, GatewayError> {
+        const ENDPOINT: &str = "GET /api/v1/admin/registries/{registry}/policy";
+        let (status, body) = self
+            .raw(reqwest::Method::GET, &Self::policy_path(node), &[], None)
+            .await?;
+        match status {
+            StatusCode::NOT_FOUND => Ok(None),
+            status if status.is_success() => decode(ENDPOINT, &body).map(Some),
+            status => Err(governance_error(ENDPOINT, status, &body)),
+        }
+    }
+
+    /// `PUT …/policy/…` (`owners:write`): replaces the node's policy.
+    async fn put_policy(&self, node: &PackageNode, policy: &Value) -> Result<(), GatewayError> {
+        const ENDPOINT: &str = "PUT /api/v1/admin/registries/{registry}/policy";
+        let (status, body) = self
+            .raw(
+                reqwest::Method::PUT,
+                &Self::policy_path(node),
+                &[],
+                Some(policy),
+            )
+            .await?;
+        if !status.is_success() {
+            return Err(governance_error(ENDPOINT, status, &body));
+        }
+        Ok(())
+    }
+
+    /// `DELETE …/policy/…` (`owners:write`): absent is a success.
+    async fn delete_policy(&self, node: &PackageNode) -> Result<(), GatewayError> {
+        const ENDPOINT: &str = "DELETE /api/v1/admin/registries/{registry}/policy";
+        let (status, body) = self
+            .raw(reqwest::Method::DELETE, &Self::policy_path(node), &[], None)
+            .await?;
+        if !status.is_success() {
+            return Err(governance_error(ENDPOINT, status, &body));
+        }
+        Ok(())
+    }
+
+    /// `PUT …/policy/version/{package}/{version}/rules/{gate}`
+    /// (`gates:exempt` on the version, which no role carries).
+    async fn set_exemption(
+        &self,
+        node: &PackageNode,
+        exemption: &Exemption,
+    ) -> Result<(), GatewayError> {
+        const ENDPOINT: &str =
+            "PUT /api/v1/admin/registries/{registry}/policy/version/…/rules/{gate}";
+        let mut path = Self::policy_path(node);
+        path.extend(["rules", exemption.gate.as_str()]);
+        let body = json!({
+            "exempt_until": exemption.exempt_until,
+            "reason": exemption.reason,
+        });
+        let (status, body) = self
+            .raw(reqwest::Method::PUT, &path, &[], Some(&body))
+            .await?;
+        if !status.is_success() {
+            return Err(exemption_error(ENDPOINT, status, &body));
+        }
+        Ok(())
+    }
+
+    /// `DELETE …/rules/{gate}` (`gates:exempt`): absent is a success.
+    async fn delete_exemption(&self, node: &PackageNode, gate: &str) -> Result<(), GatewayError> {
+        const ENDPOINT: &str =
+            "DELETE /api/v1/admin/registries/{registry}/policy/version/…/rules/{gate}";
+        let mut path = Self::policy_path(node);
+        path.extend(["rules", gate]);
+        let (status, body) = self.raw(reqwest::Method::DELETE, &path, &[], None).await?;
+        if !status.is_success() {
+            return Err(exemption_error(ENDPOINT, status, &body));
+        }
+        Ok(())
+    }
+
+    /// `GET /api/v1/me`.
+    async fn whoami(&self) -> Result<Option<String>, GatewayError> {
+        let me = front_office_api::me(&self.config)
+            .await
+            .map_err(|e| client_error("/api/v1/me", e))?;
+        Ok(me.user_id.flatten())
+    }
+
+    /// Any admin call: a 2xx answer as JSON (`null` when empty, the text
+    /// as a string when not JSON); 400 a refusal, 404 not found.
+    async fn call(&self, request: &AdminRequest) -> Result<Value, GatewayError> {
+        let method = match request.method {
+            Method::Get => reqwest::Method::GET,
+            Method::Post => reqwest::Method::POST,
+            Method::Put => reqwest::Method::PUT,
+            Method::Delete => reqwest::Method::DELETE,
+        };
+        let segments: Vec<&str> = request.path.iter().map(String::as_str).collect();
+        let query: Vec<(&str, &str)> = request
+            .query
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        let endpoint = format!("{} /{}", method, request.path.join("/"));
+        let (status, body) = self
+            .raw_within(
+                method,
+                &segments,
+                &query,
+                request.body.as_ref(),
+                request.timeout,
+            )
+            .await?;
+        match status {
+            status if status.is_success() => Ok(if body.trim().is_empty() {
+                Value::Null
+            } else {
+                serde_json::from_str(&body).unwrap_or(Value::String(body))
+            }),
+            StatusCode::BAD_REQUEST => Err(GatewayError::Refused(refusal(&endpoint, &body))),
+            StatusCode::NOT_FOUND => Err(GatewayError::NotFound(refusal(&endpoint, &body))),
+            status => Err(unexpected_status(status, &body)),
+        }
     }
 }
 

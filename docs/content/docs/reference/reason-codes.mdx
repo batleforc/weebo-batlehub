@@ -55,8 +55,8 @@ kubectl get events -A --field-selector reason=InvalidSpec
 | `InstanceConfigUnmanaged` | blocking | `Ready: False`, Event (`Warning`) | A `BatleHubRegistry` on an external instance without `manageConfig`: the operator renders no configuration there. |
 | `OwnedObjectConflict` | blocking | `Ready: False`, Event (`Warning`) | Managed instance: an object the operator must create already exists and isn't the operator's — never adopted implicitly. |
 | `GrantStorageUnavailable` | blocking | `Ready: False`, Event (`Warning`) | BatleHub has no grant storage configured (503). |
-| `GrantConflict` | blocking | `Ready: False`, Event (`Warning`) | A grant in place on that node was not written by this CR, or another CR targets the same coordinate and subject. |
-| `PolicyConflict` | blocking | `Ready: False`, Event (`Warning`) | A policy in place on that node was not written by this CR, or another CR targets the same coordinate. |
+| `GrantConflict` | blocking | `Ready: False`, Event (`Warning`), admission denial | A grant in place on that node was not written by this CR, or another CR targets the same coordinate and subject. |
+| `PolicyConflict` | blocking | `Ready: False`, Event (`Warning`), admission denial | A policy in place on that node was not written by this CR, or another CR targets the same coordinate. |
 | `GrantHeldByOwnership` | blocking | `Ready: False`, Event (`Warning`) | 409: the subject already holds these actions through package ownership. |
 | `ExemptionNotPermitted` | blocking | `Ready: False`, Event (`Warning`) | 403 on an exemption: `gates:exempt` is granted to no role, the operator's identity needs a grant on the version or its package (the message gives it). |
 | `ClaimConflict` | blocking | `Ready: False`, Event (`Warning`) | A `BatleHubNamespaceClaim`'s prefix is already claimed on that registry by something else (the console, the CLI, another CR): never taken over. The message says for which group and by whom; release that claim, or delete this CR. |

@@ -11,11 +11,9 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use api::NamespaceClaim;
 use api::namespace_claim::DeletionPolicy;
-use api::{LocalInstance, NamespaceClaim};
-use application::ports::{
-    BoundInstance, GatewayFactoryError, InstanceAccess, InstanceError, ResolveError,
-};
+use application::ports::{BoundInstance, GatewayFactoryError, InstanceAccess, InstanceError};
 use application::use_cases::reconcile_namespace_claim::{
     Claim, marker, reconcile_namespace_claim, release_namespace_claim,
 };
@@ -25,7 +23,6 @@ use k8s_openapi::jiff::Timestamp;
 use kube::api::Api;
 use kube::runtime::controller::Action;
 use kube::runtime::finalizer::{Event as FinalizerEvent, finalizer};
-use kube::runtime::reflector::ObjectRef;
 use kube::{Client, Resource, ResourceExt};
 use serde_json::{Map, Value, json};
 use weebo_kit_runtime::events;
@@ -37,21 +34,7 @@ pub const KIND: &str = "BatleHubNamespaceClaim";
 pub async fn run(client: Client, ctx: Arc<Ctx>) {
     let health = ctx.health.clone();
     let controller = super::controller(ctx.scope.api::<NamespaceClaim>(client.clone()), &ctx.scope);
-    let store = controller.store();
-    let results = controller
-        .watches(
-            ctx.scope.api::<LocalInstance>(client),
-            ctx.scope.watcher_config(),
-            move |instance| {
-                let namespace = instance.namespace();
-                store
-                    .state()
-                    .iter()
-                    .filter(|c| c.namespace() == namespace)
-                    .map(|c| ObjectRef::from_obj(c.as_ref()))
-                    .collect::<Vec<_>>()
-            },
-        )
+    let results = super::with_instances(controller, &ctx.scope, client)
         .graceful_shutdown_on(ctx.shutdown.wait())
         .run(reconcile, error_policy, ctx);
     super::drive(KIND, health, results).await;
@@ -81,14 +64,14 @@ async fn access(
     claim: &NamespaceClaim,
     ctx: &Ctx,
 ) -> Result<(BoundInstance, Result<InstanceAccess, GatewayFactoryError>), InstanceError> {
-    let namespace = claim.namespace().unwrap_or_default();
     let recorded = claim.status.as_ref().and_then(|s| s.instance.as_ref());
-    let bound = ctx
-        .instances
-        .resolve(Some(&namespace), claim.spec.instance_ref.as_ref(), recorded)
-        .await?;
-    let access = ctx.gateways.gateway_for(&bound).await;
-    Ok((bound, access))
+    super::local_access(
+        ctx,
+        &claim.namespace().unwrap_or_default(),
+        claim.spec.instance_ref.as_ref(),
+        recorded,
+    )
+    .await
 }
 
 async fn apply(
@@ -138,20 +121,16 @@ async fn cleanup(claim: &NamespaceClaim, ctx: &Ctx) -> Result<(), Error> {
     if claim.spec.deletion_policy == DeletionPolicy::Orphan {
         return Ok(());
     }
-    let gone = |message: String| {
-        tracing::warn!(claim = %claim.name_any(), "{message}: nothing released");
-        Ok(())
-    };
-    let access = match access(claim, ctx).await {
-        Ok((_, Ok(access))) => access,
-        Err(InstanceError::Resolve(ResolveError::NotFound { .. } | ResolveError::NoInstance)) => {
-            return gone("its instance is gone".into());
-        }
-        Ok((bound, Err(GatewayFactoryError::InstanceNotFound(_)))) => {
-            return gone(format!("{bound} is gone"));
-        }
-        Ok((_, Err(err))) => return Err(Error::Cleanup(err.into())),
-        Err(err) => return Err(Error::Cleanup(instance_failure(err))),
+    let Some(access) = super::cleanup_access(
+        ctx,
+        &claim.namespace().unwrap_or_default(),
+        claim.spec.instance_ref.as_ref(),
+        claim.status.as_ref().and_then(|s| s.instance.as_ref()),
+        &format!("BatleHubNamespaceClaim {}", claim.name_any()),
+    )
+    .await?
+    else {
+        return Ok(());
     };
     let marker = marker(&claim.namespace().unwrap_or_default(), &claim.name_any());
     let released = release_namespace_claim(

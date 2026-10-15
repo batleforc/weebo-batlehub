@@ -67,6 +67,9 @@ uuid = { version = "1", features = ["v4"] }
 futures = "0.3"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
 sha2 = "0.10"
+# The time of `k8s-openapi` (its re-export, as a direct dependency where
+# no Kubernetes type is): exemption expiries, maintenance schedules.
+jiff = "0.2"
 toml = "1"
 argon2 = { version = "0.6", features = ["password-hash"] }
 

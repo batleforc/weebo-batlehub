@@ -25,6 +25,16 @@ batlehub, D8 révisée) et sur laquelle tout est épinglé depuis le M2 ; kit
 
 ### Historique
 
+- **v2.4 — M3, 2026-10-15** : `BatleHubPackageGrant`,
+  `BatleHubPackagePolicy` et `BatleHubMaintenance` livrés (Constats du
+  M3). Écarts : `status.warnings` d'un grant est par sujet
+  (`applied[].warnings`) ; `healthCheck` lit `/healthz` (qui existe) ; le
+  webhook ne refuse pas un `params.registry` absent de la config rendue
+  (une registry peut encore être rattachée : le status le dit) ;
+  l'advisory `MaintenanceRunning` n'est pas publié (le run tient le
+  reconcile : `status.lastRun.state: Running` le montre) ; le cron et le
+  hash de policy sont dans `application` (jiff, sha2 : `domain` reste sans
+  dépendance).
 - **v2.3 — 2026-10-15** : nouveau kind `BatleHubNamespaceClaim` (4.7), les
   team namespaces de batlehub (claims en base, API admin), avancé de
   « Plus tard » au M2 ; code `ClaimConflict`.
@@ -1861,8 +1871,73 @@ chaque pod relu.
   deviennent le kind `BatleHubNamespaceClaim` (4.7) : envtest (claim,
   changement de groupe, CEL, conflit, `Orphan`, `InstanceInUse`), live
   contre 1.6.0 (claim, relecture, release d'un préfixe à `/`), étape e2e.
-- **Reste du M2** : la release **0.1.0-alpha.1** (D7) et le test
-  d'upgrade, qui ne tourne vraiment que sur un tag.
+- **Release** : **0.1.0-alpha.1** publiée le 2026-10-15 (kit v0.15.1,
+  dont `publish.yml` publie une première prerelease marquée comme telle) :
+  images, chart OCI, release GitHub avec les CRD et leur bundle sigstore.
+
+### Constats du M3 (2026-10-15)
+
+Kit **v0.15.1**. `test:live-batlehub` vert contre l'image 1.6.0, les trois
+kinds par leurs controllers sur envtest : grants (conflit, échec partiel,
+ownership, version inexistante, dérive réécrite, révocation), policies et
+exemptions (`ExemptionNotPermitted`, puis `gates:exempt` accordé par un
+`BatleHubPackageGrant`), maintenances (`healthCheck`,
+`packageInvalidate`, un refus de batlehub compté comme run en échec,
+bannière posée puis retirée, run laissé `Running` clos sans rejeu).
+envtest par kind (`InstanceInUse` compris), contrats wiremock des
+endpoints, étape e2e (grant, policy, maintenance, refus CEL et webhook).
+
+- **Grants** (vérifié en live) : `PUT …/grants` remplace la ligne du sujet
+  et renvoie l'ensemble stocké (`releases:*` → `read, list, publish,
+  overwrite, yank, delete`) ; registry inconnue → 404 ; version absente →
+  400 « has no version » (vérifiée même sur une registry proxy) ; le
+  `GET` d'un nœud paquet rend aussi les lignes de ses versions (filtrées
+  par `node_kind`/`node_key`). `granted_by` est l'utilisateur du token,
+  pas le CR : la propriété passe par `status.applied`, relu depuis
+  l'apiserver à chaque passe (pas le cache) et patché après chaque
+  écriture. Une ligne d'owner (`from_ownership`) d'un sujet de la spec →
+  `GrantHeldByOwnership` sans écrire ; un `PUT` qui garde les trois verbes
+  d'ownership la remplacerait (sémantique batlehub).
+- **Policies** (vérifié en live) : `PUT` sur une registry inconnue →
+  **204** (rien n'est vérifié) : l'opérateur lit `GET /admin/health` avant
+  sa première écriture d'une passe (`RemoteNotFound`). Une clé inconnue
+  est ignorée sans erreur (et une policy toute vide n'est pas stockée) :
+  le CRD déclare les clés de premier niveau du `PolicyDto` (l'apiserver
+  refuse ou élague le reste), les sections restent ouvertes. Un `quota`
+  sur une version → 400. La lecture remplit les défauts (`versioning`) :
+  `observedPolicyHash` est le hash relu juste après l'écriture, exemptions
+  exclues. Le paquet `@scope/name` dans la route version passe encodé
+  (`%2F`), décodé correctement par batlehub.
+- **Exemptions** (vérifié en live) : 403 « no grant for 'gates:exempt' »
+  sans grant ; un grant `gates:exempt` à `user:<user du token>` sur le
+  paquet suffit (`GET /api/v1/me` donne l'utilisateur, nommé dans le
+  message). Stockées en `rules` (`settings.exempt: true`), un `PUT` de la
+  policy les efface : reportées à chaque réécriture, et une policy retirée
+  de la spec devient un `PUT` des seules exemptions. Date passée → 400 :
+  signalée (`ExemptionExpired`), jamais écrite. Les dates sont comparées
+  en instants (une même date dans un autre fuseau n'est pas une dérive).
+- **Maintenance** : cron 5 champs maison (`application::cron`, jiff,
+  sans dépendance), UTC, `0-7` depuis dimanche, OU entre jour du mois et
+  jour de semaine quand les deux sont restreints. Une exécution unique
+  tourne une fois par `metadata.generation` ; `run-now` une fois par
+  valeur, sur tout kind de maintenance. Le run est écrit `Running` par un
+  merge patch du status portant `metadata.resourceVersion` (l'apiserver
+  répond 409 si l'objet a changé : testé sur envtest). Un échec n'est
+  jamais retenté : `MaintenanceFailed`/`Timeout`/`Interrupted` passent en
+  `needs_a_change` (sinon une maintenance unique en échec se relançait
+  toutes les 30 s sans rien faire). Réponses réelles : `config/reload`
+  sans pending → 400 « no pending reload » ; `retention` et `compact`
+  sans bloc `[registries.retention]` → 409 explicatif ; `evict`/`warm`
+  sans configuration → 404 « not configured » : tous des runs en échec
+  avec le message de batlehub. `/healthz` existe (base, stockage,
+  version). Le timeout par requête du client (15 s) est remplacé par
+  `timeoutSeconds` pour l'appel d'une maintenance.
+- **Webhook** : grants (même sujet sur le même nœud), policies (même
+  nœud ; gate réglé et exempté), maintenances (`schedule` ou
+  `params.before` illisibles). Pas de refus d'une `params.registry`
+  absente (elle peut encore être rattachée) ni de `configApplyPending` sur
+  une instance `manageConfig` (il faudrait lire l'instance) : le run les
+  refuse (`InvalidSpec`).
 
 ## 11. Évolutions proposées
 
