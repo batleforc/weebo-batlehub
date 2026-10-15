@@ -1,0 +1,200 @@
+---
+title: Manage the configuration
+description: Push BatleHub's configuration and its registries from Kubernetes objects.
+---
+
+With `external.manageConfig: true`, the operator renders BatleHub's
+configuration from the `BatleHubLocalInstance` and the `BatleHubRegistry`s
+it accepts, and pushes it through the admin API: it replaces the
+instance's first configuration file (the credentials layer, a second
+`--config`, stays the instance's own).
+
+The instance needs hot reload enabled and a writable first configuration
+file: a file mounted from a ConfigMap is read-only, and the operator says
+so (`ConfigReadOnly`) rather than pushing a change lost on the next
+restart.
+
+## The configuration
+
+`spec.config` is BatleHub's `config.toml` written in YAML, key for key: a
+TOML table is an object, an array of tables a list of objects. Nothing is
+typed in the CRD: BatleHub's own parser validates it. `spec.configLayers`
+merges TOML documents from ConfigMaps or Secrets over it, in order, the way
+BatleHub merges its `--config` layers.
+
+```yaml
+apiVersion: batlehub.weebo.io/v1alpha1
+kind: BatleHubLocalInstance
+metadata:
+  name: main
+  namespace: infra
+spec:
+  external:
+    url: https://batlehub.example.com
+    adminTokenSecretRef: { name: batlehub-admin, key: token }
+    manageConfig: true
+  config:
+    server: { host: 0.0.0.0, port: 8080 }
+    database: { type: postgresql, url: "${DATABASE_URL}" }
+    storage: { type: filesystem, path: /var/cache/batlehub }
+    auth:
+      - type: token
+        tokens:
+          - { value: "$argon2id$…", role: admin, user_id: weebo-batlehub-operator }
+  configLayers:
+    - configMapRef: { name: batlehub-limits }
+```
+
+- `${VAR}` placeholders stay in the pushed file: the instance resolves them
+  from its own environment. The operator validates with a stand-in value
+  (`UnresolvedPlaceholders` lists them); when the stand-in is what fails,
+  `reload.validation: Lenient` pushes anyway and the instance has the last
+  word.
+- A Secret layer is sent to BatleHub: it must be labelled
+  `batlehub.weebo.io/credential: "true"` (`SecretNotAllowed` otherwise).
+- The configuration must keep accepting the operator's token with the
+  `admin` role: an `[[auth]] type = "token"` entry holding it (plain, or
+  hashed with `batlehub hash-token`). Otherwise nothing is pushed
+  (`OperatorTokenShadowed`): the operator would lock itself out at the
+  next restart.
+
+`status.configHash` is the SHA-256 of the rendered file,
+`status.appliedConfigHash` the one the instance was last seen running.
+
+## How a change reaches the instance
+
+1. One dry run (`POST /api/v1/admin/config/validate`): a configuration the
+   instance refuses goes nowhere (`ConfigRejected`, retried at most every
+   10 minutes unless the spec changes).
+2. A change to a key BatleHub only reads at startup (`database`, `auth`,
+   `storage`… — its `reload_keys` table) is **held back**:
+   `RestartForbidden`, the keys in `status.restartKeys`. The operator
+   doesn't deploy the instance, so it can't restart it. Revert them, or
+   align the instance and restart it yourself.
+3. The file is staged and approved (`from-content`, then
+   `pending/apply`), which writes it to the instance's disk. An Event
+   `ConfigReloaded` says so.
+
+`reload.strategy: Manual` holds every new configuration (`ConfigHeld`,
+`status.pendingConfigHash`) until the instance is annotated with its exact
+hash:
+
+```bash
+kubectl -n infra annotate bhli main --overwrite \
+  batlehub.weebo.io/approved-config-hash=$(kubectl -n infra get bhli main -o jsonpath='{.status.pendingConfigHash}')
+```
+
+### Several replicas
+
+BatleHub's replicas don't share a reload. When the instance runs in the
+same namespace (the BatleHub chart), `external.podSelector` selects its
+proxy pods: the operator pushes and approves on each ready pod, over plain
+HTTP on its IP (container port `http`). Without it, an instance of several
+replicas is not supported with `manageConfig`.
+
+Select the proxy pods only: the chart's worker pods carry the same labels
+plus `app.kubernetes.io/component: worker`, and have no reload to approve.
+
+```yaml
+spec:
+  external:
+    podSelector:
+      matchLabels:
+        app.kubernetes.io/name: batlehub
+        app.kubernetes.io/instance: batlehub
+      matchExpressions:
+        - { key: app.kubernetes.io/component, operator: DoesNotExist }
+```
+
+Each pod writes its own file: the chart mounts its configuration
+read-only, which the operator reports as `ConfigReadOnly`. Copy it into a
+writable volume first (an init container copying it into an `emptyDir`
+mounted at the configuration's directory).
+
+## Registries
+
+A `BatleHubRegistry` is one `[[registries]]` entry as its own object, so
+each team manages its registries:
+
+```yaml
+apiVersion: batlehub.weebo.io/v1alpha1
+kind: BatleHubRegistry
+metadata:
+  name: npm
+  namespace: infra
+spec:
+  type: npm
+  config:
+    upstreams: [https://registry.npmjs.org]
+  configFrom:
+    - secretRef: { name: npm-upstream-auth }   # labelled credential
+```
+
+The instance renders every registry it accepts after its `configLayers`,
+sorted by namespace then name, and writes their status: `Ready` follows the
+push. Two registries with the same `name` are never merged: the oldest is
+rendered, the other is `DuplicateRegistryName`.
+
+Registries of other namespaces attach with an `instanceRef` naming the
+instance and its namespace, when the instance accepts that namespace:
+
+```yaml
+spec:
+  registrySelector:
+    namespaces:
+      from: Selector          # Same (default), All, or Selector
+      selector:
+        matchLabels: { batlehub.weebo.io/registries: "true" }
+```
+
+Such a registry may not contain `${` (placeholders resolve from the
+instance's environment: they would hand its secrets to whoever writes the
+registry), nor complete an entry of the instance's own `spec.config`.
+
+On an instance without `manageConfig`, a registry is
+`InstanceConfigUnmanaged`: the operator renders nothing there.
+
+### Namespaces of a registry
+
+BatleHub's namespace blocks (`[[registries.namespaces]]`: a package prefix
+carrying its grants, visibility, versioning, quota and rules) are keys of
+the registry like any other, under `config.namespaces`:
+
+```yaml
+apiVersion: batlehub.weebo.io/v1alpha1
+kind: BatleHubRegistry
+metadata:
+  name: npm
+  namespace: infra
+spec:
+  type: npm
+  config:
+    mode: local
+    grants:
+      "*": [releases:read, releases:list]
+    namespaces:
+      - match: "@acme/billing"
+        visibility: team
+        grants:
+          "group:oidc1:platform": ["releases:*", "owners:write"]
+      - match: "@acme/ci"
+        rules:
+          - { kind: release_age_gate, min_age_secs: 0 }
+```
+
+They reload without a restart. Three things to know:
+
+- **A list replaces a list.** A namespace has no `name` nor `type` for
+  BatleHub's layer merge to match on: a `configFrom` fragment declaring
+  `[[namespaces]]` replaces every namespace of `config`, and a
+  `BatleHubRegistry` completing a registry of the instance's own
+  `spec.config` replaces that registry's namespaces. Keep a registry's
+  namespaces in one place.
+- **No namespace spans registries.** BatleHub has no namespace block above
+  the registry: a policy several registries share is written in each. The
+  tier above every registry is the instance's `[grants]`, in its
+  `spec.config`; a registry of another namespace never reaches it.
+- **Team namespace claims are another object.** The prefixes a team
+  claims (`batlehub admin namespace`, the console) live in BatleHub's
+  database, not in its configuration: a `BatleHubNamespaceClaim` manages
+  one ([Team namespaces](/docs/guides/team-namespaces)).

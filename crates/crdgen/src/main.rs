@@ -18,9 +18,11 @@ struct Args {
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     fs::create_dir_all(&args.out)?;
-    // The other kinds of the spec (registries, maintenances, grants,
-    // policies) join here as they are built.
+    // The other kinds of the spec (maintenances, grants, policies) join
+    // here as they are built.
     write_crd(&args.out, &api::LocalInstance::crd())?;
+    write_crd(&args.out, &api::Registry::crd())?;
+    write_crd(&args.out, &api::NamespaceClaim::crd())?;
     println!("wrote CRDs to {}", args.out.display());
     Ok(())
 }

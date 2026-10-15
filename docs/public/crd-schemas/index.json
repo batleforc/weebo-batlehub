@@ -3,5 +3,15 @@
     "kind": "BatleHubLocalInstance",
     "singular": "batlehublocalinstance",
     "scope": "Namespaced"
+  },
+  {
+    "kind": "BatleHubRegistry",
+    "singular": "batlehubregistry",
+    "scope": "Namespaced"
+  },
+  {
+    "kind": "BatleHubNamespaceClaim",
+    "singular": "batlehubnamespaceclaim",
+    "scope": "Namespaced"
   }
 ]

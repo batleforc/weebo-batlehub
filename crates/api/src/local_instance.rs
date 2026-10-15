@@ -1,9 +1,11 @@
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector;
 use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 pub use weebo_kit_api::{LocalSecretKeyRef, LocalTlsOptions};
 
+use crate::config::{ConfigSource, open_object};
 use crate::status::Condition;
 
 /// The short names the rest of the workspace uses.
@@ -12,9 +14,11 @@ pub use self::BatleHubLocalInstanceSpec as LocalInstanceSpec;
 pub use self::BatleHubLocalInstanceStatus as LocalInstanceStatus;
 
 /// One BatleHub instance, owned by a namespace: its token is that
-/// namespace's, and only the objects of that namespace use it. `Ready`
-/// tells whether the instance answers and accepts the operator's token
-/// with the admin role.
+/// namespace's, and only the objects of that namespace use it (plus the
+/// `BatleHubRegistry`s of the namespaces it accepts). `Ready` tells
+/// whether the instance answers, accepts the operator's token with the
+/// admin role and, with `external.manageConfig`, runs the configuration
+/// rendered from this object.
 ///
 /// While objects are bound to it, its deletion waits (`InstanceInUse`);
 /// `batlehub.weebo.io/force-orphan: "true"` releases it and leaves them
@@ -37,13 +41,34 @@ pub use self::BatleHubLocalInstanceStatus as LocalInstanceStatus;
 #[serde(rename_all = "camelCase")]
 pub struct BatleHubLocalInstanceSpec {
     /// A BatleHub the operator doesn't deploy: it reaches it at `url`
-    /// with an admin token, and observes it. (The mode where the operator
-    /// deploys BatleHub itself comes in a later version.)
+    /// with an admin token, observes it and, with `manageConfig`, pushes
+    /// its configuration. (The mode where the operator deploys BatleHub
+    /// itself comes in a later version.)
     pub external: ExternalInstance,
+    /// BatleHub's configuration file (`config.toml`) written in YAML, key
+    /// for key: a TOML table is an object, an array of tables a list of
+    /// objects. Never typed here: BatleHub's own parser validates it.
+    /// `${VAR}` placeholders are kept and resolved by the instance from
+    /// its own environment. Rendered only with `external.manageConfig`.
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    #[schemars(schema_with = "open_object")]
+    pub config: serde_json::Value,
+    /// TOML documents merged in order over `config`, the way BatleHub
+    /// merges its `--config` layers (the later wins; tables merge; arrays
+    /// of tables merge entry by entry on a unique `name`, else `type`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub config_layers: Vec<ConfigSource>,
+    /// How a new configuration reaches the instance.
+    #[serde(default, skip_serializing_if = "Reload::is_default")]
+    pub reload: Reload,
+    /// Which `BatleHubRegistry`s this instance serves, rendered as
+    /// `[[registries]]` entries after `configLayers`.
+    #[serde(default, skip_serializing_if = "RegistrySelector::is_default")]
+    pub registry_selector: RegistrySelector,
 }
 
 /// A BatleHub deployed by other means (its Helm chart, another cluster).
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ExternalInstance {
     /// Base URL of the BatleHub instance, e.g. `https://batlehub.example.com`.
@@ -58,6 +83,114 @@ pub struct ExternalInstance {
     /// `tls.insecureSkipVerify` escape hatch.
     #[serde(default)]
     pub tls: LocalTlsOptions,
+    /// Push the configuration rendered from `config`, `configLayers` and
+    /// the registries through the admin API, replacing the instance's
+    /// first configuration file. The instance needs hot reload enabled.
+    /// A change of a key that needs a restart is held back
+    /// (`RestartForbidden`): the operator can't restart an instance it
+    /// doesn't deploy. Without it, the operator only observes.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub manage_config: bool,
+    /// The instance's proxy pods, when it runs in this namespace (the
+    /// BatleHub chart): its replicas don't share a reload, so the operator
+    /// pushes and approves the configuration on each selected pod, over
+    /// plain HTTP on its IP and container port (the one named `http`,
+    /// else the first container's first). Select the proxy pods only: the
+    /// chart's worker pods carry the same labels plus
+    /// `app.kubernetes.io/component: worker` (exclude it with a
+    /// `DoesNotExist` expression). Without it, `url` is the only entry
+    /// point, and an instance of several replicas is not supported with
+    /// `manageConfig`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pod_selector: Option<LabelSelector>,
+}
+
+/// How a new configuration reaches the instance.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Reload {
+    /// `Auto` applies every validated configuration; `Manual` holds it
+    /// (`ConfigHeld`, its hash in `status.pendingConfigHash`) until the
+    /// annotation `batlehub.weebo.io/approved-config-hash` carries that
+    /// exact hash.
+    #[serde(default)]
+    pub strategy: ReloadStrategy,
+    /// `Strict` blocks a configuration BatleHub's parser refuses
+    /// (`ConfigInvalid`); `Lenient` pushes it anyway
+    /// (`ConfigInvalidLenient`), for when the stand-in value the operator
+    /// gives a `${VAR}` it can't read is what fails. The instance still
+    /// validates it with its real environment before loading it.
+    #[serde(default)]
+    pub validation: Validation,
+}
+
+impl Reload {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq, JsonSchema)]
+pub enum ReloadStrategy {
+    #[default]
+    Auto,
+    Manual,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq, JsonSchema)]
+pub enum Validation {
+    #[default]
+    Strict,
+    Lenient,
+}
+
+/// Which `BatleHubRegistry`s the instance serves.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RegistrySelector {
+    /// Only the registries whose labels match; all of them when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selector: Option<LabelSelector>,
+    /// The namespaces whose registries may attach to this instance (with
+    /// an `instanceRef` naming it): its own always.
+    #[serde(default, skip_serializing_if = "RegistryNamespaces::is_default")]
+    pub namespaces: RegistryNamespaces,
+}
+
+impl RegistrySelector {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// The namespaces a registry may come from (the Gateway API's
+/// `allowedRoutes.namespaces`): the consent of the instance's owner.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(extend("x-kubernetes-validations" = [
+    {"rule": "self.from != 'Selector' || has(self.selector)", "message": "namespaces.selector is required with from: Selector"}
+]))]
+pub struct RegistryNamespaces {
+    /// `Same` (the instance's namespace), `All`, or `Selector`.
+    #[serde(default)]
+    pub from: NamespacesFrom,
+    /// The labels of the namespaces accepted, with `from: Selector`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selector: Option<LabelSelector>,
+}
+
+impl RegistryNamespaces {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq, JsonSchema)]
+pub enum NamespacesFrom {
+    #[default]
+    Same,
+    All,
+    Selector,
 }
 
 /// What the operator observed of the instance.
@@ -68,7 +201,7 @@ pub struct BatleHubLocalInstanceStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed_generation: Option<i64>,
     /// `Ready`, carrying one of the operator's reason codes, and the
-    /// advisories next to it (`ConfigWarnings`).
+    /// advisories next to it (`ConfigWarnings`, `ConfigHeld`…).
     #[serde(default)]
     pub conditions: Vec<Condition>,
     /// The URL the operator calls.
@@ -81,6 +214,51 @@ pub struct BatleHubLocalInstanceStatus {
     /// configuration (`GET /api/v1/admin/config/warnings`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<ConfigWarning>,
+    /// SHA-256 of the configuration rendered from this object (the
+    /// desired one), with `manageConfig`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_hash: Option<String>,
+    /// SHA-256 of the configuration every pod was last seen running.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub applied_config_hash: Option<String>,
+    /// SHA-256 of a configuration held by `reload.strategy: Manual`: set
+    /// `batlehub.weebo.io/approved-config-hash` to it to apply it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_config_hash: Option<String>,
+    /// Bumped to make BatleHub stage bytes it has already seen once (a
+    /// load attempt that failed or expired): written as a final comment
+    /// of the pushed file, outside `configHash`.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub reload_nonce: u64,
+    /// The last configuration the instance refused (or loaded without
+    /// being able to write it, `unpersistedConfigHash`), and when: the same
+    /// one is pushed again at most every 10 minutes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rejected_config_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_rejection_time: Option<String>,
+    /// What the instance said when it refused `rejectedConfigHash`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rejection_message: Option<String>,
+    /// A configuration the instance loaded but couldn't write to its first
+    /// configuration file (`ConfigReadOnly`): lost on its next restart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unpersisted_config_hash: Option<String>,
+    /// The keys needing a restart the instance doesn't run yet, while the
+    /// push is held back.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub restart_keys: Vec<String>,
+    /// The pods (with `external.podSelector`) not running the desired
+    /// configuration yet; empty once it is applied.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pods: Vec<PodConfig>,
+    /// When the operator last made the instance load a configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_reload_time: Option<String>,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 /// One warning of BatleHub on its configuration.
@@ -92,4 +270,14 @@ pub struct ConfigWarning {
     /// The configuration key it is about, e.g. `server.trusted_proxies`.
     pub path: String,
     pub message: String,
+}
+
+/// A pod behind on the configuration.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PodConfig {
+    pub name: String,
+    /// SHA-256 of the configuration file it serves, when it could be read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_hash: Option<String>,
 }

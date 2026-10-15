@@ -8,10 +8,12 @@ export default defineConfig({
   // `BatleHubLocalInstance` → example named `my-local-instance`.
   kindPrefix: "BatleHub",
   // Sidebar order follows the order you'd create things in, not the alphabet.
-  order: ["BatleHubLocalInstance"],
+  order: ["BatleHubLocalInstance", "BatleHubRegistry", "BatleHubNamespaceClaim"],
   // The guide that explains each kind, linked from its reference page.
   guides: {
     BatleHubLocalInstance: ["Connect a BatleHub instance", "/docs/guides/connect-instance"],
+    BatleHubRegistry: ["Manage the configuration", "/docs/guides/manage-config"],
+    BatleHubNamespaceClaim: ["Team namespaces", "/docs/guides/team-namespaces"],
   },
   // A minimal, realistic `spec` per kind, checked against the schema (every
   // required field present, every key a real field): a renamed field fails
@@ -22,6 +24,15 @@ export default defineConfig({
         url: "https://batlehub.example.com",
         adminTokenSecretRef: { name: "batlehub-admin", key: "token" },
       },
+    },
+    BatleHubRegistry: {
+      type: "npm",
+      config: { upstreams: ["https://registry.npmjs.org"] },
+    },
+    BatleHubNamespaceClaim: {
+      registry: "npm",
+      prefix: "@acme/web",
+      group: "oidc:web-team",
     },
   },
   // The operator reference pages (content/docs/reference/), generated from

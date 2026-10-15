@@ -1,7 +1,9 @@
-# A real BatleHub in the e2e cluster (from M1): the released image, a
-# Postgres beside it (data on an emptyDir), and an external
-# BatleHubLocalInstance that must end Ready. Throwaway credentials: the
-# cluster lives for one run. Never use this anywhere else.
+# A real BatleHub in the e2e cluster: the released image at 2 replicas,
+# a Postgres beside it (data on an emptyDir), an external
+# BatleHubLocalInstance observing it (M1) and one managing its
+# configuration on each pod (`podSelector`, M2) with a BatleHubRegistry.
+# Throwaway credentials: the cluster lives for one run. Never use this
+# anywhere else.
 apiVersion: v1
 kind: Service
 metadata:
@@ -96,6 +98,8 @@ metadata:
   name: batlehub
   namespace: team-a
 spec:
+  # Replicas don't share a reload: the operator pushes to each pod.
+  replicas: 2
   selector: { matchLabels: { app: batlehub } }
   template:
     metadata: { labels: { app: batlehub } }
@@ -107,10 +111,23 @@ spec:
         runAsGroup: 65532
         fsGroup: 65532
         seccompProfile: { type: RuntimeDefault }
+      # Each pod writes its own copy (a ConfigMap mount is read-only, and
+      # a pushed configuration is written to the first file).
+      initContainers:
+        - name: config
+          image: docker.io/library/busybox:1.37
+          command: [sh, -c, "cp /config/config.toml /etc/batlehub/config.toml"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: config, mountPath: /config }
+            - { name: writable, mountPath: /etc/batlehub }
       containers:
         - name: batlehub
-          image: ghcr.io/batlehub/batlehub:1.5.0
-          ports: [{ containerPort: 8080 }]
+          image: ghcr.io/batlehub/batlehub:1.6.0
+          ports: [{ name: http, containerPort: 8080 }]
           readinessProbe:
             httpGet: { path: /livez, port: 8080 }
             periodSeconds: 2
@@ -119,11 +136,12 @@ spec:
             readOnlyRootFilesystem: true
             capabilities: { drop: ["ALL"] }
           volumeMounts:
-            - { name: config, mountPath: /etc/batlehub }
+            - { name: writable, mountPath: /etc/batlehub }
             - { name: cache, mountPath: /var/cache/batlehub }
             - { name: tmp, mountPath: /tmp }
       volumes:
         - { name: config, configMap: { name: batlehub } }
+        - { name: writable, emptyDir: {} }
         - { name: cache, emptyDir: {} }
         - { name: tmp, emptyDir: {} }
 ---
@@ -148,3 +166,41 @@ spec:
     adminTokenSecretRef:
       name: batlehub-admin
       key: token
+---
+# The same BatleHub, its configuration managed: pushed to each pod.
+apiVersion: batlehub.weebo.io/v1alpha1
+kind: BatleHubLocalInstance
+metadata:
+  name: hub
+  namespace: team-a
+spec:
+  external:
+    url: http://batlehub.team-a.svc:8080
+    adminTokenSecretRef:
+      name: batlehub-admin
+      key: token
+    manageConfig: true
+    podSelector:
+      matchLabels: { app: batlehub }
+  config:
+    server: { host: 0.0.0.0, port: 8080 }
+    database:
+      type: postgresql
+      url: postgresql://batlehub:batlehub@postgres.team-a.svc:5432/batlehub
+      max_connections: 5
+    storage: { type: filesystem, path: /var/cache/batlehub }
+    auth:
+      - type: token
+        tokens:
+          - { value: e2e-admin-token, role: admin, user_id: weebo-batlehub-operator }
+---
+apiVersion: batlehub.weebo.io/v1alpha1
+kind: BatleHubRegistry
+metadata:
+  name: npm
+  namespace: team-a
+spec:
+  instanceRef: { name: hub }
+  type: npm
+  config:
+    upstreams: [https://registry.npmjs.org]

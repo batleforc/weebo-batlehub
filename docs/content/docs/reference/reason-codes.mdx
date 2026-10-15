@@ -27,7 +27,7 @@ kubectl get events -A --field-selector reason=InvalidSpec
 | Code | Severity | Shows as | Meaning |
 | --- | --- | --- | --- |
 | `Reconciled` | advisory | `Ready: True` | `Ready: True` — the one success reason every reconciler uses. |
-| `InvalidSpec` | blocking | `Ready: False`, Event (`Warning`) | The spec is inconsistent in a way only a change of the CR fixes (a rule the CRD's validation can't express, a gate both set and exempted, `configApplyPending` outside an external instance without `manageConfig`…). |
+| `InvalidSpec` | blocking | `Ready: False`, Event (`Warning`), admission denial | The spec is inconsistent in a way only a change of the CR fixes (a rule the CRD's validation can't express, a gate both set and exempted, `configApplyPending` outside an external instance without `manageConfig`…). |
 | `InstanceNotFound` | blocking | `Ready: False`, Event (`Warning`) | `spec.instanceRef` names no `BatleHubLocalInstance` the operator sees, or, unset, the namespace has none to default to. |
 | `InstanceAmbiguous` | blocking | `Ready: False`, Event (`Warning`) | `spec.instanceRef` is unset and the namespace has several `BatleHubLocalInstance`s: set `spec.instanceRef`. |
 | `InstanceNotAllowed` | blocking | `Ready: False`, Event (`Warning`) | The instance named is out of reach: in another namespace that doesn't consent to it, or outside the namespace the operator is limited to. |
@@ -43,7 +43,7 @@ kubectl get events -A --field-selector reason=InvalidSpec
 | `RemoteError` | blocking | `Ready: False`, Event (`Warning`) | BatleHub answered with an error the operator doesn't expect (a 500, an unknown answer); the message keeps the status and the start of the body. |
 | `RemoteRejected` | blocking | `Ready: False`, Event (`Warning`) | BatleHub rejected a governance write (400), a version that doesn't exist included. |
 | `RemoteNotFound` | blocking | `Ready: False`, Event (`Warning`) | What the CR references doesn't exist in BatleHub (a registry the instance doesn't serve). |
-| `ConfigInvalid` | blocking | `Ready: False`, Event (`Warning`) | BatleHub's own parser refuses the rendered configuration (`reload.validation: Strict`), or a layer is not TOML. |
+| `ConfigInvalid` | blocking | `Ready: False`, Event (`Warning`), admission denial | BatleHub's own parser refuses the rendered configuration (`reload.validation: Strict`), or a layer is not TOML. |
 | `ConfigLayerMissing` | blocking | `Ready: False`, Event (`Warning`) | A ConfigMap or Secret of `configLayers`, `credentials` or `configFrom` is missing. |
 | `ConfigRejected` | blocking | `Ready: False`, Event (`Warning`) | The instance refused the configuration (dry run or load); it is re-staged at most every 10 minutes. |
 | `ConfigPropagating` | blocking | `Ready: False`, Event (`Warning`) | The new configuration is not yet seen by every pod, or a reload is in progress; the message names the pods behind. |
@@ -59,8 +59,9 @@ kubectl get events -A --field-selector reason=InvalidSpec
 | `PolicyConflict` | blocking | `Ready: False`, Event (`Warning`) | A policy in place on that node was not written by this CR, or another CR targets the same coordinate. |
 | `GrantHeldByOwnership` | blocking | `Ready: False`, Event (`Warning`) | 409: the subject already holds these actions through package ownership. |
 | `ExemptionNotPermitted` | blocking | `Ready: False`, Event (`Warning`) | 403 on an exemption: `gates:exempt` is granted to no role, the operator's identity needs a grant on the version or its package (the message gives it). |
+| `ClaimConflict` | blocking | `Ready: False`, Event (`Warning`) | A `BatleHubNamespaceClaim`'s prefix is already claimed on that registry by something else (the console, the CLI, another CR): never taken over. The message says for which group and by whom; release that claim, or delete this CR. |
 | `DuplicateRegistryName` | blocking | `Ready: False`, Event (`Warning`) | Another `BatleHubRegistry` rendered first on the same instance has the same `name`, or a registry of another namespace would complete an entry of the instance's own configuration. |
-| `NamespaceNotAllowed` | blocking | `Ready: False`, Event (`Warning`) | A registry of another namespace contains a `${VAR}` placeholder: placeholders resolve from the instance's environment, so they are refused outside its namespace. |
+| `NamespaceNotAllowed` | blocking | `Ready: False`, Event (`Warning`), admission denial | A registry of another namespace contains a `${VAR}` placeholder: placeholders resolve from the instance's environment, so they are refused outside its namespace. |
 | `InstanceRejected` | blocking | `Ready: False`, Event (`Warning`) | The instance refused the configuration containing this registry. |
 | `MaintenanceFailed` | blocking | `Ready: False`, Event (`Warning`) | The maintenance action failed; `status.lastRun` has the details. |
 | `MaintenanceTimeout` | blocking | `Ready: False`, Event (`Warning`) | The maintenance action exceeded `timeoutSeconds`. |

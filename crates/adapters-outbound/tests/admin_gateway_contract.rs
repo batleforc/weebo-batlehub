@@ -1,7 +1,7 @@
 //! Contract test of `HttpAdminGateway` against a scripted BatleHub
 //! (`wiremock`): the requests it sends and how each answer maps onto a
-//! `GatewayError`. Response shapes follow BatleHub 1.5.0
-//! (`spec/batlehub-v1.5.0.json`, `/livez` from its source).
+//! `GatewayError`. Response shapes follow BatleHub 1.6.0
+//! (`spec/batlehub-v1.6.0.json`, `/livez` from its source).
 
 use adapters_outbound::HttpAdminGateway;
 use application::ports::{AdminGateway, GatewayError};
@@ -29,7 +29,7 @@ async fn livez(server: &MockServer) {
     Mock::given(method("GET"))
         .and(path("/livez"))
         .respond_with(
-            ResponseTemplate::new(200).set_body_json(json!({"ok": true, "version": "1.5.0"})),
+            ResponseTemplate::new(200).set_body_json(json!({"ok": true, "version": "1.6.0"})),
         )
         .mount(server)
         .await;
@@ -55,7 +55,7 @@ async fn ping_reads_the_version_then_checks_the_token() {
         .expect(1)
         .mount(&server)
         .await;
-    assert_eq!(gateway.ping().await.unwrap().version, "1.5.0");
+    assert_eq!(gateway.ping().await.unwrap().version, "1.6.0");
 }
 
 #[tokio::test]
@@ -175,4 +175,287 @@ async fn a_silent_or_strange_livez_is_reported() {
         gateway.ping().await,
         Err(GatewayError::Unreachable(_))
     ));
+}
+
+fn reload(pending_created: bool, restart_required: &[&str]) -> ResponseTemplate {
+    ResponseTemplate::new(200).set_body_json(json!({
+        "diff": {
+            "added_registries": [],
+            "removed_registries": [],
+            "changed_registries": [],
+            "access_config_changed": false,
+            "limits_changed": false,
+            "restart_required": restart_required,
+        },
+        "warnings": [],
+        "pending_created": pending_created,
+    }))
+}
+
+#[tokio::test]
+async fn the_configuration_endpoints_send_the_content_and_read_the_answer() {
+    use wiremock::matchers::body_json;
+    let (server, gateway) = setup().await;
+    let content = "[server]\nport = 8080\n";
+    Mock::given(method("GET"))
+        .and(path("/api/v1/admin/config/content"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"content": content, "is_readonly": false})),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/admin/config/validate"))
+        .and(header("authorization", format!("Bearer {TOKEN}").as_str()))
+        .and(body_json(json!({"content": content})))
+        .respond_with(reload(false, &["database.url"]))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/admin/config/from-content"))
+        .and(body_json(json!({"content": content})))
+        .respond_with(reload(true, &[]))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/admin/config/pending/apply"))
+        .respond_with(reload(false, &[]))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/admin/config/pending"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "6f1c1d6e-4c1b-4a43-9a51-0b1f6f2d5d10",
+            "created_at": "2026-10-15T10:00:00Z",
+            "expires_at": "2026-10-15T10:10:00Z",
+            "source": "file_watcher",
+            "diff": {
+                "added_registries": [], "removed_registries": [], "changed_registries": [],
+                "access_config_changed": false, "limits_changed": false,
+            },
+            "warnings": [],
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path("/api/v1/admin/config/pending"))
+        .respond_with(
+            ResponseTemplate::new(404)
+                .set_body_json(json!({"error": "Not Found", "message": "no pending reload"})),
+        )
+        .mount(&server)
+        .await;
+
+    assert_eq!(gateway.config_content().await.unwrap(), content);
+    let check = gateway.validate_config(content).await.unwrap();
+    assert_eq!(check.restart_required, ["database.url"]);
+    assert!(gateway.stage_config(content).await.unwrap());
+    gateway.apply_pending().await.unwrap();
+    assert_eq!(
+        gateway.pending().await.unwrap(),
+        Some(application::ports::PendingSource::FileWatcher)
+    );
+    // Nothing to discard is fine.
+    gateway.discard_pending().await.unwrap();
+}
+
+#[tokio::test]
+async fn configuration_answers_map_per_endpoint() {
+    let (server, gateway) = setup().await;
+    // BatleHub's error bodies (`AppError`).
+    let at = |verb: &'static str, route: &'static str, status: u16, message: &str| {
+        Mock::given(method(verb)).and(path(route)).respond_with(
+            ResponseTemplate::new(status).set_body_json(json!({"error": "x", "message": message})),
+        )
+    };
+    let refusal = "parsing config TOML: TOML parse error at line 1, column 12\n  |\n\
+                   1 | password = s3cr3t\n  |            ^\nexpected a value";
+    at("POST", "/api/v1/admin/config/validate", 400, refusal)
+        .mount(&server)
+        .await;
+    at(
+        "POST",
+        "/api/v1/admin/config/from-content",
+        503,
+        "hot reload is disabled on this instance (BATLEHUB_DISABLE_HOT_RELOAD=1)",
+    )
+    .mount(&server)
+    .await;
+    at(
+        "POST",
+        "/api/v1/admin/config/pending/apply",
+        409,
+        "pending reload expired",
+    )
+    .mount(&server)
+    .await;
+    at(
+        "GET",
+        "/api/v1/admin/config/pending",
+        404,
+        "no pending reload",
+    )
+    .mount(&server)
+    .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/admin/config/content"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"content": "", "is_readonly": true})),
+        )
+        .mount(&server)
+        .await;
+
+    match gateway.validate_config("x").await {
+        Err(GatewayError::Rejected(why)) => {
+            assert!(why.contains("expected a value"), "{why}");
+            assert!(!why.contains("s3cr3t"), "{why}");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(matches!(
+        gateway.stage_config("x").await,
+        Err(GatewayError::HotReloadDisabled(_))
+    ));
+    assert!(matches!(
+        gateway.apply_pending().await,
+        Err(GatewayError::NoPending(_))
+    ));
+    assert_eq!(gateway.pending().await.unwrap(), None);
+    assert!(matches!(
+        gateway.config_content().await,
+        Err(GatewayError::HotReloadDisabled(_))
+    ));
+}
+
+#[tokio::test]
+async fn a_proxy_s_503_or_404_is_not_batlehub_s() {
+    let (server, gateway) = setup().await;
+    for (route, status) in [
+        ("/api/v1/admin/config/from-content", 503),
+        ("/api/v1/admin/config/pending", 404),
+    ] {
+        Mock::given(path(route))
+            .respond_with(ResponseTemplate::new(status).set_body_string("no healthy upstream"))
+            .mount(&server)
+            .await;
+    }
+    assert!(matches!(
+        gateway.stage_config("x").await,
+        Err(GatewayError::Unreachable(_))
+    ));
+    assert!(matches!(
+        gateway.pending().await,
+        Err(GatewayError::Remote(_))
+    ));
+}
+
+#[tokio::test]
+async fn registries_are_read_from_the_health_list() {
+    let (server, gateway) = setup().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/admin/health"))
+        .and(header("authorization", format!("Bearer {TOKEN}").as_str()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            {"registry": "npm", "registry_type": "npm", "mode": "local", "package_count": 2},
+            {"registry": "pypi", "registry_type": "pypi", "mode": "proxy"},
+        ])))
+        .mount(&server)
+        .await;
+    assert_eq!(gateway.registry_names().await.unwrap(), ["npm", "pypi"]);
+}
+
+#[tokio::test]
+async fn team_namespaces_are_listed_claimed_and_released() {
+    use application::ports::TeamNamespace;
+    use wiremock::matchers::body_json;
+
+    let (server, gateway) = setup().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/admin/registries/npm/namespaces"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([{
+            "registry": "npm",
+            "prefix": "@acme/web",
+            "group_id": "oidc:web",
+            "claimed_by": "weebo-batlehub:team/web",
+            "package_count": 4,
+        }, {
+            "registry": "npm",
+            "prefix": "legacy",
+            "group_id": "oidc:old",
+            "claimed_by": null,
+            "package_count": 0,
+        }])))
+        .mount(&server)
+        .await;
+    let listed = gateway.team_namespaces("npm").await.unwrap();
+    assert_eq!(
+        listed[0],
+        TeamNamespace {
+            prefix: "@acme/web".into(),
+            group: "oidc:web".into(),
+            claimed_by: Some("weebo-batlehub:team/web".into()),
+            package_count: 4,
+        }
+    );
+    assert_eq!(listed[1].claimed_by, None);
+
+    let claim = TeamNamespace {
+        prefix: "frontend/libs".into(),
+        group: "oidc:web".into(),
+        claimed_by: Some("weebo-batlehub:team/libs".into()),
+        package_count: 0,
+    };
+    Mock::given(method("POST"))
+        .and(path("/api/v1/admin/registries/npm/namespaces"))
+        .and(body_json(json!({
+            "prefix": "frontend/libs",
+            "group_id": "oidc:web",
+            "claimed_by": "weebo-batlehub:team/libs",
+        })))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+    gateway.claim_namespace("npm", &claim).await.unwrap();
+
+    // The prefix's slash stays a path separator.
+    Mock::given(method("DELETE"))
+        .and(path(
+            "/api/v1/admin/registries/npm/namespaces/frontend/libs",
+        ))
+        .and(header("authorization", format!("Bearer {TOKEN}").as_str()))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+    gateway
+        .release_namespace("npm", "frontend/libs")
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_claimed_prefix_is_a_conflict() {
+    use application::ports::TeamNamespace;
+
+    let (server, gateway) = setup().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/admin/registries/npm/namespaces"))
+        .respond_with(ResponseTemplate::new(409).set_body_json(json!({
+            "error": "conflict",
+            "message": "namespace 'x' in registry 'npm' is already claimed",
+        })))
+        .mount(&server)
+        .await;
+    let claim = TeamNamespace {
+        prefix: "x".into(),
+        group: "g".into(),
+        ..Default::default()
+    };
+    match gateway.claim_namespace("npm", &claim).await {
+        Err(GatewayError::AlreadyClaimed(why)) => assert!(why.contains("already claimed"), "{why}"),
+        other => panic!("{other:?}"),
+    }
 }

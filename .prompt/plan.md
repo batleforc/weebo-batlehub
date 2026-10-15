@@ -18,12 +18,25 @@ d'une release Helm de batlehub, pas de la v0.1.
 
 Références : batlehub **v1.4.0** au moment de l'écriture (crate
 `batlehub-config`, chart Helm `helm/batlehub` 1.4.0, image
-`ghcr.io/batlehub/batlehub`), **v1.5.0** visée pour D4 (§11.1, D8
-acceptée) mais qui ne les porte pas (Constats du M1) ; kit **v0.14.2**
-(M0), **v0.14.3** (M1).
+`ghcr.io/batlehub/batlehub`), **v1.5.0** visée pour D4 (§11.1) mais qui
+ne les porte pas (Constats du M1), **v1.6.0** qui les porte (RFC 0037 de
+batlehub, D8 révisée) et sur laquelle tout est épinglé depuis le M2 ; kit
+**v0.14.2** (M0), **v0.14.3** (M1), **v0.15.0** (M2).
 
 ### Historique
 
+- **v2.3 — 2026-10-15** : nouveau kind `BatleHubNamespaceClaim` (4.7), les
+  team namespaces de batlehub (claims en base, API admin), avancé de
+  « Plus tard » au M2 ; code `ClaimConflict`.
+- **v2.2 — M2, 2026-10-15** : batlehub **v1.6.0** publie D4 sous la forme
+  de son RFC 0037, qui diffère de la première esquisse de ce document :
+  `merge_layers` rend un **document TOML canonique** (`String`, clés
+  triées, `${VAR}` gardés, `$` littéral écrit `\u0024`) et non un
+  `toml::Value` ; `validate_layers(layers, &dyn Fn(&str) -> Option<String>)` ;
+  et à la place de `RESTART_KEYS` une **allowlist** `reload_keys::RELOAD_KEYS`
+  (tiers `Hot`/`Partial`/`Restart`, toute clé absente = redémarrage) avec
+  `reload_keys::classify(avant, après)`. D8, 2.2, 2.4 et §11.1 suivent ;
+  le M2 est livré (Constats du M2).
 - **v2.1 — revue du 2026-10-14** (relecture « prêt à implémenter ? »
   contre le kit v0.14, les correctifs de forgejo/authentik du 2026-10-13
   et le code de batlehub) :
@@ -140,8 +153,8 @@ plus à redécouvrir. On le reprend presque mot pour mot :
   recopiée de la doc) contournent des manques de batlehub, que nous
   maintenons aussi. §11.1 liste les évolutions upstream qui les
   simplifient : celles de D4 (`merge_layers`, `validate_layers`,
-  `RESTART_KEYS`) sont un **prérequis du M2** (batlehub v1.5.0) ; les
-  autres sont facultatives.
+  `RESTART_KEYS`, devenue `reload_keys`) étaient un **prérequis du M2**,
+  livrées par batlehub v1.6.0 ; les autres sont facultatives.
 
 ### 1.5 Décisions
 
@@ -158,9 +171,9 @@ du 2026-10-14, ont été acceptées le même jour.
 | # | Décision (revue du 2026-10-14) | Retenu |
 | --- | --- | --- |
 | D5 | Nommer le kind namespacé `BatleHubLocalInstance` (rôle `LocalInstance` du kit) ? | **Acceptée** (2026-10-14) : même convention que `ForgejoLocalInstance`/`AuthentikLocalInstance` et le gabarit ; `InstanceRef`, `BoundInstance`, `read_local_instance_token`, `LocalSecretKeyRef`, `LocalTlsOptions` et les codes du gabarit servent tels quels (§2.8). Un `BatleHubInstance` cluster-scoped pourra venir plus tard (hors v1alpha1). |
-| D6 | Modes `watch.namespace` / `clusterKinds: false` du chart du kit | **`watch.namespace` supporté par refus** (§7.1) : pas de registry cross-namespace, pas de ClusterRoleBinding TokenReview, pas de watch des Namespaces. **`clusterKinds: false` refusé par le chart** tant que le kit n'a pas de règles propres pour le Role `-watch` (§11.2). `clusterSecrets: true` posé explicitement. |
+| D6 | Modes `watch.namespace` / `clusterKinds: false` du chart du kit | **`watch.namespace` supporté par refus** (§7.1) : pas de registry cross-namespace, pas de ClusterRoleBinding TokenReview, pas de watch des Namespaces. **`clusterKinds: false` à refuser par le chart** tant que le kit n'a pas de règles propres pour le Role `-watch` (§11.2) — **pas faisable** (le kit fait un rendu de fumée de ce mode, Constats du M0 et du M2) : le mode est documenté comme partiel (values, guide d'installation). `clusterSecrets: true` posé explicitement. |
 | D7 | Première release | **0.1.0-alpha.1 au M2** (external + `manageConfig`), pour éprouver `publish.yml`, la porte e2e et le test d'upgrade tôt ; 0.1.0 au M5. |
-| D8 | Version de batlehub pour D4 | **v1.5.0** (confirmée) : `merge_layers`, `validate_layers(layers, env)`, `RESTART_KEYS` ; `batlehub-config` épinglé sur ce tag avant le début du M2. |
+| D8 | Version de batlehub pour D4 | ~~v1.5.0~~ (ne les portait pas) → **v1.6.0** (révisée le 2026-10-15) : `merge_layers` → document canonique, `validate_layers(layers, &dyn Fn)`, `reload_keys::{RELOAD_KEYS, classify}` (RFC 0037 de batlehub) ; `batlehub-config` épinglé sur ce tag ; `task gen:bump` déplace ensemble spec, client, tag de `batlehub-config` et images des tests. |
 | D9 | Watch des Secrets en métadonnées (6.7) | **Le retirer** : `list/watch` sur `secrets` donne en RBAC le droit de lire tous les Secrets (RBAC ne sait pas limiter aux métadonnées), ce que le kit n'accorde jamais. Les Secrets sont relus à chaque reconcile comme dans forgejo/authentik, et leur hash entre dans `configHash` : une rotation est vue à la resynchronisation (≤ 300 s ±20 %), ou tout de suite si le CR change. Le watch des ConfigMaps en métadonnées reste. |
 
 ## 2. Choix structurants
@@ -200,13 +213,14 @@ les 15 overrides `PROXY_CACHE__*` (§8). Valider avec elles donnerait le
 verdict de l'environnement de l'opérateur, pas de l'instance ; et la
 fusion reste privée (`merge_value`).
 
-D4 (prérequis du M2, batlehub v1.5.0, D8) : `merge_layers` (la fusion
-sans expansion) et `validate_layers(layers, env)` où `env` fournit
-**à la fois** les `${VAR}` et les `PROXY_CACHE__*` de l'instance, jamais
-`std::env`. L'adaptateur `BatleHubConfigParser` n'appelle que ces deux
-fonctions. M0 et M1 n'ont pas besoin du parser sur une config rendue
-(M1 est external sans `manageConfig`) : aucune substitution maison n'est
-écrite. Si v1.5.0 n'est pas sortie au début du M2, le M2 attend.
+D4 (livré par batlehub v1.6.0, RFC 0037, D8) : `merge_layers` (la
+fusion sans expansion, rendue en un document TOML canonique dont les
+`${VAR}` restent des placeholders) et `validate_layers(layers, env)` où
+`env` fournit **à la fois** les `${VAR}` et les `PROXY_CACHE__*` de
+l'instance, jamais `std::env`. L'adaptateur `BatleHubConfigParser`
+n'appelle que ces deux fonctions (plus la conversion YAML ↔ TOML des CRD
+et la vérification du token, 6.3). Aucune substitution maison n'est
+écrite.
 
 ### 2.3 La fusion des couches est celle de batlehub
 
@@ -227,18 +241,27 @@ de l'opérateur) sont fusionnées dans **un seul fichier**, pour que
 `GET /admin/config/content` montre tout le document. Seule la couche
 `credentials` reste un second `--config` séparé (6.4).
 
-### 2.4 Une liste unique des clés qui exigent un redémarrage
+### 2.4 Une seule table des clés que le reload applique
 
-```
-server.host  server.port  server.roles  server.static_dir
-database     auth         storage       search.text_config
-```
+La première esquisse listait huit clés à redémarrage ; le code de
+batlehub en a une trentaine. batlehub v1.6.0 (RFC 0037) publie l'inverse,
+une **allowlist** : `batlehub_config::reload_keys::RELOAD_KEYS`, par
+motif de chemin (`registries[*].rbac`…), en trois tiers — `Hot` (tout
+lecteur voit la nouvelle valeur), `Partial` (le chemin des requêtes oui,
+un composant construit au démarrage non : warming, imports, worker),
+`Restart` — **toute clé absente de la table est `Restart`**. batlehub
+s'en sert lui-même (son `ReloadDiff` : `applied`, `partially_applied`,
+`restart_required` contre la config de **démarrage**), l'opérateur ne la
+recopie pas :
 
-La doc hot-reload de batlehub en cite une partie (host/port, base, auth,
-stockage) ; la liste complète vient du code. Elle vit à **un seul
-endroit** : `batlehub_config::RESTART_KEYS` (D4, batlehub v1.5.0), celle
-que batlehub utilise lui-même ; l'opérateur ne la recopie pas. Elle
-alimente le hash de redémarrage (6.1), utilisé à partir du M2.
+- **external** (M2) : la réponse du dry run `POST /admin/config/validate`
+  donne `restart_required`, calculé par l'instance contre ce qu'elle a
+  chargé au démarrage, couche credentials comprise. Non vide : le push est
+  retenu (`RestartForbidden`, 6.6).
+- **managed** (M4) : `reload_keys::classify(avant, après)` sur les
+  documents de `merge_layers` alimente le hash de redémarrage (6.1) ;
+  `Partial` est traité comme un redémarrage quand le travail de fond
+  compte pour l'instance (réglage par instance, à trancher au M4).
 
 ### 2.5 Server-side apply pour les objets possédés
 
@@ -911,6 +934,62 @@ les exemptions expirées).
   absente (supprimée avec `force-orphan`) : le finalizer est libéré, Event
   `Warning` qui dit que rien n'a été révoqué.
 
+### 4.7 BatleHubNamespaceClaim (`bhnc`)
+
+Un team namespace d'une registry : un préfixe de nom de paquet réservé à
+un groupe des fournisseurs d'auth. Seuls ses membres (et les admins)
+publient le préfixe ou un paquet dessous, et il est l'audience de la
+visibilité `team`. batlehub les garde en base, pas dans sa config
+(`/admin/registries/{r}/namespaces`, console, `batlehub admin namespace`) :
+ce n'est pas un bloc `[[registries.namespaces]]` (RFC 0015), qui reste de
+la config d'une `BatleHubRegistry`.
+
+**spec**
+
+| Champ | Défaut | Rôle |
+| --- | --- | --- |
+| `instanceRef` | seule instance du namespace | `InstanceRef` du kit, même namespace (CEL), immuable. |
+| `registry` | requis | Nom de registry sur l'instance, ≤ 253, immuable. |
+| `prefix` | requis | Préfixe dans l'orthographe de l'écosystème, ≤ 1024, ni blanc ni `.`/`..`, immuable. |
+| `group` | requis | Groupe tel que le fournisseur d'auth le nomme (`oidc:web-team`), sans espace (batlehub les retire). Modifiable. |
+| `deletionPolicy` | `Delete` | `Delete` libère le préfixe à la suppression ; `Orphan` le laisse. |
+
+**batlehub 1.6.0** : `POST` crée (409 si le préfixe est pris, pas de mise
+à jour), `DELETE …/namespaces/{prefix:.*}` est idempotent et prend le
+reste du chemin (les `/` du préfixe restent des séparateurs : l'opérateur
+construit l'URL lui-même, le client généré les encoderait), `GET` liste par
+registry avec `claimed_by` (texte libre) et `package_count`. Le séparateur
+est figé sur le claim d'après le type de la registry ; une registry
+inconnue donne `/`.
+
+**Règles** (celles de 4.6, appliquées à une seule ligne) :
+
+- **Marqueur** : l'opérateur écrit `claimed_by = "weebo-batlehub:<ns>/<nom>"`.
+  Un claim est à ce CR s'il porte ce marqueur, status perdu ou pas (un
+  claim fait puis un status non patché n'est pas pris pour un étranger).
+  Un CR recréé sous le même nom après un `Orphan` reprend donc son claim :
+  c'est le même objet pour l'utilisateur.
+- **Collision → rejet** : un préfixe pris par autre chose (console, CLI,
+  autre CR) donne `ClaimConflict` (le message dit le groupe et
+  `claimed_by`), jamais repris ni libéré. Pas de refus au webhook : deux
+  CR sur la même coordonnée, le second est en conflit.
+- **Registry inconnue** de l'instance (`GET /admin/health`, lu champ
+  `registry` seulement) : `RemoteNotFound`, rien n'est écrit (le claim
+  garderait `/` sur un écosystème à `.` ou `:`). Vérifié avant chaque
+  claim seulement, pas à chaque passe.
+- **Changement de groupe** : release puis claim (pas d'update) ; le
+  préfixe est libre entre les deux appels, un échec entre les deux est
+  repris à la passe suivante.
+- **Dérive** : chaque passe relit la liste ; un claim libéré ailleurs est
+  refait. `status.claimedGroup`, `status.packageCount`, `lastSyncTime`.
+- **Suppression** : finalizer, release si le claim est à ce CR, Event
+  `Revoked`. Instance déjà absente : rien à libérer, finalizer libéré.
+  Les claims comptent dans `InstanceInUse`.
+
+Raisons de `Ready` : `Reconciled`, `ClaimConflict`, `RemoteNotFound`,
+`RemoteRejected` (400), `RemoteError`, `InstanceUnreachable`,
+`OperatorUnauthorized`, les codes de token et d'instance (2.8).
+
 ## 5. Codes de raison
 
 Un seul `domain::error::ReasonCode` (`reason_codes!` du kit), PascalCase,
@@ -953,6 +1032,7 @@ lève (`needs_a_change`, reprise à 300 s, 2.10).
 | `RemoteError` | bloquant | | 500 ou réponse non prévue de l'API admin |
 | `GrantStorageUnavailable` | bloquant | | stockage des grants non configuré (503) |
 | `GrantConflict`, `PolicyConflict` | bloquant | oui | grant/policy en place qui n'est pas de ce CR, ou autre CR sur la même coordonnée (4.6) |
+| `ClaimConflict` | bloquant | oui | préfixe déjà réservé sur la registry par autre chose que ce CR (4.7) |
 | `GrantHeldByOwnership` | bloquant | oui | 409 : le sujet détient ces verbes par l'ownership |
 | `ExemptionNotPermitted` | bloquant | oui | 403 de l'exemption : `gates:exempt` non accordé à l'opérateur (4.5) |
 | `DuplicateRegistryName` | bloquant | oui | même `name` qu'une registry rendue avant, ou qu'une entrée de la config d'une instance d'un autre namespace (4.2) |
@@ -1273,7 +1353,7 @@ Deux couches refusent un objet invalide avant stockage :
 
 | Kind | Refusé (code) |
 | --- | --- |
-| `BatleHubLocalInstance` | la config rendue échoue au parser en `Strict` (`ConfigInvalid`) ; une couche qui n'est pas du TOML (`ConfigInvalid`) ; la couche credentials masque le token opérateur (`OperatorTokenShadowed`) |
+| `BatleHubLocalInstance` | aucune config, `spec.config` qui n'en est pas une (`InvalidSpec`, `ConfigInvalid`) ; sans `configLayers`, `spec.config` refusé par le parser en `Strict` (`ConfigInvalid`) ; managed (M4) : la couche credentials masque le token opérateur (`OperatorTokenShadowed`). Jamais pour une couche ni une registry (révisé au M2 : elles se corrigent sans toucher au CR, ou appartiennent à une autre équipe) |
 | `BatleHubMaintenance` | `schedule` ou `params.before` illisible (`InvalidSpec`) ; `restart` sur une instance external (`InvalidSpec`) ; un `params.registry` absent de la config rendue, de la couche credentials et des registries rattachées (`InvalidSpec`) |
 | `BatleHubRegistry` | `${` dans une registry d'un autre namespace (`NamespaceNotAllowed`) ; `type` ou nom vide, fragment `configFrom` qui n'est pas du TOML (`ConfigInvalid`) |
 | `BatleHubPackageGrant` | même coordonnée et même sujet qu'un autre CR (`GrantConflict`) |
@@ -1382,7 +1462,7 @@ cluster-scoped ; ce qu'il fait dans chaque mode :
 | --- | --- |
 | cluster (défaut) | Tout ce document. |
 | `watch.namespace` | Les 5 kinds passent dans le Role `-watch` du namespace. Refus : pas de registry cross-namespace (`RegistrySelectorIgnored` sur une instance qui demande `All`/`Selector`), pas de watch des Namespaces, pas de ClusterRoleBinding TokenReview (`autoTokenReview` demandé : advisory `TokenReviewUnavailable`, l'utilisateur lie TokenReview lui-même). Limite connue : `params.clusterRules` (Deployments, Services, PVC… du mode managed) restent dans le ClusterRole, le chart du kit n'ayant pas de règles propres pour le Role `-watch` (§11.2) : le mode limite ce que l'opérateur **réconcilie**, pas tout ce qu'il **peut** écrire. |
-| `watch.clusterKinds: false` (tout en Roles) | **Refusé par le chart** (`fail` dans `_params.tpl`) tant que le kit n'a pas de règles propres pour le Role `-watch` : sans ClusterRole, `params.clusterRules` disparaissent et le mode managed ne pourrait rien écrire. |
+| `watch.clusterKinds: false` (tout en Roles) | **Partiel**, à refuser par le chart dès que possible : sans ClusterRole, `params.clusterRules` disparaissent — couches ConfigMap, `configFrom` ConfigMap et `podSelector` échouent (`KubernetesApiError`) ; le mode managed ne pourrait rien écrire. Le `fail` dans `_params.tpl` casse le rendu de fumée du kit : il attend `params.watchRules` (§11.2). Documenté comme tel (values, guide d'installation). |
 | `watch.labelSelector` | Supporté tel quel (kit) : `LeavesWatchScope` au webhook `/scope`. Pas une frontière de sécurité (RBAC ne filtre pas par label). |
 
 **Avertissement de sécurité** (dans le `NOTES.txt` et la doc) : un
@@ -1535,7 +1615,7 @@ avec ce document) sont ajoutés ici, sous « Constats du Mx ».
 | --- | --- | --- |
 | M0 | Repo généré par le gabarit du kit **v0.14.2** (rendu hors workspace, `task template:render` du kit comme modèle), renommages (§3), kind cluster du gabarit supprimé (D5), `LocalInstanceDirectory` (2.8), client généré, port `ConfigParser` (adaptateur vide jusqu'au M2), `ReasonCode` (§5, complet), `ci.yml`/`e2e.yml`/`publish.yml` branchés (9.3), doc vide publiée | `task test:all` et `task audit` verts ; CI verte sur `main` |
 | M1 | `BatleHubLocalInstance` **external** sans `manageConfig` : `/livez`, `GET /api/v1/me` (rôle), warnings, version, `Ready` ; label `instance-token` (2.11) ; finalizer et `InstanceInUse` ; résolution d'instance des autres kinds (2.8) | envtest : `Ready`, `TokenSecretNotAllowed` sur un Secret non labellisé, `OperatorUnauthorized` sur un rôle non admin, `InstanceInUse` ; live : instance réelle `Ready`, token refusé → `OperatorUnauthorized` |
-| M2 | **Prérequis : batlehub v1.5.0 publiée** (D4, D8) et `batlehub-config` épinglé dessus. external + `manageConfig` (push, validate, nonce, backoff, `Manual`, `RestartForbidden`, contrôle du token 6.3) + `podSelector` ; webhook `BatleHubLocalInstance` ; `BatleHubRegistry` (rattachement, doublons, `InstanceConfigUnmanaged`, label `credential`) ; **release 0.1.0-alpha.1** (D7) | live : cas limites du reload sur 2 réplicas du chart batlehub ; envtest : registries en doublon, Secret non labellisé ; alpha publiée par `publish.yml` du kit, porte e2e verte |
+| M2 | **Prérequis : batlehub v1.6.0 publiée** (D4, D8 révisée) et `batlehub-config` épinglé dessus. external + `manageConfig` (push, validate, nonce, backoff, `Manual`, `RestartForbidden`, contrôle du token 6.3) + `podSelector` ; webhook `BatleHubLocalInstance` ; `BatleHubRegistry` (rattachement, doublons, `InstanceConfigUnmanaged`, label `credential`) ; `BatleHubNamespaceClaim` (4.7) ; **release 0.1.0-alpha.1** (D7) | live : cas limites du reload sur 2 réplicas du chart batlehub ; envtest : registries en doublon, Secret non labellisé ; alpha publiée par `publish.yml` du kit, porte e2e verte |
 | M3 | `BatleHubPackageGrant`, `BatleHubPackagePolicy`, `BatleHubMaintenance` (catalogue **sans `restart`**, qui demande le managed) | live : dérive, conflit, `GrantHeldByOwnership`, échec partiel (status patché par sujet), révocation, exemptions et `ExemptionNotPermitted` ; maintenance au plus une fois (kill pendant un run, patch conditionnel) ; envtest : `InstanceInUse` avec des grants liés |
 | M4 | `managed` : objets possédés (sans adoption implicite, `OwnedObjectConflict`), deux hashs, `Recreate`/`RollingUpdate`, token opérateur, credentials, worker, TokenReview ; action `restart` | e2e kind complet vert, test d'upgrade depuis l'alpha compris |
 | M5 | `weebo-batlehub-importer` (release Helm → `BatleHubLocalInstance`, grants/policies → CR en pause) ; budget mesuré ; release 0.1.0 | release publiée de bout en bout |
@@ -1642,32 +1722,172 @@ lease, SIGTERM ; `crates/crdgen/tests/in_sync.rs`).
   `validate_layers(layers, env)` (l'expansion `${VAR}` et
   `apply_env_overrides()` lisent `std::env` du processus), ni
   `RESTART_KEYS`. Le M2 attend une batlehub qui les publie (v1.5.1 ou
-  v1.6.0, à décider côté batlehub).
+  v1.6.0, à décider côté batlehub). **Levé le 2026-10-15** : v1.6.0
+  (RFC 0037).
+
+### Constats du M2 (2026-10-15)
+
+batlehub **v1.6.0** épinglée partout (`task gen:bump` : spec, client,
+`batlehub-config` en dépendance git `tag = "v1.6.0"`, image des tests
+live et de l'e2e), kit **v0.15.0**. `test:live-batlehub` vert contre
+l'image 1.6.0 : passerelle (dry run, stage, apply, relecture, refus) et
+controllers sur envtest (config poussée avec une registry, clé à
+redémarrage retenue puis rétablie). envtest : config rendue depuis
+`spec.config` + une couche ConfigMap + registries (même namespace et
+namespace accepté par sélecteur), doublon de nom, `${` d'un autre
+namespace, Secret non labellisé (instance et `configFrom`), namespace non
+accepté, `InstanceConfigUnmanaged`, `ConfigInvalid`,
+`OperatorTokenShadowed`, `RestartForbidden`. e2e kind : batlehub à 2
+réplicas, `podSelector` + `manageConfig` + une registry, fichier de
+chaque pod relu.
+
+- **Forme de D4 (RFC 0037 de batlehub)** : voir l'historique v2.2. Le
+  choix « redémarrage ou non » d'une instance external ne passe pas par
+  `classify` mais par le `restart_required` du dry run
+  `POST /admin/config/validate` : calculé par l'instance contre ce qu'elle
+  a chargé **au démarrage**, couche credentials comprise, il voit aussi
+  une clé à redémarrage qu'un reload antérieur (console) a déjà appliquée.
+  `classify` sert au managed (M4).
+- **Comportement réel du reload** (vérifié en live, conforme au faux
+  `FakeGateway`) : `pending/apply` écrit le fichier par renommage
+  atomique — **le répertoire** doit être inscriptible, pas seulement le
+  fichier ; le watcher voit l'écriture mais ne re-stage rien (empreinte
+  identique à la dernière tentative) ; re-stager les mêmes octets répond
+  `pending_created: false` (d'où le nonce) ; le dry run de la config en
+  place rend des listes vides.
+- **Écriture impossible** : si l'instance ne peut pas écrire son fichier,
+  `apply` réussit quand même (erreur seulement loguée) : la config est
+  chargée en mémoire et perdue au redémarrage. L'opérateur relit le
+  fichier après chaque apply : différent → `ConfigReadOnly`. Un
+  `is_readonly: true` de `GET /admin/config/content` veut dire hot reload
+  désactivé → `HotReloadDisabled`.
+- **Chart batlehub** : son fichier vient d'un ConfigMap (lecture seule).
+  Pour `manageConfig`, chaque pod doit écrire sa propre copie (l'e2e
+  copie le ConfigMap dans un `emptyDir` par un initContainer) ; à noter
+  pour l'importeur (M5) et la doc du chart batlehub.
+- **Valeur factice** des `${VAR}` à la validation : `https://weebo-batlehub.invalid`
+  passe les contrôles d'URL de batlehub (Postgres, S3, issuer OIDC en
+  https) ; `PROXY_CACHE__*` et `BATLEHUB_*` répondent « non posée »
+  (une valeur factice écraserait le fichier). En external l'opérateur ne
+  lit aucune valeur réelle : rien de secret ne peut apparaître dans un
+  message du parser.
+- **Contrôle du token (6.3)** : sur le document fusionné, une entrée
+  `[[auth]] type = "token"` de rôle `admin` dont la `value` est le token
+  (en clair, ou un hash Argon2 vérifié, résultat mis en cache par couple
+  hash/token) ; une `value` en `${VAR}` est invérifiable et acceptée.
+- **Pending d'un tiers** : le `from-content` de l'opérateur remplace tout
+  pending existant ; le `DELETE …/pending` de 6.1 (règle 4) n'est pas
+  nécessaire (gardé au port pour `configDiscardPending`, M3).
+- **Pods** (`podSelector`) : appelés en HTTP clair sur l'IP et le port
+  `http` (sinon le premier) ; un seul dry run pour tous, push et approbation
+  pod par pod, le refus d'un pod nomme ceux qui ont déjà chargé.
+- **Registries** : le contrôleur d'instance rend et écrit le status de
+  chaque registry rendue ou écartée ; le contrôleur registry n'écrit que
+  ce qu'aucune instance ne rend (instance introuvable, refusée,
+  `InstanceConfigUnmanaged`). Pas de finalizer sur `BatleHubRegistry` :
+  l'instance re-rend sans elle. Watch : toute registry relance toutes les
+  instances (la file les fusionne ; un patch de status identique ne
+  produit pas d'événement, pas de boucle) ; les ConfigMaps (métadonnées)
+  relancent les instances qui les nomment ; les Secrets à la
+  resynchronisation (D9).
+- **Webhook** : refuse ce qui est certain et ne dépend que du CR :
+  aucune config, `spec.config` qui n'en est pas une (`InvalidSpec`,
+  `ConfigInvalid`), et — sans `configLayers` — un `spec.config` que le
+  parser refuse ; `NamespaceNotAllowed` sur un `instanceRef`
+  explicitement étranger ; un fragment `configFrom` qui n'est pas du TOML.
+  Une couche (un ConfigMap se corrige sans toucher au CR) ou la registry
+  d'une autre équipe qui casse la config ne bloque jamais les éditions de
+  l'instance (6.8 révisé) : le status le dit. Ni le contrôle du token, ni
+  les doublons de registries. Le timeout du webhook n'a pas été mesuré.
+- **`clusterKinds: false`** : les lectures propres (`clusterRules` :
+  ConfigMaps, Namespaces, pods) disparaissent avec le ClusterRole ; les
+  watches des ConfigMaps et des Namespaces sont alors sautés, mais une
+  couche ConfigMap, un `configFrom` ConfigMap ou un `podSelector` échouent
+  en `KubernetesApiError`. Le chart ne peut toujours pas refuser le mode
+  (rendu de fumée du kit) : documenté comme partiel (values, guide
+  d'installation) ; §11.2 `params.watchRules` reste la solution.
+- **Dépendances** : `batlehub-config` tire `batlehub-core` (ammonia, zip…),
+  plus lourd que nécessaire (le RFC 0037 l'assume). cargo-deny : quatre
+  exceptions de licence par crate (MPL-2.0 de `cssparser`/`dtoa-short`,
+  `bzip2-1.0.6`, `CC0-1.0`), toutes autorisées par le `deny.toml` de
+  batlehub.
+- **Revue du 2026-10-15** (avant l'alpha), corrigée :
+  - aucun message ne cite le texte d'une source (une erreur de parse TOML
+    cite la ligne fautive, une couche peut venir d'un Secret) : lignes
+    citées retirées, message d'erreur JSON de batlehub décodé d'abord ;
+  - un placeholder est toujours un placeholder pour la validation, quel
+    que soit son nom (`${BATLEHUB_FRONT_URL}` était pris pour un override) ;
+  - YAML → TOML en chaînes d'une ligne (un bloc `|` avec `${VAR}` était
+    refusé par `merge_layers`) ;
+  - `ConfigReadOnly` n'est plus un reload à chaque passe : attendu comme
+    un refus (10 min), `status.unpersistedConfigHash` ;
+  - pendant l'attente d'un refus : message stable (pas de churn de status
+    ni de réveil de toutes les instances), `pods[]` gardés,
+    `status.rejectionMessage` ; l'attente ne s'applique qu'à une instance
+    en retard, et un succès efface le refus ;
+  - ordre du §5 : la config est rendue avant de lire le token et
+    d'appeler l'instance ; le status des registries est écrit même quand
+    le token est illisible ; registries « rendues, retenues » sous
+    `Manual` (advisory `ConfigHeld`) ;
+  - noms de registries de l'instance lus dans **toutes** ses couches ; la
+    plus ancienne garde son nom même en échec ;
+  - contrôle du token dans l'ordre de batlehub (premier provider qui
+    connaît le token, valeur en clair d'abord, dernière entrée gagnante) ;
+  - un 503 n'est « hot reload désactivé » que si batlehub le dit, un 404
+    « rien en attente » idem (un proxy devant répond aussi 503/404) ;
+  - watches ajoutés : ConfigMap d'un `configFrom`, labels des Namespaces
+    (mode `Selector`) ; `ClusterDependents` et la suppression suivent le
+    sélecteur de labels de l'opérateur ; plus de double Event `Warning`
+    pendant `InstanceInUse` ;
+  - port d'un pod : celui nommé `http`, sinon le premier du premier
+    conteneur (jamais un sidecar) ; le `podSelector` doit exclure les pods
+    worker du chart (`app.kubernetes.io/component: worker`) ;
+  - e2e : `helm show chart --devel` (sinon une alpha publiée n'est jamais
+    l'ancienne version du test d'upgrade), et le test d'upgrade efface les
+    conditions des CR puis attend que le **nouvel** opérateur les
+    réécrive.
+- **Release de l'alpha** : `publish.yml` du kit v0.15.0 échoue sur un
+  dépôt sans tag final `vX.Y.Z` (il cherche le plus haut pour décider de
+  `latest`) et publie la release GitHub sans `--prerelease` : corrigé
+  dans le kit (release suivante), dont `publish.yml` est épinglé ici.
+- **Namespaces de BatleHub** (RFC 0015) : les blocs
+  `[[registries.namespaces]]` passent par `config.namespaces` d'une
+  `BatleHubRegistry` sans rien de propre à l'opérateur (rechargés à chaud :
+  `registries[*]`, Partial). Sans `name` ni `type`, la fusion des couches
+  de BatleHub **remplace** la liste : un `configFrom` ou une registry qui
+  complète celle de l'instance remplace ses namespaces (testé contre le
+  vrai parser, documenté dans le guide). BatleHub n'a pas de namespace
+  au-dessus de la registry. Les claims d'équipe (API admin, en base)
+  deviennent le kind `BatleHubNamespaceClaim` (4.7) : envtest (claim,
+  changement de groupe, CEL, conflit, `Orphan`, `InstanceInUse`), live
+  contre 1.6.0 (claim, relecture, release d'un préfixe à `/`), étape e2e.
+- **Reste du M2** : la release **0.1.0-alpha.1** (D7) et le test
+  d'upgrade, qui ne tourne vraiment que sur un tag.
 
 ## 11. Évolutions proposées
 
 ### 11.1 Côté batlehub (nous le maintenons aussi)
 
-Les deux premières lignes sont **requises avant le M2** (D4, batlehub
-v1.5.0, D8) ; les autres sont facultatives, chacune retire du code
-subtil de l'opérateur.
+Les deux premières lignes étaient **requises avant le M2** (D4, D8),
+livrées par batlehub v1.6.0 ; les autres sont facultatives, chacune
+retire du code subtil de l'opérateur.
 
 | Évolution | Statut | Retire |
 | --- | --- | --- |
-| `batlehub_config::merge_layers(&[&str]) -> toml::Value` (fusion sans expansion d'env) et `validate_layers(&[&str], env: impl Fn(&str) -> Option<String>)`, où `env` sert **aussi** aux overrides `PROXY_CACHE__*` (aujourd'hui `apply_env_overrides()` lit `std::env`, 2.2) | requis, **absent de v1.5.0** (Constats du M1) | Toute substitution maison, et le risque de diverger sur la fusion (2.2, 2.3) |
-| `batlehub_config::RESTART_KEYS` (la liste utilisée par batlehub lui-même) | requis, **absent de v1.5.0** | Toute copie de la liste (2.4) |
+| `batlehub_config::merge_layers(&[&str]) -> toml::Value` (fusion sans expansion d'env) et `validate_layers(&[&str], env: impl Fn(&str) -> Option<String>)`, où `env` sert **aussi** aux overrides `PROXY_CACHE__*` (aujourd'hui `apply_env_overrides()` lit `std::env`, 2.2) | **livré en v1.6.0** (RFC 0037) : `merge_layers` rend un document canonique (`String`), `validate_layers(layers, &dyn Fn)` | Toute substitution maison, et le risque de diverger sur la fusion (2.2, 2.3) |
+| `batlehub_config::RESTART_KEYS` (la liste utilisée par batlehub lui-même) | **livré en v1.6.0** sous forme d'allowlist `reload_keys::RELOAD_KEYS` + `classify`, et dans le `ReloadDiff` du dry run (`restart_required`) | Toute copie de la liste (2.4) |
 | `POST /admin/config/reload` avec `{"expected_sha256": …}` : recharge si le fichier a ce hash, répond le hash chargé ; pas de dédoublonnage sur un hash attendu | facultatif (si 6.1 est fragile au M2) | Le nonce de re-stage (6.1), et le risque d'approuver une révision qui n'est pas celle attendue |
 | `GET /admin/config/content` renvoie aussi le SHA-256 des couches lues | facultatif | La comparaison d'octets par pod |
 | Propagation d'un reload approuvé entre réplicas (via le backend de cache partagé) | facultatif | L'approbation pod par pod par IP (2.9), `podSelector` (6.6) |
 
-**Actions côté batlehub (à faire avant le M2, hors de ce dépôt)** :
+**Actions côté batlehub (faites, v1.6.0)** :
 
-1. ajouter `merge_layers`, `validate_layers(layers, env)` et
-   `RESTART_KEYS` à `crates/config` de batlehub, avec leurs tests ;
-2. une entrée dans son `ROADMAP.md` (rien n'y est suivi aujourd'hui) ;
-3. publier le tag v1.5.0 (version à confirmer, D8) ;
-4. épingler `batlehub-config` (`tag = "v1.5.0"`) et `spec/batlehub-v1.5.0.json`
-   dans weebo-batlehub (`task gen:bump`).
+1. `merge_layers`, `validate_layers(layers, env)` et `reload_keys`
+   (au lieu de `RESTART_KEYS`) dans `crates/config` de batlehub, avec
+   leurs tests (son RFC 0037) ;
+2. le tag v1.6.0 (D8 révisée) ;
+3. `batlehub-config` (`tag = "v1.6.0"`) et `spec/batlehub-v1.6.0.json`
+   épinglés dans weebo-batlehub (`task gen:bump`).
 
 ### 11.2 Côté kit
 
@@ -1677,8 +1897,8 @@ subtil de l'opérateur.
   opérateur dont le produit n'a qu'une forme namespacée.
 - Règles propres pour le Role `-watch` (un `params.watchRules` à côté de
   `params.clusterRules`) : sans lui, `watch.namespace` laisse les règles
-  du workload dans le ClusterRole et `clusterKinds: false` est refusé
-  (7.1).
+  du workload dans le ClusterRole et `clusterKinds: false` reste partiel
+  sans que le chart puisse le refuser (7.1).
 - Avertissements dans `Admission` (`warnings` de l'`AdmissionResponse`) :
   changement du trait, donc release mineure du kit.
 - Index « Secret/ConfigMap → CR qui le lisent » en watch de métadonnées
@@ -1698,9 +1918,9 @@ subtil de l'opérateur.
 **Plus tard** (après la 0.1.0) :
 
 - Actions bulk (`/admin/registries/{r}/bulk/*` : yank, deprecate, unlist,
-  owners, visibility) et namespace claims, en actions de maintenance avec
+  owners, visibility), en actions de maintenance avec
   un sélecteur `packages[]` + plage de versions.
-- Nouveaux kinds : `BatleHubAuthProvider`, namespace claims, clés de
+- Nouveaux kinds : `BatleHubAuthProvider`, clés de
   signature.
 - `v1beta1` et webhook de conversion.
 - Miroir Forgejo/Harbor de l'image (porte de scan propre), en plus de

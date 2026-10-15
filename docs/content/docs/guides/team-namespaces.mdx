@@ -1,0 +1,65 @@
+---
+title: Team namespaces
+description: Reserve a package name prefix of a registry to a group, from Kubernetes.
+---
+
+A team namespace reserves a package name prefix of a registry to a group
+of the instance's auth providers: only its members (and admins) may
+publish the prefix itself or a package under it, and the group is the
+audience of the `team` visibility there. BatleHub keeps these claims in
+its database, not in its configuration (the console, `batlehub admin
+namespace`): a `BatleHubNamespaceClaim` manages one from Kubernetes.
+
+```yaml
+apiVersion: batlehub.weebo.io/v1alpha1
+kind: BatleHubNamespaceClaim
+metadata:
+  name: web
+  namespace: infra
+spec:
+  registry: npm            # the registry's name on the instance
+  prefix: "@acme/web"      # the ecosystem's own spelling
+  group: oidc:web-team     # as the auth provider names it
+```
+
+The instance is the `BatleHubLocalInstance` of the claim's namespace
+(`spec.instanceRef` when there are several), with or without
+`manageConfig`. `kubectl get bhnc` lists the claims.
+
+## What the operator does
+
+- It claims the prefix, writing `weebo-batlehub:<namespace>/<name>` as
+  `claimed_by`: that marker is how it recognizes its own claims.
+- On every pass (at least every 5 minutes), it reads the claim again. A
+  claim released elsewhere is claimed again; `status.packageCount` says how
+  many packages the namespace holds.
+- A prefix already claimed by anything else (the console, the CLI, another
+  `BatleHubNamespaceClaim`) is **never taken over**: `Ready` is `False`,
+  `ClaimConflict`, and the message says for which group and by whom.
+  Release that claim, and the next pass takes the prefix.
+- A registry the instance doesn't serve is `RemoteNotFound`: BatleHub would
+  accept the claim, but record the wrong separator for a dotted or colon
+  ecosystem (OpenVSX, NuGet, Maven).
+
+`registry`, `prefix` and `instanceRef` can't change: create another claim.
+`group` can: BatleHub has no update, so the operator releases the prefix
+then claims it for the new group. In between, the prefix is free for a
+moment.
+
+## Deletion
+
+Deleting the claim releases the prefix (`deletionPolicy: Delete`, the
+default), with a `Revoked` Event. `deletionPolicy: Orphan` leaves it on the
+instance; a claim the operator didn't write is never released.
+
+An instance can't be deleted while claims are bound to it
+(`InstanceInUse`). When the instance is unreachable, the finalizer waits;
+annotate the claim `batlehub.weebo.io/force-orphan: "true"` to drop it
+without releasing anything.
+
+## Namespace blocks
+
+A claim is not a `[[registries.namespaces]]` block: that one is
+configuration (grants, visibility, versioning, quota and rules for a
+prefix, see [Manage the configuration](/docs/guides/manage-config)). Both
+match a prefix; a claim only says which group owns it.

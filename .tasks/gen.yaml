@@ -5,16 +5,16 @@ version: "3"
 # `task recu` / the pre-commit hook; only `spec` touches the network.
 
 vars:
-  BATLEHUB_VERSION: '{{.BATLEHUB_VERSION | default "1.5.0"}}'
+  BATLEHUB_VERSION: '{{.BATLEHUB_VERSION | default "1.6.0"}}'
 
 tasks:
   spec:
-    desc: "Download and vendor BatleHub's OpenAPI spec for a release (usage: task gen:spec [BATLEHUB_VERSION=1.5.0])"
+    desc: "Download and vendor BatleHub's OpenAPI spec for a release (usage: task gen:spec [BATLEHUB_VERSION=1.6.0])"
     cmds:
       - spec/scripts/fetch-spec.sh "{{.BATLEHUB_VERSION}}"
 
   client:
-    desc: "Regenerate crates/batlehub-client from the vendored spec + spec/patches/*.jq (usage: task gen:client [BATLEHUB_VERSION=1.5.0])"
+    desc: "Regenerate crates/batlehub-client from the vendored spec + spec/patches/*.jq (usage: task gen:client [BATLEHUB_VERSION=1.6.0])"
     sources:
       - spec/batlehub-v{{.BATLEHUB_VERSION}}.json
       - spec/patches/*.jq
@@ -28,12 +28,25 @@ tasks:
       - mise exec -- spec/scripts/gen-client.sh "{{.BATLEHUB_VERSION}}"
 
   bump:
-    desc: "Move to another BatleHub release: vendor its spec, then regenerate the client (usage: task gen:bump BATLEHUB_VERSION=x.y.z)"
+    desc: "Move to another BatleHub release: its spec and client, the batlehub-config tag, the images of the live and e2e tests, this file's default (usage: task gen:bump BATLEHUB_VERSION=x.y.z)"
     requires:
       vars: [BATLEHUB_VERSION]
+    vars:
+      # The release the pins name now (this file's default, before the move).
+      PREVIOUS:
+        sh: sed -n 's/.*BATLEHUB_VERSION | default "\([^"]*\)".*/\1/p' .tasks/gen.yaml | head -n1
     cmds:
       - task: spec
         vars: { BATLEHUB_VERSION: "{{.BATLEHUB_VERSION}}" }
       - task: client
         vars: { BATLEHUB_VERSION: "{{.BATLEHUB_VERSION}}" }
-      - echo "Update BATLEHUB_VERSION's default in .tasks/gen.yaml (and, from M2, the batlehub-config tag in Cargo.toml and the default image), then delete the old spec file"
+      - |
+        set -eu
+        new="{{.BATLEHUB_VERSION}}"; old="{{.PREVIOUS}}"
+        [ "$old" = "$new" ] && exit 0
+        sed -i "s#batlehub\", tag = \"v$old\"#batlehub\", tag = \"v$new\"#" Cargo.toml
+        sed -i "s#ghcr.io/batlehub/batlehub:$old#ghcr.io/batlehub/batlehub:$new#" .tasks/batlehub.yaml deploy/e2e/batlehub.yaml
+        sed -i "s#default \"$old\"#default \"$new\"#" .tasks/gen.yaml
+        rm -f "spec/batlehub-v$old.json"
+        mise exec -- cargo update -p batlehub-config
+        echo "BatleHub $old -> $new: read its release notes (new config sections, reload tiers, admin endpoints), then run task test:live-batlehub"

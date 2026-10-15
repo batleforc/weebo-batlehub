@@ -4,14 +4,16 @@ description: A Kubernetes operator that drives BatleHub instances as CRDs.
 ---
 
 `weebo-batlehub` drives [BatleHub](https://github.com/batlehub/batlehub),
-the package registry proxy-cache, from Kubernetes: its instances, and in
-the coming releases its configuration, its registries, the grants and
-policies of its packages, and its maintenance tasks.
+the package registry proxy-cache, from Kubernetes: its instances, their
+configuration and registries, the team namespaces of its registries, and
+in the coming releases the grants and policies of its packages, and its
+maintenance tasks.
 
 <Callout type="warn">
-  Early days: this release connects a `BatleHubLocalInstance` and checks
-  that the operator's token is accepted with the admin role. Nothing is
-  released yet; the first alpha comes with configuration management.
+  Alpha: a `BatleHubLocalInstance` connects an existing BatleHub and, with
+  `external.manageConfig`, pushes its configuration and its
+  `BatleHubRegistry`s. The mode where the operator deploys BatleHub comes
+  later.
 </Callout>
 
 ## Get started
@@ -19,5 +21,7 @@ policies of its packages, and its maintenance tasks.
 <Cards>
   <Card title="Install via Helm" description="Bring up the operator." href="/docs/guides/install" />
   <Card title="Connect a BatleHub instance" description="Point the operator at your BatleHub." href="/docs/guides/connect-instance" />
+  <Card title="Manage the configuration" description="Push the configuration and its registries." href="/docs/guides/manage-config" />
+  <Card title="Team namespaces" description="Reserve a package prefix to a group." href="/docs/guides/team-namespaces" />
   <Card title="CRD reference" description="Every field of every resource." href="/docs/crds/batlehublocalinstance" />
 </Cards>

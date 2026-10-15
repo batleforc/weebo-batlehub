@@ -64,7 +64,7 @@ async fn binary_serves_the_webhook_leads_reconciles_and_exits_on_lease_loss() {
     Mock::given(method("GET"))
         .and(path("/livez"))
         .respond_with(
-            ResponseTemplate::new(200).set_body_json(json!({"ok": true, "version": "1.5.0"})),
+            ResponseTemplate::new(200).set_body_json(json!({"ok": true, "version": "1.6.0"})),
         )
         .mount(&batlehub)
         .await;

@@ -1,15 +1,20 @@
 //! Port traits: what the use-cases need from the outside world. One
-//! [`AdminGateway`] per `BatleHubLocalInstance`, produced on demand by the
-//! [`GatewayFactory`]; which instance a CR lives on is the kit's
-//! [`InstanceDirectory`]; whether a configuration is valid is BatleHub's
-//! own parser, behind [`ConfigParser`].
+//! [`AdminGateway`] per `BatleHubLocalInstance` (and per proxy pod with
+//! `external.podSelector`), produced on demand by the [`GatewayFactory`];
+//! which instance a CR lives on is the kit's [`InstanceDirectory`]
+//! ([`RegistryResolver`] for a registry, which may come from another
+//! namespace); the configuration's sources are read through
+//! [`ConfigSources`], and judged by BatleHub's own parser, behind
+//! [`ConfigParser`].
 
 use std::sync::Arc;
 
+pub use api::config::ConfigSource;
 pub use api::local_instance::ConfigWarning;
+use api::registry::RegistrySpec;
 use domain::error::ReasonCode;
 pub use weebo_kit_application::instances::{
-    BoundInstance, InstanceDirectory, InstanceError, ResolveError,
+    BoundInstance, InstanceDirectory, InstanceError, InstanceRef, ResolveError,
 };
 
 /// A failed call to BatleHub's admin API, neutral: the use case maps it
@@ -27,6 +32,21 @@ pub enum GatewayError {
     /// Any answer the endpoint doesn't document (a 500, an unknown body).
     #[error("BatleHub API error: {0}")]
     Remote(String),
+    /// A configuration endpoint answered 503: hot reload is disabled on
+    /// the instance.
+    #[error("hot reload is disabled on the instance: {0}")]
+    HotReloadDisabled(String),
+    /// A configuration endpoint answered 400: the instance refuses the
+    /// configuration (its message).
+    #[error("{0}")]
+    Rejected(String),
+    /// `pending/apply` found nothing staged (404), or what was staged
+    /// expired (409).
+    #[error("no pending reload to apply: {0}")]
+    NoPending(String),
+    /// A namespace claim answered 409: the prefix is already claimed.
+    #[error("{0}")]
+    AlreadyClaimed(String),
 }
 
 impl GatewayError {
@@ -34,7 +54,10 @@ impl GatewayError {
         match self {
             GatewayError::Unreachable(_) => ReasonCode::InstanceUnreachable,
             GatewayError::Unauthorized(_) => ReasonCode::OperatorUnauthorized,
-            GatewayError::Remote(_) => ReasonCode::RemoteError,
+            GatewayError::Remote(_) | GatewayError::NoPending(_) => ReasonCode::RemoteError,
+            GatewayError::HotReloadDisabled(_) => ReasonCode::HotReloadDisabled,
+            GatewayError::Rejected(_) => ReasonCode::ConfigRejected,
+            GatewayError::AlreadyClaimed(_) => ReasonCode::ClaimConflict,
         }
     }
 }
@@ -59,6 +82,69 @@ pub trait AdminGateway: Send + Sync {
     /// What BatleHub finds legal but probably unintended in its own
     /// configuration.
     async fn config_warnings(&self) -> Result<Vec<ConfigWarning>, GatewayError>;
+    /// The instance's first configuration file, as on its disk.
+    async fn config_content(&self) -> Result<String, GatewayError>;
+    /// A dry run of `content` as the first configuration file, with the
+    /// instance's environment and other layers: what it would change.
+    async fn validate_config(&self, content: &str) -> Result<ReloadCheck, GatewayError>;
+    /// Stages `content` as a pending reload; `false` when the instance
+    /// staged nothing, having already seen these exact bytes.
+    async fn stage_config(&self, content: &str) -> Result<bool, GatewayError>;
+    /// Applies the pending reload (and writes it to the instance's disk).
+    async fn apply_pending(&self) -> Result<(), GatewayError>;
+    /// The reload staged on the instance, if any.
+    async fn pending(&self) -> Result<Option<PendingSource>, GatewayError>;
+    /// Drops the reload staged on the instance (none is fine).
+    async fn discard_pending(&self) -> Result<(), GatewayError>;
+    /// The names of the registries the instance serves.
+    async fn registry_names(&self) -> Result<Vec<String>, GatewayError>;
+    /// The team namespaces claimed on `registry`.
+    async fn team_namespaces(&self, registry: &str) -> Result<Vec<TeamNamespace>, GatewayError>;
+    /// Claims `namespace.prefix` on `registry` for `namespace.group`
+    /// ([`GatewayError::AlreadyClaimed`] when the prefix is taken).
+    async fn claim_namespace(
+        &self,
+        registry: &str,
+        namespace: &TeamNamespace,
+    ) -> Result<(), GatewayError>;
+    /// Releases `prefix` on `registry` (none claimed is fine).
+    async fn release_namespace(&self, registry: &str, prefix: &str) -> Result<(), GatewayError>;
+}
+
+/// A team namespace of a registry: a package name prefix reserved to a
+/// group.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TeamNamespace {
+    pub prefix: String,
+    /// The group, as the instance's auth providers name it.
+    pub group: String,
+    /// Who claimed it (free text): the operator writes its marker there.
+    pub claimed_by: Option<String>,
+    /// How many packages it holds (`0` when written).
+    pub package_count: i64,
+}
+
+/// What a dry run of a configuration says.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReloadCheck {
+    /// The keys needing a restart the running process doesn't have, once
+    /// this configuration is loaded (`["*"]`: BatleHub couldn't compare).
+    pub restart_required: Vec<String>,
+}
+
+/// Who staged a pending reload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingSource {
+    /// The instance's own watcher, from its file on disk.
+    FileWatcher,
+    /// An admin call (the configuration editor, or the operator).
+    AdminRequest,
+}
+
+/// A proxy pod of an instance, and its gateway.
+pub struct PodGateway {
+    pub name: String,
+    pub gateway: Arc<dyn AdminGateway>,
 }
 
 /// Why no gateway could be built for an instance.
@@ -93,14 +179,29 @@ impl GatewayFactoryError {
     }
 }
 
-/// The gateway of a resolved instance. Implementations re-read the token
-/// `Secret` on every call: rotating it needs no restart.
+/// What reaching a resolved instance takes. Implementations re-read the
+/// token `Secret` on every call: rotating it needs no restart.
+pub struct InstanceAccess {
+    /// The instance's `url`.
+    pub gateway: Arc<dyn AdminGateway>,
+    /// The token the gateways present, to check the configuration still
+    /// accepts it before pushing one.
+    pub token: String,
+}
+
 #[async_trait::async_trait]
 pub trait GatewayFactory: Send + Sync {
     async fn gateway_for(
         &self,
         instance: &BoundInstance,
-    ) -> Result<Arc<dyn AdminGateway>, GatewayFactoryError>;
+    ) -> Result<InstanceAccess, GatewayFactoryError>;
+
+    /// The ready proxy pods of `instance` (`external.podSelector`), each
+    /// reached on its IP, sorted by name; `None` without a selector.
+    async fn pod_gateways(
+        &self,
+        instance: &BoundInstance,
+    ) -> Result<Option<Vec<PodGateway>>, GatewayFactoryError>;
 }
 
 /// The CRs bound to an instance, which hold its deletion.
@@ -130,10 +231,17 @@ pub enum ConfigError {
     /// The parser refuses it (`ConfigInvalid`).
     #[error("{0}")]
     Invalid(String),
-    /// No parser to ask: validating needs a `batlehub-config` newer than
-    /// v1.5.0 (`merge_layers`, `validate_layers`).
-    #[error("{0}")]
-    Unavailable(String),
+}
+
+/// Whether a configuration still lets the operator in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokenCheck {
+    /// An `admin` entry of a `type = "token"` provider accepts the token.
+    Accepted,
+    /// None does, but one is a `${VAR}` the instance resolves.
+    Unverifiable,
+    /// None does: the operator would lock itself out.
+    Refused,
 }
 
 /// BatleHub's own configuration parser: the layers merged the way BatleHub
@@ -141,11 +249,84 @@ pub enum ConfigError {
 /// the `${VAR}` placeholders and the `PROXY_CACHE__*` overrides), never
 /// the operator's.
 pub trait ConfigParser: Send + Sync {
+    /// A configuration written in YAML (as JSON) as a TOML layer.
+    fn layer(&self, object: &serde_json::Value) -> Result<String, ConfigError>;
+    /// A TOML fragment as JSON, to merge into a CR's object.
+    fn fragment(&self, text: &str) -> Result<serde_json::Value, ConfigError>;
+    /// The layers merged as BatleHub merges them, placeholders kept: one
+    /// canonical document, whose hash moves only when its meaning does.
+    fn merge(&self, layers: &[&str]) -> Result<String, ConfigError>;
     fn validate(
         &self,
         layers: &[&str],
         env: &dyn Fn(&str) -> Option<String>,
     ) -> Result<ConfigVerdict, ConfigError>;
+    /// Whether `document` (as [`Self::merge`] returns it) accepts `token`
+    /// with the admin role.
+    fn token_check(&self, document: &str, token: &str) -> TokenCheck;
+}
+
+/// Why a configuration source couldn't be read.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum SourceError {
+    /// The `ConfigMap`/`Secret`, or its key, doesn't exist.
+    #[error("{0}")]
+    Missing(String),
+    /// A `Secret` without the `batlehub.weebo.io/credential` label.
+    #[error("{0}")]
+    NotAllowed(String),
+    #[error("Kubernetes API error: {0}")]
+    Kubernetes(String),
+}
+
+impl SourceError {
+    pub fn reason(&self) -> ReasonCode {
+        match self {
+            SourceError::Missing(_) => ReasonCode::ConfigLayerMissing,
+            SourceError::NotAllowed(_) => ReasonCode::SecretNotAllowed,
+            SourceError::Kubernetes(_) => ReasonCode::KubernetesApiError,
+        }
+    }
+}
+
+/// A `BatleHubRegistry` as the instance renders it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RegistryView {
+    pub namespace: String,
+    /// `metadata.name`.
+    pub name: String,
+    /// `metadata.creationTimestamp` (RFC 3339: sorts as text).
+    pub created: String,
+    pub labels: std::collections::BTreeMap<String, String>,
+    pub spec: RegistrySpec,
+    /// The instance it resolves to.
+    pub bound: Result<BoundInstance, InstanceError>,
+}
+
+/// Where an instance's configuration comes from, besides its own spec.
+#[async_trait::async_trait]
+pub trait ConfigSources: Send + Sync {
+    /// The text of a `ConfigMap`/`Secret` key of `namespace`: a `Secret`
+    /// only when labelled `batlehub.weebo.io/credential: "true"`.
+    async fn read(&self, namespace: &str, source: &ConfigSource) -> Result<String, SourceError>;
+    /// Every `BatleHubRegistry` the operator sees, resolved.
+    async fn registries(&self) -> Result<Vec<RegistryView>, String>;
+}
+
+/// The instance a `BatleHubRegistry` attaches to: the kit's resolution,
+/// where an instance of another namespace consents through its
+/// `registrySelector.namespaces`.
+#[async_trait::async_trait]
+pub trait RegistryResolver: Send + Sync {
+    async fn resolve_registry(
+        &self,
+        namespace: &str,
+        instance_ref: Option<&InstanceRef>,
+        recorded: Option<&BoundInstance>,
+    ) -> Result<BoundInstance, InstanceError>;
+
+    /// The instance `bound` designates, `None` when it is gone.
+    async fn instance(&self, bound: &BoundInstance) -> Result<Option<api::LocalInstance>, String>;
 }
 
 /// The reason code of an instance that couldn't be resolved.

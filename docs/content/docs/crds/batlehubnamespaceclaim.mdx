@@ -1,0 +1,54 @@
+---
+title: BatleHubNamespaceClaim
+description: >-
+  A team namespace of a registry: a package name prefix reserved to a group of
+  the instance's auth providers.
+full: true
+---
+
+- **API version:** `batlehub.weebo.io/v1alpha1`
+- **Scope:** Namespaced
+- **Short names:** `bhnc`
+- **Guide:** [Team namespaces](/docs/guides/team-namespaces)
+
+A team namespace of a registry: a package name prefix reserved to a
+group of the instance's auth providers. Only its members (and admins)
+may publish `prefix`, or a package under it (`prefix/…`, with the
+registry's own separator), and the group is the audience of the `team`
+visibility there.
+
+BatleHub keeps these claims in its database, not in its configuration:
+the operator claims the prefix through the admin API, checks it again
+on every pass, and releases it when this object is deleted (unless
+`deletionPolicy: Orphan`). A prefix already claimed by anything else
+is never taken over.
+
+## Example
+
+```yaml
+apiVersion: batlehub.weebo.io/v1alpha1
+kind: BatleHubNamespaceClaim
+metadata:
+  name: my-namespaceclaim
+  namespace: team-a
+spec:
+  registry: npm
+  prefix: '@acme/web'
+  group: oidc:web-team
+```
+
+## Spec fields
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `deletionPolicy` | `string` | no | `"Delete"` | `Delete` (default) releases the prefix when this object is deleted; `Orphan` leaves the claim on the instance. |
+| `group` | `string` | yes |  | The group owning the prefix, as the instance's auth providers name it: `oidc:frontend-team`, `kubernetes:system:serviceaccounts:ci`… Changing it releases the prefix then claims it for the new group. |
+| `instanceRef` | `object` | no |  | The `BatleHubLocalInstance` of this namespace holding the registry; unset, the only one of this namespace. Immutable. |
+| `prefix` | `string` | yes |  | The package name prefix, in the ecosystem's own spelling: an npm scope (`@acme`), a Go module or Maven path, an OpenVSX publisher… A claim covers `prefix` itself and every package under it. Immutable. |
+| `registry` | `string` | yes |  | The registry's name on the instance (a `[[registries]]` entry, from the instance's configuration or a `BatleHubRegistry`). Immutable. |
+
+## Build a manifest
+
+Answer the questions and fill in the fields: the YAML preview updates as you type, ready to copy or download and `kubectl apply`.
+
+<CrdForm kind="BatleHubNamespaceClaim" />

@@ -1,0 +1,103 @@
+{
+  "apiVersion": "batlehub.weebo.io/v1alpha1",
+  "kind": "BatleHubNamespaceClaim",
+  "scope": "Namespaced",
+  "description": "A team namespace of a registry: a package name prefix reserved to a\ngroup of the instance's auth providers. Only its members (and admins)\nmay publish `prefix`, or a package under it (`prefix/…`, with the\nregistry's own separator), and the group is the audience of the `team`\nvisibility there.\n\nBatleHub keeps these claims in its database, not in its configuration:\nthe operator claims the prefix through the admin API, checks it again\non every pass, and releases it when this object is deleted (unless\n`deletionPolicy: Orphan`). A prefix already claimed by anything else\nis never taken over.",
+  "properties": {
+    "deletionPolicy": {
+      "default": "Delete",
+      "description": "`Delete` (default) releases the prefix when this object is deleted;\n`Orphan` leaves the claim on the instance.",
+      "enum": [
+        "Delete",
+        "Orphan"
+      ],
+      "type": "string"
+    },
+    "group": {
+      "description": "The group owning the prefix, as the instance's auth providers name\nit: `oidc:frontend-team`, `kubernetes:system:serviceaccounts:ci`…\nChanging it releases the prefix then claims it for the new group.",
+      "maxLength": 512,
+      "minLength": 1,
+      "pattern": "^\\S+$",
+      "type": "string"
+    },
+    "instanceRef": {
+      "description": "The `BatleHubLocalInstance` of this namespace holding the registry;\nunset, the only one of this namespace. Immutable.",
+      "properties": {
+        "kind": {
+          "description": "`LocalInstance`, the only kind (may be left out).",
+          "enum": [
+            "LocalInstance"
+          ],
+          "type": "string"
+        },
+        "name": {
+          "description": "`metadata.name` of the `BatleHubLocalInstance`.",
+          "minLength": 1,
+          "type": "string"
+        },
+        "namespace": {
+          "description": "Not allowed: the instance is in the claim's namespace.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object",
+      "x-kubernetes-validations": [
+        {
+          "message": "instanceRef is immutable",
+          "rule": "self == oldSelf"
+        },
+        {
+          "message": "the instance must be in the claim's namespace",
+          "rule": "!has(self.__namespace__)"
+        }
+      ]
+    },
+    "prefix": {
+      "description": "The package name prefix, in the ecosystem's own spelling: an npm\nscope (`@acme`), a Go module or Maven path, an OpenVSX publisher… A\nclaim covers `prefix` itself and every package under it. Immutable.",
+      "maxLength": 1024,
+      "minLength": 1,
+      "type": "string",
+      "x-kubernetes-validations": [
+        {
+          "message": "prefix is immutable",
+          "rule": "self == oldSelf"
+        },
+        {
+          "message": "prefix may not be blank, `.` or `..`, nor start or end with a space",
+          "rule": "self == self.trim() && self != '.' && self != '..'"
+        }
+      ]
+    },
+    "registry": {
+      "description": "The registry's name on the instance (a `[[registries]]` entry, from\nthe instance's configuration or a `BatleHubRegistry`). Immutable.",
+      "maxLength": 253,
+      "minLength": 1,
+      "type": "string",
+      "x-kubernetes-validations": [
+        {
+          "message": "registry is immutable",
+          "rule": "self == oldSelf"
+        },
+        {
+          "message": "registry must be a registry name",
+          "rule": "self != '.' && self != '..' && !self.contains('/')"
+        }
+      ]
+    }
+  },
+  "required": [
+    "group",
+    "prefix",
+    "registry"
+  ],
+  "type": "object",
+  "x-kubernetes-validations": [
+    {
+      "message": "instanceRef is immutable",
+      "rule": "has(self.instanceRef) == has(oldSelf.instanceRef)"
+    }
+  ]
+}

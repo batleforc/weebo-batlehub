@@ -5,6 +5,8 @@
     "---Getting started---",
     "guides/install",
     "guides/connect-instance",
+    "guides/manage-config",
+    "guides/team-namespaces",
     "---Reference---",
     "...crds",
     "reference"

@@ -11,11 +11,16 @@ operator's HTTPS server (probes and admission webhooks).
 helm install weebo-batlehub \
   oci://ghcr.io/batleforc/charts/weebo-batlehub \
   --namespace weebo-batlehub --create-namespace \
-  --set certManager.issuerRef.name=<issuer>
+  --version <version>
 ```
 
-No release is published yet: until then, install from a checkout with
-`deploy/charts/weebo-batlehub` (after `helm dependency build`).
+The chart creates a self-signed issuer for that certificate. To use an
+issuer of yours, add `--set certManager.createIssuer=false --set
+certManager.issuerRef.name=<issuer>` (and `kind`, `ClusterIssuer` by
+default).
+
+Releases are alphas for now (`0.1.0-alpha.N`): Helm skips prereleases
+unless the version is given (`--version`) or `--devel` is passed.
 
 ## Limited to one namespace
 
@@ -23,4 +28,9 @@ No release is published yet: until then, install from a checkout with
 of that namespace: its kinds move from the ClusterRole to a Role there.
 BatleHub has no cluster-scoped kind; the operator still reads and writes
 Secrets through its ClusterRole (`clusterSecrets`), in every namespace that
-has an instance.
+has an instance, and reads ConfigMaps, pods and namespaces through it.
+Registries of other namespaces are not seen.
+
+`watch.clusterKinds: false` (no ClusterRole at all) is not fully
+supported: ConfigMap layers and `external.podSelector` need the
+ClusterRole's reads, and fail with `KubernetesApiError` in that mode.

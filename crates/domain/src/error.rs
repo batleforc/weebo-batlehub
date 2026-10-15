@@ -133,6 +133,11 @@ weebo_kit_domain::reason_codes! {
         /// operator's identity needs a grant on the version or its package
         /// (the message gives it).
         ExemptionNotPermitted,
+        /// A `BatleHubNamespaceClaim`'s prefix is already claimed on that
+        /// registry by something else (the console, the CLI, another CR):
+        /// never taken over. The message says for which group and by whom;
+        /// release that claim, or delete this CR.
+        ClaimConflict,
 
         // --- Registries ---
         /// Another `BatleHubRegistry` rendered first on the same instance
@@ -276,6 +281,7 @@ impl ReasonCode {
                 | ReasonCode::PolicyConflict
                 | ReasonCode::GrantHeldByOwnership
                 | ReasonCode::ExemptionNotPermitted
+                | ReasonCode::ClaimConflict
                 | ReasonCode::DuplicateRegistryName
                 | ReasonCode::NamespaceNotAllowed
                 | ReasonCode::InstanceNotAllowed

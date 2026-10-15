@@ -3,7 +3,8 @@
 # the operator chart into the current kube context, then the smoke — two
 # BatleHubLocalInstances whose state the operator decides without a running
 # BatleHub (an unlabelled token Secret, an unreachable URL) —, a real
-# BatleHub (batlehub.yaml) with an external instance that must end Ready,
+# BatleHub (batlehub.yaml, 2 replicas) with an external instance that must
+# end Ready and one pushing its configuration and a registry to each pod,
 # and checks leader election on the real deployment.
 #
 # With a previously published chart, it first installs that release, creates
@@ -47,7 +48,7 @@ dump() {
   step "diagnostics"
   kubectl -n "$OPERATOR_NS" get pods -o wide
   kubectl -n "$OPERATOR_NS" logs -l app.kubernetes.io/name=weebo-batlehub --tail=200 --prefix --all-containers
-  kubectl -n team-a get batlehublocalinstances -o yaml
+  kubectl -n team-a get batlehublocalinstances,batlehubregistries,batlehubnamespaceclaims -o yaml
   kubectl -n team-a get pods -o wide
   kubectl -n team-a logs deploy/batlehub --tail=50
   kubectl get events -A --sort-by=.lastTimestamp | tail -n 50
@@ -67,6 +68,18 @@ reason_is() {
     sleep 2
   done
   fail "$name: Ready reason is ${got:-<none>}, expected $want"
+}
+
+# Waits until `Ready` of registry $1 has reason $2.
+registry_is() {
+  local name="$1" want="$2" got=""
+  for _ in $(seq 1 90); do
+    got="$(kubectl -n team-a get batlehubregistry "$name" \
+      -o jsonpath='{.status.conditions[?(@.type=="Ready")].reason}' 2>/dev/null || true)"
+    [ "$got" = "$want" ] && return 0
+    sleep 2
+  done
+  fail "registry $name: Ready reason is ${got:-<none>}, expected $want"
 }
 
 # The smoke's two instances, each on the reason it must end on.
@@ -101,7 +114,8 @@ if [ "$UPGRADE_FROM" != none ]; then
   if [ -n "$UPGRADE_FROM" ]; then
     previous="$UPGRADE_FROM"
   else
-    previous="$(helm show chart "$CHART_OCI" 2>/dev/null | awk '/^version:/ {print $2}' || true)"
+    # --devel: the alphas are prereleases, which Helm skips otherwise.
+    previous="$(helm show chart "$CHART_OCI" --devel 2>/dev/null | awk '/^version:/ {print $2}' || true)"
   fi
   if [ -z "$previous" ]; then
     echo "no published chart at $CHART_OCI: upgrade test skipped"
@@ -138,7 +152,13 @@ kubectl -n "$OPERATOR_NS" rollout status "deploy/$RELEASE" --timeout="$WAIT"
 
 if [ -n "$previous" ]; then
   step "upgrade test: CRs created by $previous keep their state"
-  sleep 15
+  # The old operator wrote these reasons: clear them, then make the new
+  # one reconcile the old CRs (a status patch alone triggers nothing).
+  for name in unlabelled unreachable; do
+    kubectl -n team-a patch batlehublocalinstance "$name" --subresource=status --type=merge \
+      -p '{"status":{"conditions":[]}}'
+    kubectl -n team-a annotate batlehublocalinstance "$name" e2e/upgraded="$(date +%s)" --overwrite
+  done
   smoke_state
 fi
 
@@ -155,6 +175,54 @@ reason_is ready Reconciled
 version="$(kubectl -n team-a get batlehublocalinstance ready -o jsonpath='{.status.version}')"
 [ -n "$version" ] || fail "ready: no status.version"
 echo "BatleHub $version"
+
+step "manageConfig on each of 2 replicas (podSelector), with a registry"
+reason_is hub Reconciled
+registry_is npm Reconciled
+hash="$(kubectl -n team-a get batlehublocalinstance hub -o jsonpath='{.status.configHash}')"
+applied="$(kubectl -n team-a get batlehublocalinstance hub -o jsonpath='{.status.appliedConfigHash}')"
+[ -n "$hash" ] && [ "$hash" = "$applied" ] || fail "hub: configHash $hash, appliedConfigHash $applied"
+# Each pod's own file holds the registry (the image has no shell: a
+# throwaway curl pod reads them by IP, with the admin token of
+# batlehub.yaml).
+admin_token="$(kubectl -n team-a get secret batlehub-admin -o jsonpath='{.data.token}' | base64 -d)"
+for ip in $(kubectl -n team-a get pods -l app=batlehub -o jsonpath='{.items[*].status.podIP}'); do
+  content="$(kubectl -n team-a run "read-$RANDOM" --rm -i --restart=Never --quiet \
+    --image=docker.io/curlimages/curl:8.17.0 -- \
+    -fsS -H "Authorization: Bearer $admin_token" "http://$ip:8080/api/v1/admin/config/content")"
+  printf '%s' "$content" | grep -q 'name = \\"npm\\"' || fail "pod $ip doesn't serve the registry: $content"
+done
+# A key read at startup only is held back: the operator can't restart it.
+kubectl -n team-a patch batlehublocalinstance hub --type merge \
+  -p '{"spec":{"config":{"database":{"max_connections":6}}}}'
+reason_is hub RestartForbidden
+kubectl -n team-a patch batlehublocalinstance hub --type merge \
+  -p '{"spec":{"config":{"database":{"max_connections":5}}}}'
+reason_is hub Reconciled
+
+step "a team namespace claimed on the registry, released on deletion"
+kubectl apply -f - <<'YAML'
+apiVersion: batlehub.weebo.io/v1alpha1
+kind: BatleHubNamespaceClaim
+metadata:
+  name: web
+  namespace: team-a
+spec:
+  instanceRef: { name: hub }
+  registry: npm
+  prefix: "@acme/web"
+  group: oidc:web-team
+YAML
+for _ in $(seq 1 90); do
+  got="$(kubectl -n team-a get batlehubnamespaceclaim web \
+    -o jsonpath='{.status.conditions[?(@.type=="Ready")].reason}' 2>/dev/null || true)"
+  [ "$got" = Reconciled ] && break
+  sleep 2
+done
+[ "$got" = Reconciled ] || fail "claim web: Ready reason is ${got:-<none>}, expected Reconciled"
+claimed="$(kubectl -n team-a get batlehubnamespaceclaim web -o jsonpath='{.status.claimedGroup}')"
+[ "$claimed" = oidc:web-team ] || fail "claim web: claimedGroup is ${claimed:-<none>}"
+kubectl -n team-a delete batlehubnamespaceclaim web --timeout=60s
 
 step "leader election"
 holder="$(kubectl -n "$OPERATOR_NS" get lease "$LEASE" -o jsonpath='{.spec.holderIdentity}')"
