@@ -7,6 +7,7 @@
     "guides/connect-instance",
     "guides/manage-config",
     "guides/team-namespaces",
+    "guides/package-governance",
     "---Reference---",
     "...crds",
     "reference"

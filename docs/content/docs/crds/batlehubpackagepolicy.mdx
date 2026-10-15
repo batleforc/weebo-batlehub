@@ -1,0 +1,55 @@
+---
+title: BatleHubPackagePolicy
+description: >-
+  The policy of a package, or of one version of it, in a registry of the
+  instance, and the exemptions of a version from its gates.
+full: true
+---
+
+- **API version:** `batlehub.weebo.io/v1alpha1`
+- **Scope:** Namespaced
+- **Short names:** `bhpp`
+- **Guide:** [Package grants and policies](/docs/guides/package-governance)
+
+The policy of a package, or of one version of it, in a registry of the
+instance, and the exemptions of a version from its gates.
+
+BatleHub keeps these in its database: the operator writes the policy
+through the admin API, reads it back on every pass (rewriting it when
+it was changed elsewhere), and clears it when this object is deleted
+(unless `deletionPolicy: Orphan`). A policy already on the node that
+this object didn't write is a conflict, never taken over.
+
+## Example
+
+```yaml
+apiVersion: batlehub.weebo.io/v1alpha1
+kind: BatleHubPackagePolicy
+metadata:
+  name: my-packagepolicy
+  namespace: team-a
+spec:
+  registry: npm
+  package: '@acme/billing'
+  version: 1.4.2
+  policy:
+    visibility: team
+```
+
+## Spec fields
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `deletionPolicy` | `string` | no | `"Delete"` | `Delete` (default) clears what this object wrote when it is deleted; `Orphan` leaves it on the instance. |
+| `exemptions` | `object[]` | no |  | The version's exemptions from its gates, one per gate. Needs `version`, and a grant of `gates:exempt` to the operator's identity on the version or its package (no role carries it). |
+| `instanceRef` | `object` | no |  | The `BatleHubLocalInstance` of this namespace holding the registry; unset, the only one of this namespace. Immutable. |
+| `package` | `string` | yes |  | The package, as the registry names it (`@acme/billing`). Immutable. |
+| `policy` | `object` | no |  | The node's policy, as BatleHub's API takes it (snake_case keys): it replaces the node's policy as a whole, a key left out inherits from the tier above. |
+| `registry` | `string` | yes |  | The registry's name on the instance. Immutable. |
+| `version` | `string` | no |  | One version of the package; unset, the package itself. Immutable. |
+
+## Build a manifest
+
+Answer the questions and fill in the fields: the YAML preview updates as you type, ready to copy or download and `kubectl apply`.
+
+<CrdForm kind="BatleHubPackagePolicy" />

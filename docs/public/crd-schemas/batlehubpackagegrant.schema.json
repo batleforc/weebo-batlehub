@@ -1,0 +1,155 @@
+{
+  "apiVersion": "batlehub.weebo.io/v1alpha1",
+  "kind": "BatleHubPackageGrant",
+  "scope": "Namespaced",
+  "description": "The grants of a package, or of one version of it, in a registry of the\ninstance: who may do what there, beyond what the instance's and the\nregistry's configuration grant (`grants`, `registries[].grants`).\n\nBatleHub keeps these grants in its database: the operator writes each\nsubject's grant through the admin API, reads them again on every pass\n(rewriting what drifted), and revokes what it wrote when this object\nis deleted (unless `deletionPolicy: Orphan`). It only ever touches the\ngrants it wrote: a subject already holding a grant on that node is a\nconflict, never taken over.",
+  "properties": {
+    "deletionPolicy": {
+      "default": "Delete",
+      "description": "`Delete` (default) revokes the grants this object wrote when it is\ndeleted; `Orphan` leaves them on the instance.",
+      "enum": [
+        "Delete",
+        "Orphan"
+      ],
+      "type": "string"
+    },
+    "grants": {
+      "description": "One grant per subject.",
+      "items": {
+        "description": "What one subject may do on the node.",
+        "properties": {
+          "actions": {
+            "description": "Action patterns: `releases:read`, `releases:*`… BatleHub expands a\npattern when it stores the grant (`status.applied[].stored`).",
+            "items": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^\\S+$",
+              "type": "string"
+            },
+            "maxItems": 64,
+            "minItems": 1,
+            "type": "array"
+          },
+          "subject": {
+            "description": "Who, as BatleHub spells it: `user:alice`, `group:oidc1:eng`,\n`role:user`, `*`.",
+            "maxLength": 512,
+            "minLength": 1,
+            "pattern": "^\\S+$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "actions",
+          "subject"
+        ],
+        "type": "object"
+      },
+      "maxItems": 256,
+      "minItems": 1,
+      "type": "array",
+      "x-kubernetes-list-map-keys": [
+        "subject"
+      ],
+      "x-kubernetes-list-type": "map"
+    },
+    "instanceRef": {
+      "description": "The `BatleHubLocalInstance` of this namespace holding the registry;\nunset, the only one of this namespace. Immutable.",
+      "properties": {
+        "kind": {
+          "description": "`LocalInstance`, the only kind (may be left out).",
+          "enum": [
+            "LocalInstance"
+          ],
+          "type": "string"
+        },
+        "name": {
+          "description": "`metadata.name` of the `BatleHubLocalInstance`.",
+          "minLength": 1,
+          "type": "string"
+        },
+        "namespace": {
+          "description": "Not allowed: the instance is in this object's namespace.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object",
+      "x-kubernetes-validations": [
+        {
+          "message": "instanceRef is immutable",
+          "rule": "self == oldSelf"
+        },
+        {
+          "message": "the instance must be in this object's namespace",
+          "rule": "!has(self.__namespace__)"
+        }
+      ]
+    },
+    "package": {
+      "description": "The package, as the registry names it (`@acme/billing`). Immutable.",
+      "maxLength": 1024,
+      "minLength": 1,
+      "type": "string",
+      "x-kubernetes-validations": [
+        {
+          "message": "package is immutable",
+          "rule": "self == oldSelf"
+        },
+        {
+          "message": "package may not be blank, `.` or `..`, nor start or end with a space",
+          "rule": "self == self.trim() && self != '.' && self != '..'"
+        }
+      ]
+    },
+    "registry": {
+      "description": "The registry's name on the instance. Immutable.",
+      "maxLength": 253,
+      "minLength": 1,
+      "type": "string",
+      "x-kubernetes-validations": [
+        {
+          "message": "registry is immutable",
+          "rule": "self == oldSelf"
+        },
+        {
+          "message": "registry must be a registry name",
+          "rule": "self != '.' && self != '..' && !self.contains('/')"
+        }
+      ]
+    },
+    "version": {
+      "description": "One version of the package (it must exist); unset, the package\nitself (every version). Immutable.",
+      "maxLength": 256,
+      "minLength": 1,
+      "type": "string",
+      "x-kubernetes-validations": [
+        {
+          "message": "version is immutable",
+          "rule": "self == oldSelf"
+        },
+        {
+          "message": "version may not contain `..`, `/` or `\\`, nor start or end with a space",
+          "rule": "self == self.trim() && !self.contains('..') && !self.contains('/') && !self.contains('\\\\')"
+        }
+      ]
+    }
+  },
+  "required": [
+    "grants",
+    "package",
+    "registry"
+  ],
+  "type": "object",
+  "x-kubernetes-validations": [
+    {
+      "message": "instanceRef is immutable",
+      "rule": "has(self.instanceRef) == has(oldSelf.instanceRef)"
+    },
+    {
+      "message": "version is immutable",
+      "rule": "has(self.version) == has(oldSelf.version)"
+    }
+  ]
+}

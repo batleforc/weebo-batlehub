@@ -17,10 +17,11 @@ Kubernetes operator driving [BatleHub](https://github.com/batlehub/batlehub)
 | `BatleHubLocalInstance` | Namespaced | A BatleHub instance: its URL and admin token (`external.adminTokenSecretRef`), and its configuration (`config`, `configLayers`, `external.manageConfig`) |
 | `BatleHubRegistry`      | Namespaced | One `[[registries]]` entry of an instance, as its own object (possibly from another namespace the instance accepts) |
 | `BatleHubNamespaceClaim` | Namespaced | A team namespace of a registry: a package name prefix reserved to a group, claimed through the admin API |
+| `BatleHubPackageGrant`  | Namespaced | The grants of a package or a version, one per subject, written through the admin API |
+| `BatleHubPackagePolicy` | Namespaced | The policy of a package or a version, and a version's exemptions from its gates |
 
-Planned (see the plan): `BatleHubMaintenance`, `BatleHubPackageGrant`,
-`BatleHubPackagePolicy`, and the managed mode (the operator deploys
-BatleHub).
+Planned (see the plan): `BatleHubMaintenance`, and the managed mode (the
+operator deploys BatleHub).
 
 The token Secret must be labelled `batlehub.weebo.io/instance-token: "true"`:
 the operator reads Secrets with its own rights and sends the token to the

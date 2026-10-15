@@ -8,12 +8,20 @@ export default defineConfig({
   // `BatleHubLocalInstance` → example named `my-local-instance`.
   kindPrefix: "BatleHub",
   // Sidebar order follows the order you'd create things in, not the alphabet.
-  order: ["BatleHubLocalInstance", "BatleHubRegistry", "BatleHubNamespaceClaim"],
+  order: [
+    "BatleHubLocalInstance",
+    "BatleHubRegistry",
+    "BatleHubNamespaceClaim",
+    "BatleHubPackageGrant",
+    "BatleHubPackagePolicy",
+  ],
   // The guide that explains each kind, linked from its reference page.
   guides: {
     BatleHubLocalInstance: ["Connect a BatleHub instance", "/docs/guides/connect-instance"],
     BatleHubRegistry: ["Manage the configuration", "/docs/guides/manage-config"],
     BatleHubNamespaceClaim: ["Team namespaces", "/docs/guides/team-namespaces"],
+    BatleHubPackageGrant: ["Package grants and policies", "/docs/guides/package-governance"],
+    BatleHubPackagePolicy: ["Package grants and policies", "/docs/guides/package-governance"],
   },
   // A minimal, realistic `spec` per kind, checked against the schema (every
   // required field present, every key a real field): a renamed field fails
@@ -33,6 +41,17 @@ export default defineConfig({
       registry: "npm",
       prefix: "@acme/web",
       group: "oidc:web-team",
+    },
+    BatleHubPackageGrant: {
+      registry: "npm",
+      package: "@acme/billing",
+      grants: [{ subject: "group:oidc:finance", actions: ["releases:read"] }],
+    },
+    BatleHubPackagePolicy: {
+      registry: "npm",
+      package: "@acme/billing",
+      version: "1.4.2",
+      policy: { visibility: "team" },
     },
   },
   // The operator reference pages (content/docs/reference/), generated from

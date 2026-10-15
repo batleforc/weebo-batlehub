@@ -7,9 +7,12 @@
 //! through short re-exports ([`LocalInstance`]). The instance is
 //! namespaced only: there is no cluster-scoped kind in `v1alpha1`.
 
+pub mod common;
 pub mod config;
 pub mod local_instance;
 pub mod namespace_claim;
+pub mod package_grant;
+pub mod package_policy;
 pub mod registry;
 pub mod status;
 
@@ -32,5 +35,7 @@ pub const APPROVED_CONFIG_HASH: &str = "batlehub.weebo.io/approved-config-hash";
 
 pub use local_instance::{LocalInstance, LocalInstanceStatus};
 pub use namespace_claim::{NamespaceClaim, NamespaceClaimStatus};
+pub use package_grant::{PackageGrant, PackageGrantStatus};
+pub use package_policy::{PackagePolicy, PackagePolicyStatus};
 pub use registry::{Registry, RegistryStatus};
 pub use status::Status;

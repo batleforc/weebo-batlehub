@@ -3,6 +3,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use weebo_kit_api::InstanceRef;
 
+pub use crate::common::DeletionPolicy;
 use crate::status::{BoundInstance, Condition};
 
 /// The short names the rest of the workspace uses.
@@ -45,7 +46,7 @@ pub struct BatleHubNamespaceClaimSpec {
     /// The `BatleHubLocalInstance` of this namespace holding the registry;
     /// unset, the only one of this namespace. Immutable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(schema_with = "claim_instance_ref")]
+    #[schemars(schema_with = "crate::common::local_instance_ref")]
     pub instance_ref: Option<InstanceRef>,
     /// The registry's name on the instance (a `[[registries]]` entry, from
     /// the instance's configuration or a `BatleHubRegistry`). Immutable.
@@ -71,46 +72,6 @@ pub struct BatleHubNamespaceClaimSpec {
     /// `Orphan` leaves the claim on the instance.
     #[serde(default)]
     pub deletion_policy: DeletionPolicy,
-}
-
-/// The kit's `InstanceRef`, described for this kind: a
-/// `BatleHubLocalInstance` of the claim's own namespace, immutable (the
-/// status records what was claimed there).
-fn claim_instance_ref(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
-    schemars::json_schema!({
-        "type": "object",
-        "required": ["name"],
-        "x-kubernetes-validations": [
-            {"rule": "self == oldSelf", "message": "instanceRef is immutable"},
-            {"rule": "!has(self.__namespace__)", "message": "the instance must be in the claim's namespace"},
-        ],
-        "properties": {
-            "name": {
-                "description": "`metadata.name` of the `BatleHubLocalInstance`.",
-                "type": "string",
-                "minLength": 1,
-            },
-            "kind": {
-                "description": "`LocalInstance`, the only kind (may be left out).",
-                "type": "string",
-                "enum": ["LocalInstance"],
-            },
-            "namespace": {
-                "description": "Not allowed: the instance is in the claim's namespace.",
-                "type": "string",
-            },
-        },
-    })
-}
-
-/// What happens to the claim on the instance when this object is deleted.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, JsonSchema, PartialEq, Eq)]
-pub enum DeletionPolicy {
-    /// Release the prefix.
-    #[default]
-    Delete,
-    /// Leave the claim in place, only drop this object.
-    Orphan,
 }
 
 /// What the operator claimed.

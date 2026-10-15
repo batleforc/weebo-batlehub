@@ -1,0 +1,58 @@
+---
+title: BatleHubPackageGrant
+description: >-
+  The grants of a package, or of one version of it, in a registry of the
+  instance: who may do what there, beyond what the instance's and the registry's
+  configuration grant (grants, registries[].grants).
+full: true
+---
+
+- **API version:** `batlehub.weebo.io/v1alpha1`
+- **Scope:** Namespaced
+- **Short names:** `bhpg`
+- **Guide:** [Package grants and policies](/docs/guides/package-governance)
+
+The grants of a package, or of one version of it, in a registry of the
+instance: who may do what there, beyond what the instance's and the
+registry's configuration grant (`grants`, `registries[].grants`).
+
+BatleHub keeps these grants in its database: the operator writes each
+subject's grant through the admin API, reads them again on every pass
+(rewriting what drifted), and revokes what it wrote when this object
+is deleted (unless `deletionPolicy: Orphan`). It only ever touches the
+grants it wrote: a subject already holding a grant on that node is a
+conflict, never taken over.
+
+## Example
+
+```yaml
+apiVersion: batlehub.weebo.io/v1alpha1
+kind: BatleHubPackageGrant
+metadata:
+  name: my-packagegrant
+  namespace: team-a
+spec:
+  registry: npm
+  package: '@acme/billing'
+  grants:
+    - subject: group:oidc:finance
+      actions:
+        - releases:read
+```
+
+## Spec fields
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `deletionPolicy` | `string` | no | `"Delete"` | `Delete` (default) revokes the grants this object wrote when it is deleted; `Orphan` leaves them on the instance. |
+| `grants` | `object[]` | yes |  | One grant per subject. |
+| `instanceRef` | `object` | no |  | The `BatleHubLocalInstance` of this namespace holding the registry; unset, the only one of this namespace. Immutable. |
+| `package` | `string` | yes |  | The package, as the registry names it (`@acme/billing`). Immutable. |
+| `registry` | `string` | yes |  | The registry's name on the instance. Immutable. |
+| `version` | `string` | no |  | One version of the package (it must exist); unset, the package itself (every version). Immutable. |
+
+## Build a manifest
+
+Answer the questions and fill in the fields: the YAML preview updates as you type, ready to copy or download and `kubectl apply`.
+
+<CrdForm kind="BatleHubPackageGrant" />

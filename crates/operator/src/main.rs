@@ -6,14 +6,14 @@ use std::fmt::Debug;
 use std::sync::Arc;
 use std::time::Duration;
 
-use adapters_inbound::admission::BatleHubAdmission;
+use adapters_inbound::admission::{BatleHubAdmission, KubeSiblings};
 use adapters_inbound::controller::{self, Ctx, Shutdown};
 use adapters_inbound::webhook;
 use adapters_outbound::{
     BatleHubConfigParser, ClusterDependents, HttpGatewayFactory, KubeConfigSources,
     LocalInstanceDirectory,
 };
-use api::{LocalInstance, NamespaceClaim, Registry};
+use api::{LocalInstance, NamespaceClaim, PackageGrant, PackagePolicy, Registry};
 use futures::StreamExt;
 use kube::api::Api;
 use kube::runtime::events::{Recorder, Reporter};
@@ -102,6 +102,8 @@ async fn run(telemetry: &telemetry::Telemetry) -> anyhow::Result<()> {
     scope.ensure::<LocalInstance>()?;
     scope.ensure::<Registry>()?;
     scope.ensure::<NamespaceClaim>()?;
+    scope.ensure::<PackageGrant>()?;
+    scope.ensure::<PackagePolicy>()?;
     tracing::info!(
         namespace = ?scope.watched_namespace(),
         selector = ?scope.selector(),
@@ -170,6 +172,7 @@ async fn run(telemetry: &telemetry::Telemetry) -> anyhow::Result<()> {
     let admission = Arc::new(BatleHubAdmission {
         sources,
         config: parser,
+        siblings: Arc::new(KubeSiblings(client.clone())),
     });
     let server = webhook_server::spawn(
         webhook::router(health.clone(), scope, admission),
@@ -193,6 +196,8 @@ async fn run(telemetry: &telemetry::Telemetry) -> anyhow::Result<()> {
         controller::local_instance::run(client.clone(), ctx.clone()),
         controller::registry::run(client.clone(), ctx.clone()),
         controller::namespace_claim::run(client.clone(), ctx.clone()),
+        controller::package_grant::run(client.clone(), ctx.clone()),
+        controller::package_policy::run(client.clone(), ctx.clone()),
     );
     // Every controller returns once the shutdown signal arrived and its
     // in-flight reconciles finished: hand the lease over right away

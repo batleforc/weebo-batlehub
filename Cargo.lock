@@ -197,6 +197,7 @@ dependencies = [
  "api",
  "async-trait",
  "domain",
+ "jiff",
  "kube",
  "serde_json",
  "sha2 0.10.9",

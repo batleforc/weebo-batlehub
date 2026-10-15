@@ -47,6 +47,25 @@ pub enum GatewayError {
     /// A namespace claim answered 409: the prefix is already claimed.
     #[error("{0}")]
     AlreadyClaimed(String),
+    /// A governance endpoint answered 503: the instance has no grant
+    /// storage.
+    #[error("{0}")]
+    StorageUnavailable(String),
+    /// A grant write answered 409: the subject holds these actions
+    /// through package ownership.
+    #[error("{0}")]
+    HeldByOwnership(String),
+    /// What the request names doesn't exist (a registry the instance
+    /// doesn't serve).
+    #[error("{0}")]
+    NotFound(String),
+    /// A governance write answered 400 (its message).
+    #[error("{0}")]
+    Refused(String),
+    /// An exemption answered 403: the operator's identity lacks
+    /// `gates:exempt` there.
+    #[error("{0}")]
+    NotPermitted(String),
 }
 
 impl GatewayError {
@@ -58,6 +77,11 @@ impl GatewayError {
             GatewayError::HotReloadDisabled(_) => ReasonCode::HotReloadDisabled,
             GatewayError::Rejected(_) => ReasonCode::ConfigRejected,
             GatewayError::AlreadyClaimed(_) => ReasonCode::ClaimConflict,
+            GatewayError::StorageUnavailable(_) => ReasonCode::GrantStorageUnavailable,
+            GatewayError::HeldByOwnership(_) => ReasonCode::GrantHeldByOwnership,
+            GatewayError::NotFound(_) => ReasonCode::RemoteNotFound,
+            GatewayError::Refused(_) => ReasonCode::RemoteRejected,
+            GatewayError::NotPermitted(_) => ReasonCode::ExemptionNotPermitted,
         }
     }
 }
@@ -109,6 +133,111 @@ pub trait AdminGateway: Send + Sync {
     ) -> Result<(), GatewayError>;
     /// Releases `prefix` on `registry` (none claimed is fine).
     async fn release_namespace(&self, registry: &str, prefix: &str) -> Result<(), GatewayError>;
+    /// The grants stored on `node` itself (not on the versions of a
+    /// package node).
+    async fn grants(&self, node: &PackageNode) -> Result<Vec<StoredGrant>, GatewayError>;
+    /// Writes `subject`'s grant on `node`, replacing the one in place.
+    async fn put_grant(
+        &self,
+        node: &PackageNode,
+        subject: &str,
+        actions: &[String],
+    ) -> Result<GrantWrite, GatewayError>;
+    /// Removes `subject`'s grant on `node`; `false` when there was none.
+    async fn delete_grant(&self, node: &PackageNode, subject: &str) -> Result<bool, GatewayError>;
+    /// The policy written on `node` (snake_case keys, as BatleHub reports
+    /// it, the defaults filled), `None` when none is.
+    async fn policy(&self, node: &PackageNode) -> Result<Option<serde_json::Value>, GatewayError>;
+    /// Replaces the policy of `node`.
+    async fn put_policy(
+        &self,
+        node: &PackageNode,
+        policy: &serde_json::Value,
+    ) -> Result<(), GatewayError>;
+    /// Clears the policy of `node` (none is fine).
+    async fn delete_policy(&self, node: &PackageNode) -> Result<(), GatewayError>;
+    /// Exempts the version `node` from `exemption.gate`
+    /// ([`GatewayError::NotPermitted`] without `gates:exempt`).
+    async fn set_exemption(
+        &self,
+        node: &PackageNode,
+        exemption: &Exemption,
+    ) -> Result<(), GatewayError>;
+    /// Removes the exemption of the version `node` from `gate` (none is
+    /// fine).
+    async fn delete_exemption(&self, node: &PackageNode, gate: &str) -> Result<(), GatewayError>;
+    /// The user the operator's token authenticates as, if it has one.
+    async fn whoami(&self) -> Result<Option<String>, GatewayError>;
+    /// A call of the admin API: its JSON answer (`null` when empty).
+    async fn call(&self, request: &AdminRequest) -> Result<serde_json::Value, GatewayError>;
+}
+
+/// A package, or one version of it, in a registry: where grants and
+/// policies are written.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct PackageNode {
+    pub registry: String,
+    pub package: String,
+    /// `None`: the package itself.
+    pub version: Option<String>,
+}
+
+impl std::fmt::Display for PackageNode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.version {
+            Some(v) => write!(f, "{}@{v} in registry {}", self.package, self.registry),
+            None => write!(f, "{} in registry {}", self.package, self.registry),
+        }
+    }
+}
+
+/// One subject's grant, as stored.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StoredGrant {
+    pub subject: String,
+    /// The expanded actions.
+    pub actions: Vec<String>,
+    /// The row of the ownership projection (an owner of the package).
+    pub from_ownership: bool,
+    pub granted_by: Option<String>,
+}
+
+/// What a grant write stored.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GrantWrite {
+    /// The expanded actions stored.
+    pub stored: Vec<String>,
+    /// Legal but probably unintended.
+    pub warnings: Vec<String>,
+}
+
+/// An exemption of a version from a gate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Exemption {
+    pub gate: String,
+    /// RFC 3339.
+    pub exempt_until: String,
+    pub reason: String,
+}
+
+/// An HTTP method of the admin API.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Method {
+    Get,
+    Post,
+    Put,
+    Delete,
+}
+
+/// One call of the admin API, by path: what a maintenance action runs.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AdminRequest {
+    pub method: Method,
+    /// The path's segments after the base URL, each percent-encoded
+    /// (`["api", "v1", "admin", "registries", "npm", "warm"]`).
+    pub path: Vec<String>,
+    pub query: Vec<(String, String)>,
+    pub body: Option<serde_json::Value>,
 }
 
 /// A team namespace of a registry: a package name prefix reserved to a
@@ -202,6 +331,14 @@ pub trait GatewayFactory: Send + Sync {
         &self,
         instance: &BoundInstance,
     ) -> Result<Option<Vec<PodGateway>>, GatewayFactoryError>;
+}
+
+/// Where a governance reconcile records what it wrote, right after each
+/// write (a status patch): a pass that fails half-way must not find its
+/// own first writes unknown next time, and take them for a conflict.
+#[async_trait::async_trait]
+pub trait Ledger<T: Send + Sync>: Send + Sync {
+    async fn record(&self, written: &T) -> Result<(), String>;
 }
 
 /// The CRs bound to an instance, which hold its deletion.

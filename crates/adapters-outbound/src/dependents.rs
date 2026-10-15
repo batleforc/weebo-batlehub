@@ -1,13 +1,18 @@
 //! [`InstanceDependents`] over the kinds bound to a `BatleHubLocalInstance`:
-//! `BatleHubRegistry` (of any namespace: one may attach from another) and
-//! `BatleHubNamespaceClaim` (of the instance's namespace); the grants,
-//! policies and maintenances join it with the spec's M3.
+//! `BatleHubRegistry` (of any namespace: one may attach from another), and
+//! the kinds bound to an instance of their own namespace
+//! ([`LocalBound`]: claims, grants, policies, maintenances).
 
-use api::{NamespaceClaim, Registry};
+use std::fmt::Debug;
+
+use api::{NamespaceClaim, PackageGrant, PackagePolicy, Registry};
 use application::ports::{BoundInstance, InstanceDependents};
+use kube::Resource;
 use kube::api::{Api, ListParams};
 use kube::core::Selector;
 use kube::{Client, ResourceExt};
+use serde::de::DeserializeOwned;
+use weebo_kit_api::InstanceRef;
 
 pub struct ClusterDependents {
     client: Client,
@@ -50,17 +55,62 @@ pub fn binds(registry: &Registry, instance: &BoundInstance, default: bool) -> bo
     }
 }
 
-/// Whether `claim` is bound to `instance`, as [`binds`] for a registry: a
-/// claim's instance is always of its own namespace.
-pub fn claim_binds(claim: &NamespaceClaim, instance: &BoundInstance, default: bool) -> bool {
-    if let Some(recorded) = claim.status.as_ref().and_then(|s| s.instance.as_ref()) {
+/// A kind bound to an instance of its own namespace.
+pub trait LocalBound:
+    Resource<DynamicType = (), Scope = k8s_openapi::NamespaceResourceScope>
+    + Clone
+    + Debug
+    + DeserializeOwned
+    + Send
+    + Sync
+    + 'static
+{
+    const KIND: &'static str;
+    fn instance_ref(&self) -> Option<&InstanceRef>;
+    fn recorded(&self) -> Option<&BoundInstance>;
+}
+
+impl LocalBound for NamespaceClaim {
+    const KIND: &'static str = "BatleHubNamespaceClaim";
+    fn instance_ref(&self) -> Option<&InstanceRef> {
+        self.spec.instance_ref.as_ref()
+    }
+    fn recorded(&self) -> Option<&BoundInstance> {
+        self.status.as_ref().and_then(|s| s.instance.as_ref())
+    }
+}
+
+impl LocalBound for PackageGrant {
+    const KIND: &'static str = "BatleHubPackageGrant";
+    fn instance_ref(&self) -> Option<&InstanceRef> {
+        self.spec.instance_ref.as_ref()
+    }
+    fn recorded(&self) -> Option<&BoundInstance> {
+        self.status.as_ref().and_then(|s| s.instance.as_ref())
+    }
+}
+
+impl LocalBound for PackagePolicy {
+    const KIND: &'static str = "BatleHubPackagePolicy";
+    fn instance_ref(&self) -> Option<&InstanceRef> {
+        self.spec.instance_ref.as_ref()
+    }
+    fn recorded(&self) -> Option<&BoundInstance> {
+        self.status.as_ref().and_then(|s| s.instance.as_ref())
+    }
+}
+
+/// Whether `object` is bound to `instance`, as [`binds`] for a registry:
+/// its instance is always of its own namespace.
+pub fn local_binds<K: LocalBound>(object: &K, instance: &BoundInstance, default: bool) -> bool {
+    if let Some(recorded) = object.recorded() {
         return recorded == instance;
     }
-    let namespace = claim.namespace().unwrap_or_default();
+    let namespace = object.namespace().unwrap_or_default();
     if Some(namespace.as_str()) != instance.namespace.as_deref() {
         return false;
     }
-    match &claim.spec.instance_ref {
+    match object.instance_ref() {
         Some(r) => r.name == instance.name,
         None => default,
     }
@@ -74,21 +124,25 @@ impl ClusterDependents {
         }
     }
 
-    /// The claims of the instance's namespace bound to it.
-    async fn claims(&self, instance: &BoundInstance, default: bool) -> Result<Vec<String>, String> {
+    /// The `K`s of the instance's namespace bound to it.
+    async fn local<K: LocalBound>(
+        &self,
+        instance: &BoundInstance,
+        default: bool,
+    ) -> Result<Vec<String>, String> {
         let Some(namespace) = instance.namespace.as_deref() else {
             return Ok(Vec::new());
         };
-        let api: Api<NamespaceClaim> = Api::namespaced(self.client.clone(), namespace);
-        let claims = api
+        let api: Api<K> = Api::namespaced(self.client.clone(), namespace);
+        let objects = api
             .list(&self.params())
             .await
-            .map_err(|e| format!("listing BatleHubNamespaceClaims: {e}"))?
+            .map_err(|e| format!("listing {}s: {e}", K::KIND))?
             .items;
-        Ok(claims
+        Ok(objects
             .iter()
-            .filter(|c| claim_binds(c, instance, default))
-            .map(|c| format!("BatleHubNamespaceClaim/{namespace}/{}", c.name_any()))
+            .filter(|o| local_binds(*o, instance, default))
+            .map(|o| format!("{}/{namespace}/{}", K::KIND, o.name_any()))
             .collect())
     }
 }
@@ -120,7 +174,9 @@ impl InstanceDependents for ClusterDependents {
                 )
             })
             .collect();
-        dependents.extend(self.claims(instance, default).await?);
+        dependents.extend(self.local::<NamespaceClaim>(instance, default).await?);
+        dependents.extend(self.local::<PackageGrant>(instance, default).await?);
+        dependents.extend(self.local::<PackagePolicy>(instance, default).await?);
         Ok(dependents)
     }
 }
@@ -175,25 +231,25 @@ mod tests {
     fn a_claim_is_bound_in_its_namespace_only() {
         let hub = BoundInstance::local("team", "hub");
         let elsewhere = BoundInstance::local("infra", "hub");
-        assert!(claim_binds(&claim(None, Some(hub.clone())), &hub, false));
-        assert!(!claim_binds(
+        assert!(local_binds(&claim(None, Some(hub.clone())), &hub, false));
+        assert!(!local_binds(
             &claim(None, Some(hub.clone())),
             &elsewhere,
             true
         ));
-        assert!(claim_binds(
+        assert!(local_binds(
             &claim(Some(InstanceRef::named("hub")), None),
             &hub,
             false
         ));
-        assert!(!claim_binds(
+        assert!(!local_binds(
             &claim(Some(InstanceRef::named("hub")), None),
             &elsewhere,
             false
         ));
-        assert!(claim_binds(&claim(None, None), &hub, true));
-        assert!(!claim_binds(&claim(None, None), &hub, false));
-        assert!(!claim_binds(&claim(None, None), &elsewhere, true));
+        assert!(local_binds(&claim(None, None), &hub, true));
+        assert!(!local_binds(&claim(None, None), &hub, false));
+        assert!(!local_binds(&claim(None, None), &elsewhere, true));
     }
 
     #[test]

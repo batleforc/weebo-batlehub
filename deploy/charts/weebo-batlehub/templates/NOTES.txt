@@ -34,6 +34,10 @@
    of a registry to a group:
    https://batleforc.github.io/weebo-batlehub/docs/guides/team-namespaces
 
+   BatleHubPackageGrant and BatleHubPackagePolicy (`kubectl get bhpg,bhpp`)
+   write the grants and policies of a package or a version:
+   https://batleforc.github.io/weebo-batlehub/docs/guides/package-governance
+
 3. Creating a BatleHubLocalInstance sends a Secret of its namespace to the
    URL it names: grant the kind like you grant pods.
 

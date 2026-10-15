@@ -13,5 +13,15 @@
     "kind": "BatleHubNamespaceClaim",
     "singular": "batlehubnamespaceclaim",
     "scope": "Namespaced"
+  },
+  {
+    "kind": "BatleHubPackageGrant",
+    "singular": "batlehubpackagegrant",
+    "scope": "Namespaced"
+  },
+  {
+    "kind": "BatleHubPackagePolicy",
+    "singular": "batlehubpackagepolicy",
+    "scope": "Namespaced"
   }
 ]

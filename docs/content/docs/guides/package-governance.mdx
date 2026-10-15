@@ -1,0 +1,118 @@
+---
+title: Package grants and policies
+description: Who may do what on a package, its policy and the exemptions of a version, from Kubernetes.
+---
+
+BatleHub's access model has four tiers: the instance, the registry, the
+package and the version. The first two are configuration (`grants`,
+`registries[].grants`, see [Manage the configuration](/docs/guides/manage-config));
+the last two live in BatleHub's database, written through its admin API
+(the console, `batlehub admin grants`). Two kinds manage them from
+Kubernetes, on the `BatleHubLocalInstance` of their namespace
+(`spec.instanceRef` when there are several):
+
+- `BatleHubPackageGrant` (`bhpg`): the grants of a package or a version,
+  one per subject;
+- `BatleHubPackagePolicy` (`bhpp`): the policy of a package or a version,
+  and a version's exemptions from its gates.
+
+## Grants
+
+```yaml
+apiVersion: batlehub.weebo.io/v1alpha1
+kind: BatleHubPackageGrant
+metadata:
+  name: billing-readers
+  namespace: infra
+spec:
+  registry: npm
+  package: "@acme/billing"
+  # version: "1.4.2"         # one version; unset, the package
+  grants:
+    - subject: group:oidc:finance     # user:…, group:…, role:…, *
+      actions: [releases:read, releases:list]
+    - subject: user:ci-publisher
+      actions: ["releases:*"]
+```
+
+BatleHub expands a pattern when it stores the grant: `status.applied`
+records, per subject, the actions asked and the ones stored. A grant that
+is legal but probably unintended (already held from a broader tier, a
+yanked version) is written, and reported as the `SuspiciousGrant`
+advisory.
+
+## Policies and exemptions
+
+```yaml
+apiVersion: batlehub.weebo.io/v1alpha1
+kind: BatleHubPackagePolicy
+metadata:
+  name: billing-1-4-2
+  namespace: infra
+spec:
+  registry: npm
+  package: "@acme/billing"
+  version: "1.4.2"
+  policy:                       # BatleHub's PolicyDto, snake_case keys
+    visibility: team
+    rules:
+      - gate: license_gate
+        settings: { allow: [MIT, Apache-2.0] }
+  exemptions:                   # versions only
+    - gate: cve_gate
+      exemptUntil: "2026-12-31T00:00:00Z"
+      reason: CVE-2026-1234 patched downstream
+```
+
+`policy` replaces the node's policy as a whole; a key left out inherits
+from the tier above. A gate can't be both set in `policy.rules` and
+exempted. An exemption whose `exemptUntil` is past is reported
+(`ExemptionExpired`), never written: BatleHub refuses a past date.
+
+No role carries `gates:exempt`, admin included: the operator's identity
+needs a grant of it on the version or its package, or the exemption is
+`ExemptionNotPermitted` (the message names the subject). A
+`BatleHubPackageGrant` gives it:
+
+```yaml
+  grants:
+    - subject: user:weebo-batlehub-operator   # the user of the operator's token
+      actions: [gates:exempt]
+```
+
+## What the operator does
+
+- **It only touches what it wrote.** A subject already holding a grant on
+  that node, or a policy or exemption already there, that this object
+  didn't write is a conflict (`GrantConflict`, `PolicyConflict`), never
+  taken over: the message says what is in place. A subject that owns the
+  package is `GrantHeldByOwnership`. The webhook refuses a second object
+  writing the same subject (grants) or the same node (policies).
+- **Each write is recorded at once** in the status: a pass that fails
+  half-way (one subject refused, the instance gone) never takes its own
+  first writes for someone else's on the next pass.
+- **Drift is rewritten.** Every pass (at least every 5 minutes) reads the
+  node again. A grant removed or changed elsewhere is written again. A
+  policy can't be compared key by key (BatleHub fills its defaults when it
+  reads it back): the operator keeps the hash of what it read right after
+  writing (`status.observedPolicyHash`), and writes it again when a later
+  read hashes otherwise. Exemptions are carried over when the policy is
+  rewritten or cleared.
+- A registry the instance doesn't serve is `RemoteNotFound`; a refusal of
+  BatleHub (an unknown action, a version that doesn't exist) is
+  `RemoteRejected`; no grant storage is `GrantStorageUnavailable`.
+
+The coordinate (`registry`, `package`, `version`, `instanceRef`) can't
+change: create another object.
+
+## Deletion
+
+Deleting the object revokes its grants, or clears its policy and
+exemptions (`deletionPolicy: Delete`, the default), with a `Revoked`
+Event; what others wrote stays. `deletionPolicy: Orphan` leaves everything
+on the instance.
+
+An instance can't be deleted while these objects are bound to it
+(`InstanceInUse`). When the instance is unreachable, the finalizer waits;
+annotate the object `batlehub.weebo.io/force-orphan: "true"` to drop it
+without removing anything.

@@ -4,6 +4,8 @@
     "index",
     "batlehublocalinstance",
     "batlehubregistry",
-    "batlehubnamespaceclaim"
+    "batlehubnamespaceclaim",
+    "batlehubpackagegrant",
+    "batlehubpackagepolicy"
   ]
 }
