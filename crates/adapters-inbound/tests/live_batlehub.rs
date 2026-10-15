@@ -12,11 +12,12 @@ use adapters_outbound::{
     LocalInstanceDirectory,
 };
 use api::local_instance::{ExternalInstance, LocalInstanceSpec, LocalSecretKeyRef};
+use api::maintenance::{LastRun, MaintenanceAction, MaintenanceParams, MaintenanceSpec, RunState};
 use api::namespace_claim::{DeletionPolicy, NamespaceClaimSpec};
 use api::package_grant::{PackageGrantSpec, SubjectGrant};
 use api::package_policy::{Gate, GateExemption, PackagePolicySpec};
 use api::registry::RegistrySpec;
-use api::{LocalInstance, NamespaceClaim, PackageGrant, PackagePolicy, Registry};
+use api::{LocalInstance, Maintenance, NamespaceClaim, PackageGrant, PackagePolicy, Registry};
 use application::ports::{AdminGateway, AdminRequest, Method, PackageNode};
 use k8s_openapi::api::core::v1::{Namespace, Secret};
 use kube::Client;
@@ -238,7 +239,8 @@ async fn a_real_instance_runs_the_configuration_and_registries_pushed() {
         ctx.clone(),
     ));
     tokio::spawn(controller::package_grant::run(client.clone(), ctx.clone()));
-    tokio::spawn(controller::package_policy::run(client.clone(), ctx));
+    tokio::spawn(controller::package_policy::run(client.clone(), ctx.clone()));
+    tokio::spawn(controller::maintenance::run(client.clone(), ctx));
 
     let api: Api<LocalInstance> = Api::namespaced(client.clone(), NS);
     let until = |want: &'static str| {
@@ -341,6 +343,7 @@ async fn a_real_instance_runs_the_configuration_and_registries_pushed() {
     );
 
     governance(&client, &batlehub).await;
+    maintenance(&client, &batlehub).await;
 }
 
 /// `name`'s `Ready` reason, once it is `want`; its message.
@@ -365,6 +368,12 @@ trait HasConditions {
 }
 
 impl HasConditions for PackageGrant {
+    fn conditions(&self) -> Option<&Vec<api::status::Condition>> {
+        self.status.as_ref().map(|s| &s.conditions)
+    }
+}
+
+impl HasConditions for Maintenance {
     fn conditions(&self) -> Option<&Vec<api::status::Condition>> {
         self.status.as_ref().map(|s| &s.conditions)
     }
@@ -442,6 +451,7 @@ async fn governance(client: &Client, batlehub: &adapters_outbound::HttpAdminGate
             .to_vec(),
             query: vec![],
             body: Some(json!({"principal_type": "user", "principal_id": "carol"})),
+            timeout: None,
         })
         .await;
 
@@ -586,4 +596,200 @@ async fn governance(client: &Client, batlehub: &adapters_outbound::HttpAdminGate
         rows.iter()
             .any(|r| r.subject == "user:carol" && r.from_ownership)
     );
+}
+
+fn maintenance_of(name: &str, action: MaintenanceAction, params: MaintenanceParams) -> Maintenance {
+    Maintenance::new(
+        name,
+        MaintenanceSpec {
+            instance_ref: None,
+            action,
+            params,
+            schedule: None,
+            suspend: false,
+            ttl_seconds_after_finished: None,
+            timeout_seconds: 60,
+        },
+    )
+}
+
+/// The banner BatleHub shows, if any.
+async fn banner(batlehub: &adapters_outbound::HttpAdminGateway) -> serde_json::Value {
+    batlehub
+        .call(&AdminRequest {
+            method: Method::Get,
+            path: ["api", "v1", "banner"].map(String::from).to_vec(),
+            query: vec![],
+            body: None,
+            timeout: None,
+        })
+        .await
+        .unwrap()
+}
+
+/// Maintenances on the instance, through their controller: actions that
+/// succeed, one BatleHub refuses (a failed run, counted), and a run left
+/// `Running` by an operator killed during it — closed, never replayed.
+async fn maintenance(client: &Client, batlehub: &adapters_outbound::HttpAdminGateway) {
+    let maintenances: Api<Maintenance> = Api::namespaced(client.clone(), NS);
+    let pp = PostParams::default();
+    let registry = |extra: MaintenanceParams| MaintenanceParams {
+        registry: Some("live-npm".into()),
+        ..extra
+    };
+
+    maintenances
+        .create(
+            &pp,
+            &maintenance_of("health", MaintenanceAction::HealthCheck, Default::default()),
+        )
+        .await
+        .unwrap();
+    reason_of(&maintenances, "health", "Reconciled").await;
+    let result = maintenances
+        .get("health")
+        .await
+        .unwrap()
+        .status
+        .unwrap()
+        .last_run
+        .unwrap()
+        .result
+        .unwrap();
+    assert_eq!(result["healthz"]["db"], "ok", "{result}");
+    assert!(
+        result["health"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["registry"] == "live-npm"),
+        "{result}"
+    );
+
+    maintenances
+        .create(
+            &pp,
+            &maintenance_of(
+                "invalidate",
+                MaintenanceAction::PackageInvalidate,
+                registry(MaintenanceParams {
+                    package: Some("left-pad".into()),
+                    version: Some("1.3.0".into()),
+                    ..Default::default()
+                }),
+            ),
+        )
+        .await
+        .unwrap();
+    let message = reason_of(&maintenances, "invalidate", "Reconciled").await;
+    assert!(message.contains("success=true"), "{message}");
+
+    // A dry run BatleHub refuses (no eviction on this registry): a failed
+    // run, with BatleHub's reason.
+    maintenances
+        .create(
+            &pp,
+            &maintenance_of(
+                "evict",
+                MaintenanceAction::CacheEvict,
+                registry(Default::default()),
+            ),
+        )
+        .await
+        .unwrap();
+    let message = reason_of(&maintenances, "evict", "MaintenanceFailed").await;
+    assert!(message.contains("eviction not configured"), "{message}");
+    let status = maintenances.get("evict").await.unwrap().status.unwrap();
+    assert_eq!((status.run_count, status.failure_count), (1, 1));
+
+    // A banner set then cleared.
+    let mut set = maintenance_of(
+        "banner",
+        MaintenanceAction::BannerSet,
+        MaintenanceParams {
+            message: Some("maintenance tonight".into()),
+            level: Some(api::maintenance::BannerLevel::Warning),
+            ..Default::default()
+        },
+    );
+    set.spec.ttl_seconds_after_finished = Some(0);
+    maintenances.create(&pp, &set).await.unwrap();
+    gone(&maintenances, "banner").await;
+    assert_eq!(banner(batlehub).await["message"], "maintenance tonight");
+    maintenances
+        .create(
+            &pp,
+            &maintenance_of(
+                "unbanner",
+                MaintenanceAction::BannerClear,
+                Default::default(),
+            ),
+        )
+        .await
+        .unwrap();
+    reason_of(&maintenances, "unbanner", "Reconciled").await;
+    assert!(
+        banner(batlehub)
+            .await
+            .get("message")
+            .is_none_or(|m| m.is_null())
+    );
+
+    // A run left `Running` (the operator killed during it): the next pass
+    // closes it, the banner is never set.
+    let mut armed = maintenance_of(
+        "killed",
+        MaintenanceAction::BannerSet,
+        MaintenanceParams {
+            message: Some("replayed".into()),
+            level: Some(api::maintenance::BannerLevel::Info),
+            ..Default::default()
+        },
+    );
+    armed.spec.schedule = Some("0 0 1 1 *".into());
+    maintenances.create(&pp, &armed).await.unwrap();
+    reason_of(&maintenances, "killed", "Reconciled").await;
+    let read = maintenances.get("killed").await.unwrap();
+    let running = LastRun {
+        state: RunState::Running,
+        start_time: k8s_openapi::jiff::Timestamp::now().to_string(),
+        completion_time: None,
+        generation: 1,
+        reason: None,
+        message: None,
+        result: None,
+    };
+    assert!(
+        controller::maintenance::record_start(
+            &maintenances,
+            "killed",
+            &read.metadata.resource_version.unwrap(),
+            &running,
+            None,
+        )
+        .await
+        .unwrap()
+    );
+    maintenances
+        .patch(
+            "killed",
+            &PatchParams::default(),
+            &Patch::Merge(json!({"metadata": {"annotations": {"touched": "1"}}})),
+        )
+        .await
+        .unwrap();
+    reason_of(&maintenances, "killed", "MaintenanceInterrupted").await;
+    assert!(
+        banner(batlehub)
+            .await
+            .get("message")
+            .is_none_or(|m| m.is_null())
+    );
+
+    for name in ["health", "invalidate", "evict", "unbanner", "killed"] {
+        maintenances
+            .delete(name, &DeleteParams::default())
+            .await
+            .unwrap();
+    }
 }

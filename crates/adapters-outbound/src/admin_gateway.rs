@@ -150,9 +150,24 @@ impl HttpAdminGateway {
         query: &[(&str, &str)],
         body: Option<&Value>,
     ) -> Result<(StatusCode, String), GatewayError> {
+        self.raw_within(method, segments, query, body, None).await
+    }
+
+    /// [`Self::raw`], `timeout` replacing the client's.
+    async fn raw_within(
+        &self,
+        method: reqwest::Method,
+        segments: &[&str],
+        query: &[(&str, &str)],
+        body: Option<&Value>,
+        timeout: Option<Duration>,
+    ) -> Result<(StatusCode, String), GatewayError> {
         let mut request = self
             .authorized(self.config.client.request(method, self.url(segments)))
             .query(query);
+        if let Some(timeout) = timeout {
+            request = request.timeout(timeout);
+        }
         if let Some(body) = body {
             request = request.json(body);
         }
@@ -741,7 +756,13 @@ impl AdminGateway for HttpAdminGateway {
             .collect();
         let endpoint = format!("{} /{}", method, request.path.join("/"));
         let (status, body) = self
-            .raw(method, &segments, &query, request.body.as_ref())
+            .raw_within(
+                method,
+                &segments,
+                &query,
+                request.body.as_ref(),
+                request.timeout,
+            )
             .await?;
         match status {
             status if status.is_success() => Ok(if body.trim().is_empty() {

@@ -14,6 +14,7 @@ dependencies = [
  "domain",
  "k8s-openapi",
  "kube",
+ "opentelemetry",
  "serde",
  "serde_json",
  "testkit",

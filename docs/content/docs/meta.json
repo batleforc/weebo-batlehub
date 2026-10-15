@@ -8,6 +8,7 @@
     "guides/manage-config",
     "guides/team-namespaces",
     "guides/package-governance",
+    "guides/maintenance",
     "---Reference---",
     "...crds",
     "reference"

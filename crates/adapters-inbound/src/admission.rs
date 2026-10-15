@@ -21,10 +21,12 @@
 //! - `BatleHubPackagePolicy`: a node another policy of the namespace
 //!   already writes (`PolicyConflict`), a gate both set in `policy.rules`
 //!   and exempted (`InvalidSpec`).
+//! - `BatleHubMaintenance`: a `schedule` or a `params.before` that can't
+//!   be read (`InvalidSpec`).
 
 use std::sync::Arc;
 
-use api::{LocalInstance, PackageGrant, PackagePolicy, Registry};
+use api::{LocalInstance, Maintenance, PackageGrant, PackagePolicy, Registry};
 use application::ports::{ConfigParser, ConfigSources, SourceError};
 use application::use_cases::render_config::{base_layers, render_config};
 use domain::error::ReasonCode;
@@ -249,6 +251,20 @@ impl BatleHubAdmission {
     }
 }
 
+fn maintenance(maintenance: Maintenance) -> Result<(), Denial<ReasonCode>> {
+    let invalid = |why: String| Denial::new(ReasonCode::InvalidSpec, why);
+    if let Some(schedule) = &maintenance.spec.schedule {
+        application::cron::Schedule::parse(schedule)
+            .map_err(|why| invalid(format!("spec.schedule: {why}")))?;
+    }
+    if let Some(before) = &maintenance.spec.params.before {
+        before
+            .parse::<k8s_openapi::jiff::Timestamp>()
+            .map_err(|e| invalid(format!("spec.params.before: {e}")))?;
+    }
+    Ok(())
+}
+
 #[async_trait::async_trait]
 impl Admission for BatleHubAdmission {
     type Reason = ReasonCode;
@@ -270,6 +286,7 @@ impl Admission for BatleHubAdmission {
                     .await
             }
             "BatleHubPackageGrant" => self.grant(namespace, typed(object).map_err(invalid)?).await,
+            "BatleHubMaintenance" => maintenance(typed(object).map_err(invalid)?),
             "BatleHubPackagePolicy" => {
                 self.policy(namespace, typed(object).map_err(invalid)?)
                     .await
@@ -335,6 +352,44 @@ mod tests {
                 deletion_policy: Default::default(),
             },
         )
+    }
+
+    #[tokio::test]
+    async fn a_maintenance_is_refused_for_a_schedule_or_date_it_cant_read() {
+        let (_, admission) = admission();
+        let decide = async |schedule: Option<&str>, before: Option<&str>| {
+            let m = Maintenance::new(
+                "m",
+                api::maintenance::MaintenanceSpec {
+                    instance_ref: None,
+                    action: api::maintenance::MaintenanceAction::AuditLogPurge,
+                    params: api::maintenance::MaintenanceParams {
+                        before: before.map(String::from),
+                        ..Default::default()
+                    },
+                    schedule: schedule.map(String::from),
+                    suspend: false,
+                    ttl_seconds_after_finished: None,
+                    timeout_seconds: 600,
+                },
+            );
+            admission
+                .admit("BatleHubMaintenance", "team", &object(&m))
+                .await
+                .map_err(|d| d.reason)
+        };
+        assert_eq!(
+            decide(Some("0 3 * * *"), Some("2026-01-01T00:00:00Z")).await,
+            Ok(())
+        );
+        assert_eq!(
+            decide(Some("0 3 * *"), None).await,
+            Err(ReasonCode::InvalidSpec)
+        );
+        assert_eq!(
+            decide(None, Some("yesterday")).await,
+            Err(ReasonCode::InvalidSpec)
+        );
     }
 
     #[tokio::test]

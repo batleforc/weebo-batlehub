@@ -38,6 +38,7 @@ pub use weebo_kit_runtime::Shutdown;
 pub use weebo_kit_runtime::controller::{controller, drive};
 
 pub mod local_instance;
+pub mod maintenance;
 pub mod namespace_claim;
 pub mod package_grant;
 pub mod package_policy;
@@ -215,6 +216,19 @@ impl HasStatus for api::PackageGrant {
 }
 
 impl HasStatus for api::PackagePolicy {
+    fn conditions(&self) -> &[Condition] {
+        self.status
+            .as_ref()
+            .map(|s| s.conditions.as_slice())
+            .unwrap_or_default()
+    }
+
+    fn bound_instance(&self) -> Option<&BoundInstance> {
+        self.status.as_ref().and_then(|s| s.instance.as_ref())
+    }
+}
+
+impl HasStatus for api::Maintenance {
     fn conditions(&self) -> &[Condition] {
         self.status
             .as_ref()

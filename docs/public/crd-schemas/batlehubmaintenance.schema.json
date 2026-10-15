@@ -1,0 +1,334 @@
+{
+  "apiVersion": "batlehub.weebo.io/v1alpha1",
+  "kind": "BatleHubMaintenance",
+  "scope": "Namespaced",
+  "description": "An administrative action against the instance of this namespace, run\nonce or on a schedule: warming or clearing a cache, a retention pass, a\nconfiguration reload, blocking an IP…\n\nThe operator is the scheduler (no Job, no pod): it calls BatleHub's\nadmin API at the time due, at most once per run — a run interrupted by\na restart of the operator is closed as failed, never replayed. Actions\nthat respect `params.dryRun` only report unless it is set to `false`.",
+  "properties": {
+    "action": {
+      "description": "What to run (the guide lists each action's endpoint and params).",
+      "enum": [
+        "configReload",
+        "configValidate",
+        "configApplyPending",
+        "configDiscardPending",
+        "cacheWarm",
+        "cacheClearMetadata",
+        "cacheClearArtifacts",
+        "cacheEvict",
+        "cacheCoherence",
+        "packageInvalidate",
+        "exploreInvalidate",
+        "retentionRun",
+        "tombstonesCompact",
+        "vulnerabilityRescan",
+        "verdictBackfill",
+        "upstreamRecheck",
+        "auditLogPurge",
+        "airGapMissingPurge",
+        "releaseImport",
+        "ipBlock",
+        "ipUnblock",
+        "userBlock",
+        "userUnblock",
+        "packageBlock",
+        "packageUnblock",
+        "quotaReset",
+        "bannerSet",
+        "bannerClear",
+        "healthCheck"
+      ],
+      "type": "string"
+    },
+    "instanceRef": {
+      "description": "The `BatleHubLocalInstance` of this namespace to act on; unset, the\nonly one of this namespace. Immutable.",
+      "properties": {
+        "kind": {
+          "description": "`LocalInstance`, the only kind (may be left out).",
+          "enum": [
+            "LocalInstance"
+          ],
+          "type": "string"
+        },
+        "name": {
+          "description": "`metadata.name` of the `BatleHubLocalInstance`.",
+          "minLength": 1,
+          "type": "string"
+        },
+        "namespace": {
+          "description": "Not allowed: the instance is in this object's namespace.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object",
+      "x-kubernetes-validations": [
+        {
+          "message": "instanceRef is immutable",
+          "rule": "self == oldSelf"
+        },
+        {
+          "message": "the instance must be in this object's namespace",
+          "rule": "!has(self.__namespace__)"
+        }
+      ]
+    },
+    "params": {
+      "default": {},
+      "description": "The action's parameters: which ones an action needs is checked\nwhen the object is written.",
+      "properties": {
+        "artifact": {
+          "nullable": true,
+          "type": "string"
+        },
+        "before": {
+          "description": "RFC 3339: purge what is older.",
+          "format": "date-time",
+          "nullable": true,
+          "type": "string"
+        },
+        "dryRun": {
+          "description": "Report only (default `true`) for the actions that respect it.",
+          "nullable": true,
+          "type": "boolean"
+        },
+        "durationSeconds": {
+          "description": "`ipBlock`: how long; unset, until unblocked.",
+          "format": "int64",
+          "minimum": 1,
+          "nullable": true,
+          "type": "integer"
+        },
+        "ip": {
+          "minLength": 1,
+          "nullable": true,
+          "type": "string"
+        },
+        "level": {
+          "description": "`bannerSet`.",
+          "enum": [
+            "info",
+            "warning",
+            "error",
+            null
+          ],
+          "nullable": true,
+          "type": "string"
+        },
+        "message": {
+          "description": "`bannerSet`.",
+          "maxLength": 2048,
+          "minLength": 1,
+          "nullable": true,
+          "type": "string"
+        },
+        "olderThanDays": {
+          "description": "Purge what is older than this many days (instead of `before`).",
+          "format": "int64",
+          "minimum": 1,
+          "nullable": true,
+          "type": "integer"
+        },
+        "package": {
+          "maxLength": 1024,
+          "minLength": 1,
+          "nullable": true,
+          "type": "string"
+        },
+        "packages": {
+          "description": "Packages to warm.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "path": {
+          "nullable": true,
+          "type": "string"
+        },
+        "paths": {
+          "description": "Paths to warm (registries addressed by path).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "reason": {
+          "nullable": true,
+          "type": "string"
+        },
+        "registry": {
+          "description": "A registry's name on the instance.",
+          "maxLength": 253,
+          "minLength": 1,
+          "nullable": true,
+          "type": "string"
+        },
+        "repo": {
+          "description": "`releaseImport`: the repository.",
+          "nullable": true,
+          "type": "string"
+        },
+        "state": {
+          "description": "`vulnerabilityRescan`, `verdictBackfill`: only the verdicts in this\nstate.",
+          "enum": [
+            "allowed",
+            "warned",
+            "quarantined",
+            "denied",
+            null
+          ],
+          "nullable": true,
+          "type": "string"
+        },
+        "tag": {
+          "description": "`releaseImport`: the release tag.",
+          "nullable": true,
+          "type": "string"
+        },
+        "user": {
+          "description": "A user id, as the instance stores it (`oidc:alice`).",
+          "minLength": 1,
+          "nullable": true,
+          "type": "string"
+        },
+        "version": {
+          "maxLength": 256,
+          "minLength": 1,
+          "nullable": true,
+          "type": "string"
+        },
+        "versions": {
+          "description": "`cacheWarm`: how many of the latest versions.",
+          "format": "int64",
+          "minimum": 1,
+          "nullable": true,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "schedule": {
+      "description": "A 5-field cron expression (minute hour day-of-month month\nday-of-week, UTC; day-of-week 0-7 from Sunday). Unset: one run.",
+      "maxLength": 128,
+      "minLength": 1,
+      "nullable": true,
+      "type": "string"
+    },
+    "suspend": {
+      "default": false,
+      "description": "Pauses the schedule.",
+      "type": "boolean"
+    },
+    "timeoutSeconds": {
+      "default": 600,
+      "description": "Bounds the run, and the request to BatleHub.",
+      "format": "int64",
+      "maximum": 86400,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "ttlSecondsAfterFinished": {
+      "description": "Deletes a single run's object this long after it finished.",
+      "format": "int64",
+      "minimum": 0,
+      "nullable": true,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "action"
+  ],
+  "type": "object",
+  "x-kubernetes-validations": [
+    {
+      "message": "cacheWarm needs params registry",
+      "rule": "self.action != 'cacheWarm' || (has(self.params) && has(self.params.registry))"
+    },
+    {
+      "message": "cacheClearMetadata needs params registry",
+      "rule": "self.action != 'cacheClearMetadata' || (has(self.params) && has(self.params.registry))"
+    },
+    {
+      "message": "cacheClearArtifacts needs params registry",
+      "rule": "self.action != 'cacheClearArtifacts' || (has(self.params) && has(self.params.registry))"
+    },
+    {
+      "message": "cacheEvict needs params registry",
+      "rule": "self.action != 'cacheEvict' || (has(self.params) && has(self.params.registry))"
+    },
+    {
+      "message": "cacheCoherence needs params registry",
+      "rule": "self.action != 'cacheCoherence' || (has(self.params) && has(self.params.registry))"
+    },
+    {
+      "message": "packageInvalidate needs params registry, package, version",
+      "rule": "self.action != 'packageInvalidate' || (has(self.params) && has(self.params.registry) && has(self.params.package) && has(self.params.version))"
+    },
+    {
+      "message": "retentionRun needs params registry",
+      "rule": "self.action != 'retentionRun' || (has(self.params) && has(self.params.registry))"
+    },
+    {
+      "message": "tombstonesCompact needs params registry",
+      "rule": "self.action != 'tombstonesCompact' || (has(self.params) && has(self.params.registry))"
+    },
+    {
+      "message": "vulnerabilityRescan needs params registry",
+      "rule": "self.action != 'vulnerabilityRescan' || (has(self.params) && has(self.params.registry))"
+    },
+    {
+      "message": "verdictBackfill needs params registry",
+      "rule": "self.action != 'verdictBackfill' || (has(self.params) && has(self.params.registry))"
+    },
+    {
+      "message": "upstreamRecheck needs params registry, package",
+      "rule": "self.action != 'upstreamRecheck' || (has(self.params) && has(self.params.registry) && has(self.params.package))"
+    },
+    {
+      "message": "auditLogPurge needs params one of before, olderThanDays",
+      "rule": "self.action != 'auditLogPurge' || (has(self.params) && (has(self.params.before) || has(self.params.olderThanDays)))"
+    },
+    {
+      "message": "releaseImport needs params registry",
+      "rule": "self.action != 'releaseImport' || (has(self.params) && has(self.params.registry))"
+    },
+    {
+      "message": "ipBlock needs params ip",
+      "rule": "self.action != 'ipBlock' || (has(self.params) && has(self.params.ip))"
+    },
+    {
+      "message": "ipUnblock needs params ip",
+      "rule": "self.action != 'ipUnblock' || (has(self.params) && has(self.params.ip))"
+    },
+    {
+      "message": "userBlock needs params user",
+      "rule": "self.action != 'userBlock' || (has(self.params) && has(self.params.user))"
+    },
+    {
+      "message": "userUnblock needs params user",
+      "rule": "self.action != 'userUnblock' || (has(self.params) && has(self.params.user))"
+    },
+    {
+      "message": "packageBlock needs params registry, package, version, reason",
+      "rule": "self.action != 'packageBlock' || (has(self.params) && has(self.params.registry) && has(self.params.package) && has(self.params.version) && has(self.params.reason))"
+    },
+    {
+      "message": "packageUnblock needs params registry, package, version",
+      "rule": "self.action != 'packageUnblock' || (has(self.params) && has(self.params.registry) && has(self.params.package) && has(self.params.version))"
+    },
+    {
+      "message": "quotaReset needs params registry, user",
+      "rule": "self.action != 'quotaReset' || (has(self.params) && has(self.params.registry) && has(self.params.user))"
+    },
+    {
+      "message": "bannerSet needs params message, level",
+      "rule": "self.action != 'bannerSet' || (has(self.params) && has(self.params.message) && has(self.params.level))"
+    },
+    {
+      "message": "instanceRef is immutable",
+      "rule": "has(self.instanceRef) == has(oldSelf.instanceRef)"
+    }
+  ]
+}

@@ -14,6 +14,7 @@ export default defineConfig({
     "BatleHubNamespaceClaim",
     "BatleHubPackageGrant",
     "BatleHubPackagePolicy",
+    "BatleHubMaintenance",
   ],
   // The guide that explains each kind, linked from its reference page.
   guides: {
@@ -22,6 +23,7 @@ export default defineConfig({
     BatleHubNamespaceClaim: ["Team namespaces", "/docs/guides/team-namespaces"],
     BatleHubPackageGrant: ["Package grants and policies", "/docs/guides/package-governance"],
     BatleHubPackagePolicy: ["Package grants and policies", "/docs/guides/package-governance"],
+    BatleHubMaintenance: ["Maintenance", "/docs/guides/maintenance"],
   },
   // A minimal, realistic `spec` per kind, checked against the schema (every
   // required field present, every key a real field): a renamed field fails
@@ -52,6 +54,11 @@ export default defineConfig({
       package: "@acme/billing",
       version: "1.4.2",
       policy: { visibility: "team" },
+    },
+    BatleHubMaintenance: {
+      action: "retentionRun",
+      params: { registry: "npm", dryRun: false },
+      schedule: "30 3 * * 0",
     },
   },
   // The operator reference pages (content/docs/reference/), generated from

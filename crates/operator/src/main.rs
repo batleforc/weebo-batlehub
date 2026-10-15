@@ -13,7 +13,7 @@ use adapters_outbound::{
     BatleHubConfigParser, ClusterDependents, HttpGatewayFactory, KubeConfigSources,
     LocalInstanceDirectory,
 };
-use api::{LocalInstance, NamespaceClaim, PackageGrant, PackagePolicy, Registry};
+use api::{LocalInstance, Maintenance, NamespaceClaim, PackageGrant, PackagePolicy, Registry};
 use futures::StreamExt;
 use kube::api::Api;
 use kube::runtime::events::{Recorder, Reporter};
@@ -104,6 +104,7 @@ async fn run(telemetry: &telemetry::Telemetry) -> anyhow::Result<()> {
     scope.ensure::<NamespaceClaim>()?;
     scope.ensure::<PackageGrant>()?;
     scope.ensure::<PackagePolicy>()?;
+    scope.ensure::<Maintenance>()?;
     tracing::info!(
         namespace = ?scope.watched_namespace(),
         selector = ?scope.selector(),
@@ -198,6 +199,7 @@ async fn run(telemetry: &telemetry::Telemetry) -> anyhow::Result<()> {
         controller::namespace_claim::run(client.clone(), ctx.clone()),
         controller::package_grant::run(client.clone(), ctx.clone()),
         controller::package_policy::run(client.clone(), ctx.clone()),
+        controller::maintenance::run(client.clone(), ctx.clone()),
     );
     // Every controller returns once the shutdown signal arrived and its
     // in-flight reconciles finished: hand the lease over right away

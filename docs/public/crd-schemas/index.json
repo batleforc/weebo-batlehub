@@ -23,5 +23,10 @@
     "kind": "BatleHubPackagePolicy",
     "singular": "batlehubpackagepolicy",
     "scope": "Namespaced"
+  },
+  {
+    "kind": "BatleHubMaintenance",
+    "singular": "batlehubmaintenance",
+    "scope": "Namespaced"
   }
 ]

@@ -1,0 +1,106 @@
+---
+title: Maintenance
+description: Run an admin action against an instance, once or on a schedule, at most once per run.
+---
+
+A `BatleHubMaintenance` (`bhm`) runs one admin action of BatleHub against
+the `BatleHubLocalInstance` of its namespace (`spec.instanceRef` when there
+are several): warm or clear a cache, a retention pass, a configuration
+reload, block an IP, set a banner…
+
+```yaml
+apiVersion: batlehub.weebo.io/v1alpha1
+kind: BatleHubMaintenance
+metadata:
+  name: npm-retention
+  namespace: infra
+spec:
+  action: retentionRun
+  params:
+    registry: npm
+    dryRun: false           # actions that respect it only report by default
+  schedule: "30 3 * * 0"    # UTC; unset: one run
+  timeoutSeconds: 1800
+```
+
+`kubectl get bhm` shows the action, the schedule, the last run's state,
+the run count and the next run.
+
+## Runs
+
+- **The operator is the scheduler**: no Job, no pod. A schedule is a
+  5-field cron expression (minute, hour, day of month, month, day of week
+  0-7 from Sunday), in UTC; when both day fields are set, a day matching
+  either runs. Runs missed while the operator was down make one run, not
+  one per slot. `suspend: true` pauses the schedule.
+- **Without a schedule**, the action runs once. A new `spec` (a new
+  `metadata.generation`) is a new run; so is a new value of the
+  `batlehub.weebo.io/run-now` annotation, on any maintenance:
+
+  ```bash
+  kubectl -n infra annotate bhm npm-retention batlehub.weebo.io/run-now="$(date +%s)" --overwrite
+  ```
+
+  `ttlSecondsAfterFinished` deletes a single run's object that long after
+  it finished.
+- **At most once.** The run is recorded as `Running` before the instance
+  is called, by a status patch that the API server refuses if the object
+  changed since it was read: two passes can't both start it. A run found
+  still `Running` (the operator stopped during it) is closed as failed
+  (`MaintenanceInterrupted`), never replayed: an import or a purge must
+  not run twice behind your back. A failed run isn't retried either; the
+  next one comes from the schedule, `run-now` or a new spec.
+- **Dry run by default**: an action that respects `params.dryRun`
+  (`cacheEvict`, `cacheCoherence`, `retentionRun`, `tombstonesCompact`)
+  only reports unless it is set to `false`.
+
+`status.lastRun` keeps the run's state, its start and end, BatleHub's
+answer (`result`, replaced by a summary beyond 32 KiB) and its scalar
+fields (`message`). `Ready` sums it up: `True` when the last run succeeded
+or the schedule is armed, `False` with `MaintenanceFailed`,
+`MaintenanceTimeout` (past `timeoutSeconds`, 600 by default) or
+`MaintenanceInterrupted`. The metric
+`weebo_batlehub_maintenance_runs_total{action,result}` counts them.
+
+## Actions
+
+Paths are under `/api/v1/admin` of the instance. The CRD refuses an
+action without the params it needs.
+
+| Action | Call | Params |
+| --- | --- | --- |
+| `configReload` | `POST config/reload`, on each pod with `external.podSelector`; on an instance holding a configuration (`reload.strategy: Manual`), approves the held one instead | |
+| `configValidate` | `POST config/validate` of the configuration the operator renders (`manageConfig`), or of the instance's own file | |
+| `configApplyPending` | `POST config/pending/apply`: an external instance **without** `manageConfig` only | |
+| `configDiscardPending` | `DELETE config/pending`, on each pod with a `podSelector` | |
+| `cacheWarm` | `POST registries/{registry}/warm` | `registry`; `package`/`packages`, `path`/`paths`, `versions` |
+| `cacheClearMetadata` | `POST registries/{registry}/clear-cache` | `registry` |
+| `cacheClearArtifacts` | `DELETE registries/{registry}/cache` | `registry`; `package`, `version`, `path` |
+| `cacheEvict` | `POST registries/{registry}/evict` | `registry`, `dryRun` |
+| `cacheCoherence` | `POST registries/{registry}/coherence` | `registry`, `dryRun` |
+| `packageInvalidate` | `POST packages/invalidate` | `registry`, `package`, `version`; `artifact` |
+| `exploreInvalidate` | `POST explore/invalidate` | `registry` (optional) |
+| `retentionRun` | `POST registries/{registry}/retention` | `registry`, `dryRun` |
+| `tombstonesCompact` | `POST registries/{registry}/tombstones/compact` | `registry`, `dryRun` |
+| `vulnerabilityRescan` | `POST verdicts/rescan` | `registry`; `state` |
+| `verdictBackfill` | `POST verdicts/backfill` | `registry`; `state` |
+| `upstreamRecheck` | `POST upstream/recheck` | `registry`, `package`; `version` |
+| `auditLogPurge` | `DELETE audit-log?before=` | `before` (RFC 3339) or `olderThanDays` |
+| `airGapMissingPurge` | `DELETE air-gap/missing` | `before`/`olderThanDays`, `registry` (optional) |
+| `releaseImport` | `POST registries/{registry}/import` | `registry`; `tag`, `repo` |
+| `ipBlock` / `ipUnblock` | `POST ip-blocks` / `DELETE ip-blocks/{ip}` | `ip`; `reason`, `durationSeconds` |
+| `userBlock` / `userUnblock` | `POST` / `DELETE users/{user}/block` | `user`; `reason` |
+| `packageBlock` | `POST packages/block` | `registry`, `package`, `version`, `reason`; `artifact` |
+| `packageUnblock` | `POST packages/unblock` | `registry`, `package`, `version`; `artifact` |
+| `quotaReset` | `DELETE quota/{registry}/{user}` | `registry`, `user` |
+| `bannerSet` / `bannerClear` | `PUT` / `DELETE banner` | `message`, `level` (`info`, `warning`, `error`) |
+| `healthCheck` | `GET /healthz` and `GET health`, both in the result | |
+
+Grants, policies and exemptions aren't actions: they are state, kept by
+[`BatleHubPackageGrant` and `BatleHubPackagePolicy`](/docs/guides/package-governance).
+Restarting the instance comes with the mode where the operator deploys
+BatleHub.
+
+A maintenance holds its instance's deletion (`InstanceInUse`) like the
+other kinds bound to it; it has no finalizer of its own, having nothing to
+remove.

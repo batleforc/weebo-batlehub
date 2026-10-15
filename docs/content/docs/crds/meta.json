@@ -6,6 +6,7 @@
     "batlehubregistry",
     "batlehubnamespaceclaim",
     "batlehubpackagegrant",
-    "batlehubpackagepolicy"
+    "batlehubpackagepolicy",
+    "batlehubmaintenance"
   ]
 }

@@ -665,6 +665,7 @@ async fn a_call_sends_its_path_query_and_body_and_reads_any_answer() {
             .to_vec(),
         query: vec![("dry_run".into(), "true".into())],
         body: None,
+        timeout: None,
     };
     assert_eq!(gateway.call(&request).await.unwrap(), json!({"evicted": 3}));
     Mock::given(method("DELETE"))
@@ -677,6 +678,7 @@ async fn a_call_sends_its_path_query_and_body_and_reads_any_answer() {
         path: ["api", "v1", "admin", "banner"].map(String::from).to_vec(),
         query: vec![],
         body: None,
+        timeout: None,
     };
     assert_eq!(gateway.call(&clear).await.unwrap(), serde_json::Value::Null);
     let missing = AdminRequest {

@@ -33,4 +33,6 @@ Registries of other namespaces are not seen.
 
 `watch.clusterKinds: false` (no ClusterRole at all) is not fully
 supported: ConfigMap layers and `external.podSelector` need the
-ClusterRole's reads, and fail with `KubernetesApiError` in that mode.
+ClusterRole's reads, and deleting a finished maintenance
+(`ttlSecondsAfterFinished`) its delete; they fail with
+`KubernetesApiError` in that mode.

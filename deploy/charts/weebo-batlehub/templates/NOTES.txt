@@ -38,6 +38,9 @@
    write the grants and policies of a package or a version:
    https://batleforc.github.io/weebo-batlehub/docs/guides/package-governance
 
+   A BatleHubMaintenance (`kubectl get bhm`) runs an admin action, once or
+   on a schedule: https://batleforc.github.io/weebo-batlehub/docs/guides/maintenance
+
 3. Creating a BatleHubLocalInstance sends a Secret of its namespace to the
    URL it names: grant the kind like you grant pods.
 

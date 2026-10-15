@@ -23,6 +23,7 @@ fn main() -> anyhow::Result<()> {
     write_crd(&args.out, &api::NamespaceClaim::crd())?;
     write_crd(&args.out, &api::PackageGrant::crd())?;
     write_crd(&args.out, &api::PackagePolicy::crd())?;
+    write_crd(&args.out, &api::Maintenance::crd())?;
     println!("wrote CRDs to {}", args.out.display());
     Ok(())
 }

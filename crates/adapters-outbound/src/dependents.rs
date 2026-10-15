@@ -5,7 +5,7 @@
 
 use std::fmt::Debug;
 
-use api::{NamespaceClaim, PackageGrant, PackagePolicy, Registry};
+use api::{Maintenance, NamespaceClaim, PackageGrant, PackagePolicy, Registry};
 use application::ports::{BoundInstance, InstanceDependents};
 use kube::Resource;
 use kube::api::{Api, ListParams};
@@ -100,6 +100,16 @@ impl LocalBound for PackagePolicy {
     }
 }
 
+impl LocalBound for Maintenance {
+    const KIND: &'static str = "BatleHubMaintenance";
+    fn instance_ref(&self) -> Option<&InstanceRef> {
+        self.spec.instance_ref.as_ref()
+    }
+    fn recorded(&self) -> Option<&BoundInstance> {
+        self.status.as_ref().and_then(|s| s.instance.as_ref())
+    }
+}
+
 /// Whether `object` is bound to `instance`, as [`binds`] for a registry:
 /// its instance is always of its own namespace.
 pub fn local_binds<K: LocalBound>(object: &K, instance: &BoundInstance, default: bool) -> bool {
@@ -177,6 +187,7 @@ impl InstanceDependents for ClusterDependents {
         dependents.extend(self.local::<NamespaceClaim>(instance, default).await?);
         dependents.extend(self.local::<PackageGrant>(instance, default).await?);
         dependents.extend(self.local::<PackagePolicy>(instance, default).await?);
+        dependents.extend(self.local::<Maintenance>(instance, default).await?);
         Ok(dependents)
     }
 }

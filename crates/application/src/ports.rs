@@ -238,6 +238,28 @@ pub struct AdminRequest {
     pub path: Vec<String>,
     pub query: Vec<(String, String)>,
     pub body: Option<serde_json::Value>,
+    /// Instead of the gateway's own timeout (a maintenance run's).
+    pub timeout: Option<std::time::Duration>,
+}
+
+/// Records a maintenance run as started — only if the object is unchanged
+/// since it was read (a patch conditioned on its `resourceVersion`): a
+/// run is decided once, by whoever writes first.
+#[async_trait::async_trait]
+pub trait RunGuard: Send + Sync {
+    /// `Ok(false)`: the object changed meanwhile, nothing was written.
+    async fn start(
+        &self,
+        run: &api::maintenance::LastRun,
+        run_now: Option<&str>,
+    ) -> Result<bool, String>;
+}
+
+/// Approves the configuration an instance holds (`reload.strategy:
+/// Manual`): its `approved-config-hash` annotation.
+#[async_trait::async_trait]
+pub trait Approver: Send + Sync {
+    async fn approve(&self, hash: &str) -> Result<(), String>;
 }
 
 /// A team namespace of a registry: a package name prefix reserved to a
