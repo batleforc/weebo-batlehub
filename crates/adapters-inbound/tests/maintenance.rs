@@ -83,7 +83,7 @@ fn ctx(client: &Client, gateway: Arc<FakeGateway>) -> Arc<Ctx> {
         registries: instances.clone(),
         dependents: Arc::new(ClusterDependents::new(client.clone(), None)),
         workloads: Arc::new(application::test_support::FakeWorkloads::default()),
-        operator_namespace: None,
+        operator: Default::default(),
         token_review_role: None,
         config: Arc::new(BatleHubConfigParser::default()),
         sources: Arc::new(KubeConfigSources::new(client.clone(), instances)),

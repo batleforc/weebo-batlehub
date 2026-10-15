@@ -134,7 +134,7 @@ fn ctx(client: &Client, dependents: Arc<FakeDependents>) -> Arc<Ctx> {
         registries: instances.clone(),
         dependents,
         workloads: Arc::new(application::test_support::FakeWorkloads::default()),
-        operator_namespace: None,
+        operator: Default::default(),
         token_review_role: None,
         config: Arc::new(BatleHubConfigParser::default()),
         sources: Arc::new(KubeConfigSources::new(client.clone(), instances)),

@@ -65,17 +65,13 @@ pub async fn run(client: Client, ctx: Arc<Ctx>) {
         Some(namespace) => Api::namespaced(client.clone(), namespace),
         None => Api::all(client.clone()),
     };
-    let controller = if ctx.scope.cluster_kinds() {
-        controller.owns(
-            deployments,
-            watcher::Config::default().labels(&format!(
-                "app.kubernetes.io/managed-by={}",
-                api::managed::MANAGED_BY
-            )),
-        )
-    } else {
-        controller
-    };
+    let controller = controller.owns(
+        deployments,
+        watcher::Config::default().labels(&format!(
+            "app.kubernetes.io/managed-by={}",
+            api::managed::MANAGED_BY
+        )),
+    );
     let instances = controller.store();
     let all = {
         let instances = instances.clone();
@@ -101,18 +97,6 @@ pub async fn run(client: Client, ctx: Arc<Ctx>) {
     .touched_objects();
     let on_registry = all.clone();
     let controller = controller.watches_stream(registry_changes, move |_| on_registry());
-
-    // Without cluster kinds the chart renders no ClusterRole, so no
-    // `clusterRules`: no ConfigMap nor Namespace watch, layers are read
-    // again on the steady resync only (spec §7.1).
-    if !ctx.scope.cluster_kinds() {
-        let results =
-            controller
-                .graceful_shutdown_on(ctx.shutdown.wait())
-                .run(reconcile, error_policy, ctx);
-        super::drive(KIND, health, results).await;
-        return;
-    }
 
     // Metadata only: no ConfigMap data in memory.
     let configmaps: Api<PartialObjectMeta<ConfigMap>> = match ctx.scope.watched_namespace() {
@@ -189,7 +173,13 @@ async fn reconcile(obj: Arc<LocalInstance>, ctx: Arc<Ctx>) -> Result<Action, Err
         match event {
             FinalizerEvent::Apply(instance) => apply(&api, instance, &ctx).await,
             FinalizerEvent::Cleanup(instance) => {
-                super::finalize(instance.as_ref(), &ctx, cleanup(&api, &instance, &ctx)).await
+                super::finalize_with(
+                    instance.as_ref(),
+                    &ctx,
+                    cleanup(&api, &instance, &ctx),
+                    unbind(&instance, &ctx),
+                )
+                .await
             }
         }
     })
@@ -340,24 +330,7 @@ async fn apply(
     };
     let mut workload = None;
     let mut rolled_out = None;
-    let report = if obj.spec.managed.is_some() && !ctx.scope.cluster_kinds() {
-        // Fully namespaced (`watch.clusterKinds: false`): no ClusterRole, so
-        // none of the rules a managed instance's objects need — every write
-        // would be forbidden. Said once, not retried as an API error.
-        InstanceReport {
-            outcome: Outcome::failed(Failure::new(
-                ReasonCode::InvalidSpec,
-                "managed mode needs the operator's cluster rules (Deployments, Services, \
-                 PersistentVolumeClaims…), which a fully namespaced operator \
-                 (watch.clusterKinds: false) doesn't have: use external mode, or an operator \
-                 installed with watch.clusterKinds: true",
-            )),
-            observed: None,
-            config: Some(config_status_kept(&obj)),
-            due_in: None,
-            reloaded: false,
-        }
-    } else if let (Some(managed), Some(rendered)) = (&obj.spec.managed, rendered.clone()) {
+    let report = if let (Some(managed), Some(rendered)) = (&obj.spec.managed, rendered.clone()) {
         let report = managed_pass(&obj, managed, &bound, rendered, ctx).await;
         workload = Some(report.workload);
         rolled_out = report.rolled_out;
@@ -581,7 +554,7 @@ async fn managed_pass(
             .as_ref()
             .map(|s| s.partial_keys.clone())
             .unwrap_or_default(),
-        operator_namespace: ctx.operator_namespace.clone(),
+        operator: ctx.operator.clone(),
         token_review_role: ctx.token_review_role.clone(),
     };
     let reach = FactoryReach { ctx, bound };
@@ -699,26 +672,6 @@ async fn cleanup(
         .await
         .map_err(|e| Error::Cleanup(Failure::new(ReasonCode::KubernetesApiError, e)))?;
     let Err(in_use) = release_instance(&bound.to_string(), &dependents) else {
-        // Its namespaced objects go with it (owner references); the
-        // cluster-scoped TokenReview binding is the operator's to remove.
-        // Without a role (limited to one namespace, no cluster rules) it
-        // bound nothing: no cluster-scoped read, which would be forbidden.
-        if instance.spec.managed.is_some()
-            && let Some(role) = &ctx.token_review_role
-        {
-            ctx.workloads
-                .unbind_token_review(
-                    &Owner {
-                        namespace: bound.namespace.clone().unwrap_or_default(),
-                        name: bound.name.clone(),
-                        uid: instance.uid().unwrap_or_default(),
-                    },
-                    role,
-                )
-                .await
-                .map_err(|e| Error::Cleanup(Failure::new(e.reason(), e.to_string())))?;
-        }
-        super::metrics::forget_instance(&bound);
         return Ok(());
     };
     // `InstanceInUse` replaces whatever `Ready` said while the deletion
@@ -726,6 +679,34 @@ async fn cleanup(
     let outcome = Outcome::failed(in_use.clone());
     super::publish(api, &ctx.recorder, instance, &outcome, Map::new()).await?;
     Err(Error::Waiting(in_use))
+}
+
+/// Run on every deletion, `force-orphan` included (after [`cleanup`]
+/// released the instance, or in its place): its namespaced objects go
+/// with it (owner references), but the cluster-scoped TokenReview binding
+/// is the operator's to remove — force-orphaning the instance must not
+/// leave its ServiceAccount bound. Without a role (limited to one
+/// namespace, no cluster rules) it bound nothing: no cluster-scoped read,
+/// which would be forbidden.
+async fn unbind(instance: &LocalInstance, ctx: &Ctx) -> Result<(), Error> {
+    let bound = bound(instance);
+    if instance.spec.managed.is_some()
+        && let Some(role) = &ctx.token_review_role
+    {
+        ctx.workloads
+            .unbind_token_review(
+                &Owner {
+                    namespace: bound.namespace.clone().unwrap_or_default(),
+                    name: bound.name.clone(),
+                    uid: instance.uid().unwrap_or_default(),
+                },
+                role,
+            )
+            .await
+            .map_err(|e| Error::Cleanup(Failure::new(e.reason(), e.to_string())))?;
+    }
+    super::metrics::forget_instance(&bound);
+    Ok(())
 }
 
 #[cfg(test)]

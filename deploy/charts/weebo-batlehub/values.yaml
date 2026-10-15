@@ -62,12 +62,10 @@ watch:
   # cluster-scoped kind watched, no ClusterRole, no
   # ValidatingWebhookConfiguration; objects use the LocalInstances of
   # `namespace`. Needs `namespace` and `crds.install: false` (a cluster
-  # admin installs the CRDs). weebo-batlehub: no ClusterRole means none
-  # of its own read rules either — a ConfigMap of `configLayers` or of a
-  # registry's `configFrom`, `external.podSelector` and a maintenance's
-  # `ttlSecondsAfterFinished` then fail with KubernetesApiError (only
-  # Secret layers and `url` work), and a managed instance is refused
-  # (InvalidSpec): use external mode.
+  # admin installs the CRDs). weebo-batlehub: its rules on ConfigMaps,
+  # pods, the objects of managed instances and maintenances are in the
+  # Role of `namespace` (params.watchRules), as with `namespace` alone:
+  # every mode works, without the TokenReview binding.
   clusterKinds: true
 
 references:

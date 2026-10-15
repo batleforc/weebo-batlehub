@@ -430,7 +430,7 @@ pub struct PodDisruptionBudget {
 #[serde(rename_all = "camelCase")]
 pub struct NetworkPolicy {
     /// Who may reach the HTTP port; empty: anyone. The operator's pods
-    /// are added.
+    /// (its chart's selector labels, in its namespace) are added.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[schemars(schema_with = "open_list")]
     pub ingress_from: Vec<NetworkPolicyPeer>,

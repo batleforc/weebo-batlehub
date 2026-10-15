@@ -13,9 +13,10 @@ use application::ports::{
     RegistryResolver, ResolveError, Workloads,
 };
 use application::use_cases::{Outcome, instance_failure};
+use application::workload::OperatorPod;
 use domain::Failure;
 use domain::error::ReasonCode;
-use kube::api::{Api, Patch, PatchParams};
+use kube::api::Api;
 use kube::runtime::controller::Action;
 use kube::runtime::events::Recorder;
 use kube::runtime::reflector::ObjectRef;
@@ -66,9 +67,10 @@ pub struct Ctx {
     pub dependents: Arc<dyn InstanceDependents>,
     /// The Kubernetes objects of managed instances.
     pub workloads: Arc<dyn Workloads>,
-    /// The operator's own namespace (`POD_NAMESPACE`), let in by a managed
-    /// instance's `NetworkPolicy`.
-    pub operator_namespace: Option<String>,
+    /// The operator's own pods (`POD_NAMESPACE`,
+    /// `WEEBO_OPERATOR_POD_LABELS`), let in by a managed instance's
+    /// `NetworkPolicy`.
+    pub operator: OperatorPod,
     /// The chart's TokenReview `ClusterRole`
     /// (`WEEBO_BATLEHUB_TOKENREVIEW_CLUSTERROLE`), bound for a managed
     /// instance with a `kubernetes` auth provider; unset when limited to
@@ -447,15 +449,26 @@ where
     K: Resource<DynamicType = ()> + Clone + Debug + DeserializeOwned + Send + Sync,
     T: Serialize + Send + Sync,
 {
+    /// Retried in place on a transient apiserver error (the kit's
+    /// `status::record`): the remote write already happened, a lost record
+    /// would leave the CR at odds with what it wrote.
     async fn record(&self, written: &T) -> Result<(), String> {
-        let status = match self.field {
-            Some(field) => serde_json::json!({ field: written }),
-            None => serde_json::to_value(written).map_err(|e| e.to_string())?,
+        let recorded = match self.field {
+            Some(field) => {
+                weebo_kit_runtime::status::record(
+                    &self.api,
+                    FIELD_MANAGER,
+                    &self.name,
+                    &serde_json::json!({ field: written }),
+                )
+                .await
+            }
+            None => {
+                weebo_kit_runtime::status::record(&self.api, FIELD_MANAGER, &self.name, written)
+                    .await
+            }
         };
-        let patch = Patch::Merge(serde_json::json!({ "status": status }));
-        self.api
-            .patch_status(&self.name, &PatchParams::apply(FIELD_MANAGER), &patch)
-            .await
+        recorded
             .map(|_| ())
             .map_err(|e| format!("recording the status: {e}"))
     }
@@ -473,12 +486,27 @@ pub async fn finalize<K>(
 where
     K: Resource<DynamicType = ()>,
 {
-    weebo_kit_runtime::controller::finalize(
+    finalize_with(obj, ctx, cleanup, async { Ok(()) }).await
+}
+
+/// [`finalize`], plus `always`: what the operator granted the CR on the
+/// cluster, removed on every deletion, `force-orphan` included.
+pub async fn finalize_with<K>(
+    obj: &K,
+    ctx: &Ctx,
+    cleanup: impl Future<Output = Result<(), Error>>,
+    always: impl Future<Output = Result<(), Error>>,
+) -> Result<Action, Error>
+where
+    K: Resource<DynamicType = ()>,
+{
+    weebo_kit_runtime::controller::finalize_with(
         obj,
         &ctx.recorder,
         &api::ANNOTATIONS,
         ReasonCode::Released,
         cleanup,
+        always,
     )
     .await
 }

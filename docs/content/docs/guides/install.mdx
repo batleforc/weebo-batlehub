@@ -25,19 +25,17 @@ unless the version is given (`--version`) or `--devel` is passed.
 ## Limited to one namespace
 
 `--set watch.namespace=<namespace>` limits the operator to the instances
-of that namespace: its kinds move from the ClusterRole to a Role there.
-BatleHub has no cluster-scoped kind; the operator still reads and writes
-Secrets through its ClusterRole (`clusterSecrets`), in every namespace that
-has an instance, and reads ConfigMaps, pods and namespaces through it.
-Registries of other namespaces are not seen.
+of that namespace: its kinds move from the ClusterRole to a Role there,
+with every rule on namespaced resources — ConfigMaps and pods read, the
+objects of managed instances (Deployments, Services, claims,
+NetworkPolicies…), finished maintenances deleted: the operator can write
+none of them elsewhere. BatleHub has no cluster-scoped kind; the operator
+still reads and writes Secrets through its ClusterRole (`clusterSecrets`).
+Registries of other namespaces are not seen, and no TokenReview binding
+is made (see the managed instance guide).
 
-`watch.clusterKinds: false` (no ClusterRole at all) is not fully
-supported: ConfigMap layers and `external.podSelector` need the
-ClusterRole's reads, and deleting a finished maintenance
-(`ttlSecondsAfterFinished`) its delete; they fail with
-`KubernetesApiError` in that mode. A managed instance is refused there
-(`Ready: False`, `InvalidSpec`): the objects it deploys need the
-ClusterRole too.
+`watch.clusterKinds: false` (no ClusterRole at all) works the same, on
+the Role alone.
 
 ## Images of managed instances
 

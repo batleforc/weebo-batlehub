@@ -2,7 +2,6 @@
 //! controllers, then runs them on the kit's runtime (telemetry, health,
 //! graceful shutdown, leader election, HTTPS probes).
 
-use std::fmt::Debug;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -14,14 +13,10 @@ use adapters_outbound::{
     LocalInstanceDirectory, MeteredFactory,
 };
 use api::{LocalInstance, Maintenance, NamespaceClaim, PackageGrant, PackagePolicy, Registry};
-use futures::StreamExt;
-use kube::api::Api;
+use application::workload::OperatorPod;
+use kube::Client;
 use kube::runtime::events::{Recorder, Reporter};
-use kube::runtime::reflector::Store;
-use kube::runtime::{WatchStreamExt, reflector, watcher};
-use kube::{Client, Resource};
-use serde::de::DeserializeOwned;
-use weebo_kit_runtime::{Health, WatchScope, leader, telemetry, webhook_server};
+use weebo_kit_runtime::{Health, WatchScope, leader, pod, store, telemetry, webhook_server};
 
 /// Default `LEASE_NAME`. Keep it across releases: old and new pods of a
 /// rollout must compete for the same lease.
@@ -50,40 +45,6 @@ async fn main() -> anyhow::Result<()> {
     result
 }
 
-/// A reflector on `api`, its watch errors reported to `health`: the store
-/// serves every read from memory instead of a request per reconcile, and
-/// watch errors back off exponentially instead of spinning.
-fn spawn_reflector<K>(
-    api: Api<K>,
-    scope: &WatchScope,
-    health: Arc<Health>,
-    name: &'static str,
-) -> Store<K>
-where
-    K: Resource<DynamicType = ()> + Clone + Debug + DeserializeOwned + Send + Sync + 'static,
-{
-    let (store, writer) = reflector::store::<K>();
-    let stream = reflector::reflector(
-        writer,
-        watcher(api, scope.watcher_config()).default_backoff(),
-    );
-    tokio::spawn(async move {
-        stream
-            .for_each(|event| {
-                match event {
-                    Ok(_) => health.ok(name),
-                    Err(err) => {
-                        tracing::warn!(error = %err, "{name} watch error");
-                        health.failed(name, err.to_string());
-                    }
-                }
-                futures::future::ready(())
-            })
-            .await;
-    });
-    store
-}
-
 async fn run(telemetry: &telemetry::Telemetry) -> anyhow::Result<()> {
     // `ring` and `aws-lc-rs` are both linked transitively (`kube`'s rustls
     // vs. reqwest's); rustls refuses to pick a default provider when more
@@ -91,11 +52,13 @@ async fn run(telemetry: &telemetry::Telemetry) -> anyhow::Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     telemetry.serve_metrics().await?;
-    register_leader_gauge();
+    leader::register_leader_gauge(controller::FIELD_MANAGER, controller::METRIC_PREFIX);
 
     // This operator's own settings: an invalid value stops the start.
     let settings = Settings::from_env()?;
     adapters_outbound::admin_gateway::set_request_timeout(settings.admin_timeout);
+
+    let operator = operator_pod()?;
 
     let client = Client::try_default().await?;
     // The whole cluster, or one namespace (with or without the
@@ -122,7 +85,7 @@ async fn run(telemetry: &telemetry::Telemetry) -> anyhow::Result<()> {
 
     // Every resolution reads the instances: one reflector on the only
     // instance kind, namespaced.
-    let store = spawn_reflector(
+    let store = store::spawn_reflector(
         scope.api::<LocalInstance>(client.clone()),
         &scope,
         health.clone(),
@@ -169,7 +132,7 @@ async fn run(telemetry: &telemetry::Telemetry) -> anyhow::Result<()> {
         workloads: Arc::new(
             KubeWorkloads::new(client.clone()).with_allowed_images(allowed_images.clone()),
         ),
-        operator_namespace: std::env::var("POD_NAMESPACE").ok(),
+        operator,
         token_review_role: std::env::var("WEEBO_BATLEHUB_TOKENREVIEW_CLUSTERROLE")
             .ok()
             .filter(|r| !r.is_empty() && scope.watched_namespace().is_none()),
@@ -279,14 +242,29 @@ impl Settings {
     }
 }
 
-/// `<prefix>_leader`: 1 on the replica holding the lease.
-fn register_leader_gauge() {
-    // The callback lives as long as the meter provider: the handle can go.
-    let _ = opentelemetry::global::meter(controller::FIELD_MANAGER)
-        .u64_observable_gauge(format!("{}_leader", controller::METRIC_PREFIX))
-        .with_description("1 when this replica holds the leader lease")
-        .with_callback(|observer| observer.observe(u64::from(leader::is_leader()), &[]))
-        .build();
+/// The operator's own pods, let in by a managed instance's
+/// `NetworkPolicy`: the chart's selector labels
+/// (`WEEBO_OPERATOR_POD_LABELS`; malformed = a broken chart, the start
+/// stops). Unset (run outside the chart), the chart's default label —
+/// said once, a `nameOverride` would leave the operator out.
+fn operator_pod() -> anyhow::Result<OperatorPod> {
+    let labels = match pod::own_labels().map_err(anyhow::Error::msg)? {
+        Some(labels) => labels,
+        None => {
+            let labels = OperatorPod::fallback_labels();
+            tracing::warn!(
+                fallback = ?labels,
+                "{} is unset: a managed instance's NetworkPolicy lets in the operator \
+                 pods by this label, which a chart nameOverride would not match",
+                pod::POD_LABELS_ENV
+            );
+            labels
+        }
+    };
+    Ok(OperatorPod {
+        namespace: pod::own_namespace(),
+        labels,
+    })
 }
 
 #[cfg(test)]

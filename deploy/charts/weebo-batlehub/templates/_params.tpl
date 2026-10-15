@@ -10,12 +10,12 @@ namespace, or with no ClusterRole at all, binds nothing
 (TokenReviewUnavailable) and never reads a cluster-scoped binding. */ -}}
 {{- $tokenReview := include "operator.tokenReview" . -}}
 {{- $tokenReviewName := printf "%s-tokenreview" (include "weebo-operator.fullname" .) -}}
-{{- /* watch.clusterKinds: false renders no ClusterRole, so none of
-clusterRules below: ConfigMap layers, a registry's configFrom ConfigMap
-and external.podSelector then fail (KubernetesApiError), only Secret
-layers and `url` work. This chart can't refuse the mode (the kit renders
-it in its smoke tests): the kit needs rules for the watch Role
-(params.watchRules, spec §7.1, D6, §11.2). */ -}}
+{{- /* What the operator reads and writes in the namespaces of its instances
+(operator.namespacedRules): cluster-wide in the ClusterRole, or — with
+watch.namespace — only in that namespace, through the kit's watch Role
+(params.watchRules), which a watch.clusterKinds: false release renders
+too (spec §7.1, D6). */ -}}
+{{- $watchNamespace := include "weebo-operator.watchNamespace" . -}}
 group: batlehub.weebo.io
 versions: [v1alpha1]
 # Every kind the operator watches (ClusterRole).
@@ -50,43 +50,17 @@ admitted:
   - batlehubpackagegrants
   - batlehubpackagepolicies
   - batlehubmaintenances
-# Reads of the configuration's sources: ConfigMap layers (watched by
-# metadata), the labels of the namespaces registries come from (watched,
-# for registrySelector.namespaces.from: Selector), the proxy pods of
-# `external.podSelector` (listed), and the deletion of a finished
-# maintenance. No Secret watch (spec D9).
+# Cluster-wide only: the namespaced rules below, and the labels of the
+# namespaces registries come from (watched, for
+# registrySelector.namespaces.from: Selector). Limited to one namespace,
+# none of them: they go to watchRules. No Secret watch (spec D9).
 clusterRules:
+  {{- if not $watchNamespace }}
   - apiGroups: [""]
-    resources: [configmaps, namespaces]
+    resources: [namespaces]
     verbs: [get, list, watch]
-  - apiGroups: [""]
-    resources: [pods]
-    verbs: [list]
-  # The admin token goes to a pod only when its controller (a ReplicaSet of
-  # the instance's Deployment, or for external.podSelector a ReplicaSet or
-  # StatefulSet selecting it) is read and checked by UID.
-  - apiGroups: [apps]
-    resources: [replicasets, statefulsets]
-    verbs: [get]
-  # Managed instances: the objects the operator deploys (server-side apply,
-  # each read first to never take over someone else's), and their
-  # Deployments watched (labelled app.kubernetes.io/managed-by) to follow
-  # a rollout.
-  - apiGroups: [apps]
-    resources: [deployments]
-    verbs: [get, list, watch, create, patch, delete]
-  - apiGroups: [""]
-    resources: [services, serviceaccounts, persistentvolumeclaims]
-    verbs: [get, create, patch, delete]
-  - apiGroups: [policy]
-    resources: [poddisruptionbudgets]
-    verbs: [get, create, patch, delete]
-  - apiGroups: [networking.k8s.io]
-    resources: [ingresses, networkpolicies]
-    verbs: [get, create, patch, delete]
-  - apiGroups: [autoscaling]
-    resources: [horizontalpodautoscalers]
-    verbs: [get, create, patch, delete]
+  {{- include "operator.namespacedRules" . | nindent 2 }}
+  {{- end }}
   {{- if $tokenReview }}
   # The TokenReview binding of managed instances with a kubernetes auth
   # provider: ONE ClusterRoleBinding, named after the chart's tokenreview
@@ -107,11 +81,12 @@ clusterRules:
     verbs: [get, bind]
     resourceNames: [{{ $tokenReviewName }}]
   {{- end }}
-  # A single maintenance run is deleted ttlSecondsAfterFinished after it
-  # finished (the kit grants its kinds no delete).
-  - apiGroups: [batlehub.weebo.io]
-    resources: [batlehubmaintenances]
-    verbs: [delete]
+# Limited to one namespace (watch.namespace): the same rules, in the watch
+# Role of that namespace only.
+watchRules:
+  {{- if $watchNamespace }}
+  {{- include "operator.namespacedRules" . | nindent 2 }}
+  {{- end }}
 # The operator's own environment variables.
 env:
   {{- if $tokenReview }}
@@ -173,4 +148,48 @@ may bind it: tokenReview.enabled, cluster-wide, with a ClusterRole. */}}
 {{- if and .Values.tokenReview.enabled (include "weebo-operator.watchClusterKinds" .) (not (include "weebo-operator.watchNamespace" .)) -}}
 true
 {{- end -}}
+{{- end -}}
+
+
+{{/* The rules on the namespaced resources of the instances' namespaces:
+the configuration's sources (ConfigMap layers, watched by metadata; the
+proxy pods of external.podSelector, listed), the objects of managed
+instances, and the deletion of a finished maintenance. */}}
+{{- define "operator.namespacedRules" -}}
+- apiGroups: [""]
+  resources: [configmaps]
+  verbs: [get, list, watch]
+- apiGroups: [""]
+  resources: [pods]
+  verbs: [list]
+# The admin token goes to a pod only when its controller (a ReplicaSet of
+# the instance's Deployment, or for external.podSelector a ReplicaSet or
+# StatefulSet selecting it) is read and checked by UID.
+- apiGroups: [apps]
+  resources: [replicasets, statefulsets]
+  verbs: [get]
+# Managed instances: the objects the operator deploys (server-side apply,
+# each read first to never take over someone else's), and their
+# Deployments watched (labelled app.kubernetes.io/managed-by) to follow a
+# rollout.
+- apiGroups: [apps]
+  resources: [deployments]
+  verbs: [get, list, watch, create, patch, delete]
+- apiGroups: [""]
+  resources: [services, serviceaccounts, persistentvolumeclaims]
+  verbs: [get, create, patch, delete]
+- apiGroups: [policy]
+  resources: [poddisruptionbudgets]
+  verbs: [get, create, patch, delete]
+- apiGroups: [networking.k8s.io]
+  resources: [ingresses, networkpolicies]
+  verbs: [get, create, patch, delete]
+- apiGroups: [autoscaling]
+  resources: [horizontalpodautoscalers]
+  verbs: [get, create, patch, delete]
+# A single maintenance run is deleted ttlSecondsAfterFinished after it
+# finished (the kit grants its kinds no delete).
+- apiGroups: [batlehub.weebo.io]
+  resources: [batlehubmaintenances]
+  verbs: [delete]
 {{- end -}}

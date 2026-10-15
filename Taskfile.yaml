@@ -14,7 +14,7 @@ includes:
   # their sha256: `task kit:sync` rewrites both. `task --offline` runs from
   # Task's cache.
   rust:
-    taskfile: https://raw.githubusercontent.com/batleforc/weebo-operator-kit/v0.15.1/tasks/rust.yaml
+    taskfile: https://raw.githubusercontent.com/batleforc/weebo-operator-kit/v0.16.0/tasks/rust.yaml
     checksum: 75360142235715643265ae41de1f531dda6562a2472e8d9af21ad65f7d753d63
     vars:
       # The generated batlehub-client and the test harnesses themselves.
@@ -23,14 +23,14 @@ includes:
       COVERAGE_ENV_FILE: .batlehub-test.env
       COVERAGE_REQUIRE_ENV: BATLEHUB_URL
   repo:
-    taskfile: https://raw.githubusercontent.com/batleforc/weebo-operator-kit/v0.15.1/tasks/repo.yaml
+    taskfile: https://raw.githubusercontent.com/batleforc/weebo-operator-kit/v0.16.0/tasks/repo.yaml
     checksum: 162d15bf9c41f494efcb6d73e089ac685d23bc98269a41daf62db26534f52f72
     vars:
       CONTAINERFILES: Containerfile Containerfile.static
       NPM_DIR: docs
   helm:
-    taskfile: https://raw.githubusercontent.com/batleforc/weebo-operator-kit/v0.15.1/tasks/helm.yaml
-    checksum: ff5c9ef8e27d1edbbeef3c4344cff197faa9d640d79b8ea2e11659eefcca6d61
+    taskfile: https://raw.githubusercontent.com/batleforc/weebo-operator-kit/v0.16.0/tasks/helm.yaml
+    checksum: 8f42df9a351bfeea80dde2d94bfb809d1e8c32489c7c5c232fcf60175eb6e094
     vars:
       CHART: deploy/charts/weebo-batlehub
 
@@ -104,9 +104,43 @@ tasks:
       - task: repo:lint
 
   lint:helm:
-    desc: "helm lint + smoke renders of the operator chart (the kit's value combinations)"
+    desc: "helm lint + smoke renders of the operator chart (the kit's value combinations), then where this chart's RBAC lands in each watch mode"
+    vars:
+      T: mise exec -- helm template smoke deploy/charts/weebo-batlehub --set crds.install=false
+      # One document of a render (stdin): kind $1 named $2.
+      DOC: >-
+        doc() { awk -v k="$1" -v n="$2" 'BEGIN{RS="\n---\n"} $0 ~ ("\nkind: " k "\n") && $0 ~ ("\n  name: " n "\n")'; }
     cmds:
       - task: helm:lint
+      # Renders go into a variable first (no pipefail in Task's shell).
+      # Cluster-wide: the managed instances' rules and the TokenReview
+      # binding in the ClusterRole, no watch Role.
+      - >-
+        {{.DOC}}; out="$({{.T}})"
+        && cr="$(printf '%s\n' "$out" | doc ClusterRole smoke-weebo-batlehub)"
+        && printf '%s\n' "$cr" | grep -q '  - deployments'
+        && printf '%s\n' "$cr" | grep -q '  - clusterrolebindings'
+        && printf '%s\n' "$out" | grep -q 'name: WEEBO_BATLEHUB_TOKENREVIEW_CLUSTERROLE'
+        && test -z "$(printf '%s\n' "$out" | doc Role smoke-weebo-batlehub-watch)"
+      # One namespace: the namespaced rules only in its watch Role, nothing
+      # of them (nor Namespaces, nor TokenReview) left in the ClusterRole.
+      - >-
+        {{.DOC}}; out="$({{.T}} --set watch.namespace=team-a)"
+        && role="$(printf '%s\n' "$out" | doc Role smoke-weebo-batlehub-watch)"
+        && printf '%s\n' "$role" | grep -q 'namespace: team-a'
+        && for r in configmaps pods replicasets deployments services persistentvolumeclaims
+        poddisruptionbudgets networkpolicies horizontalpodautoscalers batlehubmaintenances;
+        do printf '%s\n' "$role" | grep -q "  - $r\$" || { echo "watch Role lacks $r" >&2; exit 1; }; done
+        && cr="$(printf '%s\n' "$out" | doc ClusterRole smoke-weebo-batlehub)"
+        && test -n "$cr"
+        && if printf '%s\n' "$cr" | grep -qE '  - (deployments|configmaps|namespaces|clusterrolebindings)$'; then exit 1; fi
+        && if printf '%s\n' "$out" | grep -q 'WEEBO_BATLEHUB_TOKENREVIEW_CLUSTERROLE'; then exit 1; fi
+      # Fully namespaced: no ClusterRole, the managed instances' rules still
+      # in the watch Role (managed mode works there).
+      - >-
+        {{.DOC}}; out="$({{.T}} --set watch.namespace=team-a --set watch.clusterKinds=false)"
+        && printf '%s\n' "$out" | doc Role smoke-weebo-batlehub-watch | grep -q '  - deployments$'
+        && if printf '%s\n' "$out" | grep -qE '^kind: ClusterRole(Binding)?$'; then exit 1; fi
 
   test:
     desc: "Every test that needs no cluster, as the kit's: unit, contract (the admin gateway against wiremock, the CLI, the committed CRDs) and doctests"

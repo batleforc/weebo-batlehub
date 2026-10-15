@@ -55,6 +55,12 @@ instance deletes them):
 | `Ingress`, `PodDisruptionBudget`, `NetworkPolicy` | `<name>` | `ingress`; `podDisruptionBudget` from 2 replicas; `networkPolicy` |
 | a subject of the `ClusterRoleBinding` to TokenReview, shared by every instance | `<release>-tokenreview` | a `kubernetes` auth provider, `serviceAccount.autoTokenReview` |
 
+A `networkPolicy` with `ingressFrom` keeps the operator's own pods in:
+the operator chart's selector labels (`nameOverride` applied, env
+`WEEBO_OPERATOR_POD_LABELS`) in its namespace. An operator run outside
+the chart lets in `app.kubernetes.io/name: weebo-batlehub` and says so
+in its log at start.
+
 **Nothing is taken over.** An object of one of these names that exists
 without an owner reference to the instance nor the labels
 `app.kubernetes.io/managed-by: weebo-batlehub` and
@@ -139,7 +145,8 @@ behind) tell where a change stands.
 
 The operator's ClusterRole grants the kinds it deploys (Deployments,
 Services, ServiceAccounts, claims, Ingresses, NetworkPolicies, PDBs,
-HPAs), `get`/`bind` on the chart's `<release>-tokenreview` ClusterRole
+HPAs) — limited to one namespace (`watch.namespace`), they are granted in
+that namespace's Role only — `get`/`bind` on the chart's `<release>-tokenreview` ClusterRole
 only, and `get`/`patch` on the one ClusterRoleBinding of the same name:
 every instance with a `kubernetes` auth provider adds its ServiceAccount
 to its subjects, and removes it on deletion (an account two instances
@@ -153,9 +160,7 @@ Limited to one namespace (`watch.namespace`), or with
 `tokenReview.enabled: false`, it binds no ClusterRole: a `kubernetes`
 auth provider then raises `TokenReviewUnavailable`, bind TokenReview to
 the instance's ServiceAccount yourself. Fully namespaced
-(`watch.clusterKinds: false`) the operator has none of the rules above:
-a managed instance is refused (`Ready: False`, `InvalidSpec`); use
-external mode there.
+(`watch.clusterKinds: false`) is the same, on the Role alone.
 
 **Upgrading from 0.1.0**: 0.1.0 created one binding per instance
 (`weebo-batlehub-tokenreview-<hash>`), which the operator may no longer
