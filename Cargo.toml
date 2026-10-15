@@ -8,6 +8,7 @@ members = [
     "crates/adapters-inbound",
     "crates/operator",
     "crates/crdgen",
+    "crates/importer",
     "crates/testkit",
     "crates/batlehub-client",
 ]
@@ -37,6 +38,7 @@ weebo-kit-application = { git = "https://github.com/batleforc/weebo-operator-kit
 weebo-kit-adapters = { git = "https://github.com/batleforc/weebo-operator-kit", tag = "v0.15.1" }
 weebo-kit-runtime = { git = "https://github.com/batleforc/weebo-operator-kit", tag = "v0.15.1" }
 weebo-kit-testkit = { git = "https://github.com/batleforc/weebo-operator-kit", tag = "v0.15.1" }
+weebo-kit-perf = { git = "https://github.com/batleforc/weebo-operator-kit", tag = "v0.15.1" }
 
 # BatleHub's own configuration parser (merge, validation, reload tiers —
 # its RFC 0037), never a copy. Moved with the generated client and the

@@ -25,6 +25,11 @@ batlehub, D8 révisée) et sur laquelle tout est épinglé depuis le M2 ; kit
 
 ### Historique
 
+- **v2.6 — M5, 2026-10-15** : importeur et budget livrés (Constats du
+  M5) ; reste la release 0.1.0. Écarts : l'importeur lit les values d'une
+  release (`helm get values --all`), pas le Secret de release de Helm ;
+  il ne sait pas énumérer une policy posée sur un paquet que l'instance
+  ne liste pas (`--package` la nomme).
 - **v2.5 — M4, 2026-10-15** : mode managed livré (Constats du M4).
   Écarts : le bloc `[[auth]]` de l'opérateur n'a pas de Secret
   `<name>-operator-auth` — il est ajouté au provider `token` du fichier
@@ -2004,6 +2009,35 @@ mode ». Use case et constructeurs en tests unitaires.
 - **Poste local** : `fs.inotify.max_user_instances` à 128 fait échouer le
   watcher de config de batlehub (« Too many open files ») dans kind ;
   sans effet sur l'approbation par l'opérateur.
+
+### Constats du M5 (2026-10-15)
+
+- **Importeur** (`weebo-batlehub-importer`, dans les deux images, smoke
+  `--version` en CI) : `instance` traduit les values du chart batlehub en
+  `BatleHubLocalInstance` — `external` + `podSelector` (labels du chart,
+  workers exclus par `component DoesNotExist`) ou `managed` (table §8 ;
+  avertit pour `externalManifest`, `trivy`, les règles YARA, le Secret de
+  credentials à labelliser, et les noms d'objets en collision avec ceux
+  de la release) ; `governance` adopte grants et policies (`Adopter` du
+  kit : CR en pause, status amorcé, relâché).
+- **Énumérer la gouvernance** : batlehub n'a pas de liste des grants ni
+  des policies d'une registry. L'importeur part de `GET /admin/packages`
+  (une entrée par version, paginé), des exemptions de la registry et des
+  `--package` ; les grants d'un paquet et de toutes ses versions viennent
+  d'une seule lecture (`GET …/grants?package=` sans version). Les lignes
+  d'ownership sont laissées de côté.
+- **Status amorcé** : `applied[]` (actions demandées = stockées),
+  `appliedPolicyHash` = `observedPolicyHash` = hash de la policy relue
+  (exemptions exclues, comme le contrôleur), `appliedExemptions`. Vérifié
+  en envtest et en live contre 1.6.0 : les CR adoptés sont `Reconciled`
+  sans aucune écriture vers batlehub (`lastSyncTime` absent), et leur
+  suppression révoque.
+- **Budget** (`task perf`, `weebo-kit-perf`, rapport sous `docs/perf/`,
+  `perf.yml` du kit chaque semaine) : 200 `BatleHubPackageGrant` sur une
+  instance external wiremock, `Budget::small_cluster()` tenu largement —
+  pic RSS 36 Mio (budget 192), 5–6 ms CPU et 4–6 requêtes API par
+  objet, convergence 0,4–0,6 s pour 100, croissance RSS au repos 6,6 %
+  (budget 10 %).
 
 ## 11. Évolutions proposées
 

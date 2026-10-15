@@ -771,6 +771,149 @@ impl AdminGateway for HttpAdminGateway {
         Ok(())
     }
 
+    /// `GET /api/v1/admin/packages?registry=` (`packages:read`), page by
+    /// page: one entry per version, grouped by package.
+    async fn packages(
+        &self,
+        registry: &str,
+    ) -> Result<std::collections::BTreeMap<String, Vec<String>>, GatewayError> {
+        const ENDPOINT: &str = "/api/v1/admin/packages";
+        const PER_PAGE: u64 = 200;
+        #[derive(Deserialize)]
+        struct Id {
+            name: String,
+            #[serde(default)]
+            version: String,
+        }
+        #[derive(Deserialize)]
+        struct Item {
+            package_id: Id,
+        }
+        #[derive(Deserialize)]
+        struct Page {
+            items: Vec<Item>,
+            total: u64,
+        }
+        let mut packages: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+        let mut seen = 0;
+        for page in 1.. {
+            let (status, body) = self
+                .raw(
+                    reqwest::Method::GET,
+                    &["api", "v1", "admin", "packages"],
+                    &[
+                        ("registry", registry),
+                        ("page", &page.to_string()),
+                        ("per_page", &PER_PAGE.to_string()),
+                    ],
+                    None,
+                )
+                .await?;
+            if !status.is_success() {
+                return Err(governance_error(ENDPOINT, status, &body));
+            }
+            let page: Page = decode(ENDPOINT, &body)?;
+            let count = page.items.len() as u64;
+            for item in page.items {
+                let versions = packages.entry(item.package_id.name).or_default();
+                let version = item.package_id.version;
+                if !version.is_empty() && !versions.contains(&version) {
+                    versions.push(version);
+                }
+            }
+            seen += count;
+            if count == 0 || seen >= page.total {
+                break;
+            }
+        }
+        Ok(packages)
+    }
+
+    /// `GET …/grants?package=` without a version: the package node and
+    /// every version node beneath it.
+    async fn package_grants(
+        &self,
+        registry: &str,
+        package: &str,
+    ) -> Result<Vec<(Option<String>, StoredGrant)>, GatewayError> {
+        const ENDPOINT: &str = "/api/v1/admin/registries/{registry}/grants";
+        #[derive(Deserialize)]
+        struct Row {
+            node_kind: String,
+            node_key: String,
+            subject: String,
+            actions: Vec<String>,
+            #[serde(default)]
+            from_ownership: bool,
+            #[serde(default)]
+            granted_by: Option<String>,
+        }
+        #[derive(Deserialize)]
+        struct Listing {
+            grants: Vec<Row>,
+        }
+        let (status, body) = self
+            .raw(
+                reqwest::Method::GET,
+                &Self::registry_path(registry, &["grants"]),
+                &[("package", package)],
+                None,
+            )
+            .await?;
+        if !status.is_success() {
+            return Err(governance_error(ENDPOINT, status, &body));
+        }
+        let prefix = format!("{package}@");
+        Ok(decode::<Listing>(ENDPOINT, &body)?
+            .grants
+            .into_iter()
+            .filter_map(|r| {
+                let version = match r.node_kind.as_str() {
+                    "package" if r.node_key == package => None,
+                    "version" => Some(r.node_key.strip_prefix(&prefix)?.to_string()),
+                    _ => return None,
+                };
+                Some((
+                    version,
+                    StoredGrant {
+                        subject: r.subject,
+                        actions: r.actions,
+                        from_ownership: r.from_ownership,
+                        granted_by: r.granted_by,
+                    },
+                ))
+            })
+            .collect())
+    }
+
+    /// `GET /api/v1/admin/registries/{registry}/exemptions` (`owners:read`).
+    async fn exemption_nodes(&self, registry: &str) -> Result<Vec<(String, String)>, GatewayError> {
+        const ENDPOINT: &str = "/api/v1/admin/registries/{registry}/exemptions";
+        #[derive(Deserialize)]
+        struct Entry {
+            package: String,
+            version: String,
+        }
+        let (status, body) = self
+            .raw(
+                reqwest::Method::GET,
+                &Self::registry_path(registry, &["exemptions"]),
+                &[],
+                None,
+            )
+            .await?;
+        if !status.is_success() {
+            return Err(governance_error(ENDPOINT, status, &body));
+        }
+        let mut nodes: Vec<(String, String)> = decode::<Vec<Entry>>(ENDPOINT, &body)?
+            .into_iter()
+            .map(|e| (e.package, e.version))
+            .collect();
+        nodes.sort();
+        nodes.dedup();
+        Ok(nodes)
+    }
+
     /// `GET /api/v1/me`.
     async fn whoami(&self) -> Result<Option<String>, GatewayError> {
         let me = front_office_api::me(&self.config)

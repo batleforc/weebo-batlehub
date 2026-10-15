@@ -2164,6 +2164,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "importer"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "adapters-inbound",
+ "adapters-outbound",
+ "anyhow",
+ "api",
+ "application",
+ "clap",
+ "k8s-openapi",
+ "kube",
+ "rustls",
+ "serde",
+ "serde_json",
+ "serde_norway",
+ "sha2 0.10.9",
+ "testkit",
+ "tokio",
+ "weebo-kit-adapters",
+ "weebo-kit-api",
+ "weebo-kit-runtime",
+ "wiremock",
+]
+
+[[package]]
 name = "indexmap"
 version = "1.9.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2910,6 +2935,7 @@ dependencies = [
  "tracing",
  "uuid",
  "weebo-kit-adapters",
+ "weebo-kit-perf",
  "weebo-kit-runtime",
  "wiremock",
 ]
@@ -5149,6 +5175,21 @@ dependencies = [
 name = "weebo-kit-domain"
 version = "0.15.1"
 source = "git+https://github.com/batleforc/weebo-operator-kit?tag=v0.15.1#77b4d2850b863458b683c3bd79a4cf880fb55664"
+
+[[package]]
+name = "weebo-kit-perf"
+version = "0.15.1"
+source = "git+https://github.com/batleforc/weebo-operator-kit?tag=v0.15.1#77b4d2850b863458b683c3bd79a4cf880fb55664"
+dependencies = [
+ "http",
+ "k8s-openapi",
+ "kube",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "weebo-kit-testkit",
+]
 
 [[package]]
 name = "weebo-kit-runtime"

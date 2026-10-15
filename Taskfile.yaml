@@ -142,6 +142,18 @@ tasks:
         done
       - mise exec -- cargo test -p adapters-outbound --test live_batlehub -- --ignored
       - mise exec -- cargo test -p adapters-inbound --test live_batlehub -- --ignored
+      - mise exec -- cargo test -p importer --test live_batlehub -- --ignored
+
+  perf:
+    desc: >
+      What the operator costs a cluster (weebo-kit-perf): the release binary
+      against envtest and a fake BatleHub — idle, a burst of
+      BatleHubPackageGrants, churn, delete — checked against the
+      small-cluster budget; report in target/perf/. PERF_OBJECTS,
+      PERF_IDLE_SECS; WEEBO_PERF_BASELINE=<previous json>;
+      WEEBO_PERF_REPORT_ONLY=1 to report without failing.
+    cmds:
+      - mise exec -- cargo test --release -p operator --test perf -- --ignored --nocapture
 
   coverage:
     desc: "Line coverage of every test layer, live tests against a real BatleHub included (cargo llvm-cov), failing under 85%; writes target/lcov.info"

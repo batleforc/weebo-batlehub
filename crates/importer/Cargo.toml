@@ -1,0 +1,34 @@
+[package]
+name = "importer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "weebo-batlehub-importer"
+path = "src/main.rs"
+
+[dependencies]
+weebo-kit-adapters = { workspace = true }
+weebo-kit-api = { workspace = true }
+api = { workspace = true }
+application = { workspace = true }
+adapters-outbound = { workspace = true }
+kube = { workspace = true }
+k8s-openapi = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_norway = { workspace = true }
+sha2 = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+rustls = { workspace = true }
+
+[dev-dependencies]
+adapters-inbound = { workspace = true }
+weebo-kit-runtime = { workspace = true }
+application = { workspace = true, features = ["test-support"] }
+testkit = { workspace = true }
+wiremock = { workspace = true }

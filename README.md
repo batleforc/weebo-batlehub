@@ -23,8 +23,10 @@ Kubernetes operator driving [BatleHub](https://github.com/batlehub/batlehub)
 | `BatleHubPackagePolicy` | Namespaced | The policy of a package or a version, and a version's exemptions from its gates |
 | `BatleHubMaintenance`   | Namespaced | An admin action (cache, retention, reload, blocks, banner…) run once or on a schedule, at most once per run |
 
-Planned (see the plan): the importer (a Helm release of BatleHub into
-CRs).
+`weebo-batlehub-importer` (in the same images) describes what exists as
+CRs: a Helm release of BatleHub as a `BatleHubLocalInstance`, and the
+grants and policies of a live instance, adopted
+([guide](https://batleforc.github.io/weebo-batlehub/docs/guides/migration)).
 
 The token Secret must be labelled `batlehub.weebo.io/instance-token: "true"`:
 the operator reads Secrets with its own rights and sends the token to the
@@ -42,6 +44,7 @@ Hexagonal, one crate per layer, same rules as every weebo operator:
 | `batlehub-client`   | **generated** from BatleHub's OpenAPI (`spec/`, `task gen:client`), never hand-edited  |
 | `adapters-outbound` | `HttpAdminGateway` on the generated client, its factory, `LocalInstanceDirectory`, the configuration parser |
 | `adapters-inbound`  | the controllers and the HTTPS router (health, scope guard, admission webhook)          |
+| `importer`          | `weebo-batlehub-importer`: a Helm release and an instance's governance as CRs           |
 | `operator`          | the binary: telemetry, leader election, HTTPS server, controllers                      |
 | `crdgen`            | writes `deploy/crd/` from `api`                                                        |
 | `testkit`           | envtest and fakes for the integration tests                                            |
