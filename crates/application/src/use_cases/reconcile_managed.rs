@@ -25,7 +25,7 @@
 //!    approved too. A reload BatleHub let expire is re-staged under a new
 //!    nonce.
 
-use api::local_instance::{Reload, ReloadStrategy, RestartPolicy};
+use api::local_instance::{PartialPolicy, Reload, ReloadStrategy, RestartPolicy};
 use api::managed::{CONFIG_KEY, ManagedInstance, Names, UpdateStrategy};
 use domain::error::ReasonCode;
 use domain::{Advisory, Failure};
@@ -34,12 +34,12 @@ use serde_json::{Value, json};
 use super::Outcome;
 use super::reconcile_instance::{
     ConfigState, ConfigStatus, InstanceReport, Observed, PROPAGATION_RETRY_SECS,
-    REJECTION_BACKOFF_SECS, holds, with_nonce, without_nonce,
+    REJECTION_BACKOFF_SECS, with_nonce, without_nonce,
 };
 use super::render_config::{Rendered, sha256};
 use crate::ports::{
-    AdminGateway, ConfigParser, GatewayError, Owner, PendingSource, PodGateway, TokenCheck,
-    WorkloadError, Workloads,
+    AdminGateway, ConfigParser, GatewayError, KeyChanges, Owner, PendingSource, PodGateway,
+    Reloaded, TokenCheck, WorkloadError, Workloads,
 };
 use crate::workload::{DocumentFacts, WorkloadInput, objects, removed, update_strategy};
 
@@ -58,6 +58,9 @@ pub struct ManagedPass<'a> {
     pub state: ConfigState,
     /// `status.restartKeys`: keys changed and not yet restarted.
     pub restart_keys: Vec<String>,
+    /// `status.partialKeys`: keys partially applied since the pods
+    /// started.
+    pub partial_keys: Vec<String>,
     pub operator_namespace: Option<String>,
     /// The chart's TokenReview `ClusterRole`; `None` when the operator may
     /// not bind it (limited to one namespace).
@@ -191,13 +194,51 @@ pub async fn reconcile_managed(
         rolled_out: None,
     };
     let result = run(&pass, parser, workloads, reach, &mut report).await;
-    let advisories = std::mem::take(&mut report.instance.outcome.advisories);
+    let mut advisories = std::mem::take(&mut report.instance.outcome.advisories);
+    // What the pods still lack, as the pass left it.
+    let status = report.instance.config.as_ref().expect("set above");
+    if pass.spec.hot_reload {
+        if pass.reload.restart == RestartPolicy::Never && !status.restart_keys.is_empty() {
+            advisories.push(Advisory {
+                reason: ReasonCode::RestartRequired,
+                message: format!(
+                    "keys BatleHub reads at startup changed and the pods won't restart \
+                     (reload.restart: Never): {}",
+                    status.restart_keys.join(", ")
+                ),
+            });
+        }
+        if !status.partial_keys.is_empty() {
+            advisories.push(Advisory {
+                reason: ReasonCode::PartiallyApplied,
+                message: format!(
+                    "hot-reloaded, but what BatleHub built at startup (warming, release \
+                     imports, the scan worker) keeps the old values until the proxy pods \
+                     restart: {} (reload.partial: Restart rolls them instead)",
+                    status.partial_keys.join(", ")
+                ),
+            });
+        }
+    }
+    advisories.extend(cache_not_resized(&pass, workloads).await);
     report.instance.outcome = match result {
         Ok(message) => Outcome::synced(message),
         Err(failure) => Outcome::failed(failure),
     };
     report.instance.outcome.advisories = advisories;
     report
+}
+
+/// The cache's claim the operator created, against `persistence.size`
+/// (a claim it can't read says nothing: the pass reports its own errors).
+async fn cache_not_resized(pass: &ManagedPass<'_>, workloads: &dyn Workloads) -> Option<Advisory> {
+    let persistence = &pass.spec.persistence;
+    if !persistence.enabled || persistence.existing_claim.is_some() {
+        return None;
+    }
+    let name = Names::new(&pass.owner.name).cache();
+    let current = workloads.claim_size(&pass.owner, &name).await.ok()??;
+    crate::cache_volume::not_resized(pass.spec, &current)
 }
 
 fn kept(state: &ConfigState) -> ConfigStatus {
@@ -211,6 +252,7 @@ fn kept(state: &ConfigState) -> ConfigStatus {
         rejection_message: state.rejection_message.clone(),
         unpersisted_hash: None,
         restart_keys: Vec::new(),
+        partial_keys: Vec::new(),
         pods: state.pods.clone(),
         reloaded_at: None,
     }
@@ -228,6 +270,7 @@ async fn run(
     let state = &pass.state;
     let status = report.instance.config.as_mut().expect("set above");
     status.restart_keys = pass.restart_keys.clone();
+    status.partial_keys = pass.partial_keys.clone();
     let rendered = pass.rendered.clone()?;
     let generated = spec.operator_access.generate_token;
 
@@ -262,7 +305,13 @@ async fn run(
     if let Some(token) = token_for_check {
         let effective = match &credentials {
             Some(layer) => parser.merge(&[&document, layer]).map_err(|e| {
-                Failure::new(ReasonCode::ConfigInvalid, format!("credentials: {e}"))
+                Failure::new(
+                    ReasonCode::ConfigInvalid,
+                    format!(
+                        "managed.credentials: {}",
+                        crate::redact::values(&e.to_string())
+                    ),
+                )
             })?,
             None => document.clone(),
         };
@@ -323,13 +372,21 @@ async fn run(
         (document.clone(), hash.clone(), file)
     };
 
-    // 4. Restart or reload.
+    // 4. Restart or reload. Restart-only keys stay owed
+    //    (`status.restartKeys`) until the proxy pods start on the
+    //    configuration — a pass that fails half-way, or `Never` turned
+    //    into `Rollout`, still rolls them.
     let facts = DocumentFacts::of(
         &parser
             .fragment(without_credentials(&target))
             .map_err(|e| Failure::new(ReasonCode::ConfigInvalid, e.to_string()))?,
     );
     let strategy = update_strategy(spec, &facts);
+    report
+        .instance
+        .outcome
+        .advisories
+        .extend(crate::cache_volume::single_writer(spec, &facts));
     report.workload.update_strategy = Some(
         match strategy {
             UpdateStrategy::Recreate => "Recreate",
@@ -342,98 +399,49 @@ async fn run(
         .await
         .map_err(workload_failure)?;
     let current = rollout.as_ref().and_then(|r| r.config_hash.clone());
-    let changed_keys = match previous.as_deref().map(without_nonce) {
+    let changes = match previous.as_deref().map(without_nonce) {
         Some(before) if before != target => parser
-            .restart_keys(without_credentials(before), without_credentials(&target))
+            .classify(without_credentials(before), without_credentials(&target))
             .map_err(|e| Failure::new(ReasonCode::ConfigInvalid, e.to_string()))?,
-        _ => Vec::new(),
+        _ => KeyChanges::default(),
     };
     // Pods that started on the configuration run every key of it.
-    if current.as_deref() == Some(target_hash.as_str()) {
+    if current.as_deref() == Some(target_hash.as_str()) || !spec.hot_reload {
         status.restart_keys.clear();
+        status.partial_keys.clear();
     }
-    let restart_hash = match current {
+    let policy = Policy {
+        rollout: pass.reload.restart == RestartPolicy::Rollout,
+        partial_restarts: pass.reload.partial == PartialPolicy::Restart,
+    };
+    if spec.hot_reload {
+        policy.owe(status, changes.restart, changes.partial);
+    }
+    let restart_hash = match current.as_deref() {
         None => target_hash.clone(),
         Some(_) if !spec.hot_reload => target_hash.clone(),
-        Some(current) if changed_keys.is_empty() => current,
-        Some(current) => match pass.reload.restart {
-            RestartPolicy::Rollout => {
-                if current != target_hash {
-                    report.rolled_out = Some(RolledOut {
-                        keys: changed_keys.clone(),
-                        interrupts: strategy == UpdateStrategy::Recreate,
-                    });
-                }
-                status.restart_keys.clear();
-                target_hash.clone()
-            }
-            RestartPolicy::Never => {
-                for key in changed_keys {
-                    if !status.restart_keys.contains(&key) {
-                        status.restart_keys.push(key);
-                    }
-                }
-                current
-            }
-        },
+        Some(current) if status.restart_keys.is_empty() || !policy.rollout => current.to_string(),
+        Some(_) => target_hash.clone(),
     };
-    if !status.restart_keys.is_empty() {
-        report.instance.outcome.advisories.push(Advisory {
-            reason: ReasonCode::RestartRequired,
-            message: format!(
-                "keys BatleHub reads at startup changed and the pods won't restart \
-                 (reload.restart: Never): {}",
-                status.restart_keys.join(", ")
-            ),
-        });
-    }
 
     // 5. The objects.
-    let input = WorkloadInput {
-        name: &pass.owner.name,
-        namespace: &pass.owner.namespace,
-        spec,
+    let deploy = Deploy {
+        pass,
         file: &file,
         facts: &facts,
-        restart_hash: &restart_hash,
-        config_hash: &target_hash,
-        operator_namespace: pass.operator_namespace.as_deref(),
+        target_hash: &target_hash,
     };
-    workloads
-        .apply(&pass.owner, &objects(&input))
-        .await
-        .map_err(workload_failure)?;
-    // TokenReview, for a `kubernetes` auth provider.
-    let token_review = facts.kubernetes_auth && spec.service_account.auto_token_review;
-    match (&pass.token_review_role, token_review) {
-        (Some(role), true) => {
-            let account = spec
-                .service_account
-                .name
-                .clone()
-                .unwrap_or_else(|| pass.owner.name.clone());
-            workloads
-                .bind_token_review(&pass.owner, &account, role)
-                .await
-                .map_err(workload_failure)?;
-        }
-        (None, true) => report.instance.outcome.advisories.push(Advisory {
-            reason: ReasonCode::TokenReviewUnavailable,
-            message: "the configuration has a kubernetes auth provider, and the operator \
-                      (limited to one namespace) binds no ClusterRole: bind TokenReview \
-                      (create) to the instance's ServiceAccount yourself"
-                .into(),
-        }),
-        (_, false) => workloads
-            .unbind_token_review(&pass.owner)
-            .await
-            .map_err(workload_failure)?,
-    }
-    for (api_version, kind, name) in removed(&input) {
-        workloads
-            .remove(&pass.owner, api_version, kind, &name)
-            .await
-            .map_err(workload_failure)?;
+    let advisory = deploy.apply(workloads, &restart_hash).await?;
+    report.instance.outcome.advisories.extend(advisory);
+    let status = report.instance.config.as_mut().expect("set above");
+    if spec.hot_reload
+        && let Some(current) = current.as_deref()
+        && current != restart_hash
+    {
+        report.rolled_out = Some(RolledOut {
+            keys: status.restart_keys.clone(),
+            interrupts: strategy == UpdateStrategy::Recreate,
+        });
     }
     let rollout = workloads
         .rollout(&pass.owner, &names.proxy())
@@ -452,7 +460,9 @@ async fn run(
         ));
     }
 
-    // 6. Every pod on the file, then approved.
+    // 6. Every pod on the file — its exact bytes, nonce included: a reload
+    //    of the bytes before a re-stage would find them tried already —
+    //    then approved.
     let (gateway, _) = reach.gateway().await?;
     let pods = reach.pods().await?;
     if pods.is_empty() {
@@ -466,7 +476,7 @@ async fn run(
     let mut behind = Vec::new();
     for pod in &pods {
         let content = pod.gateway.config_content().await.map_err(fail)?;
-        if !holds(&content, &target) {
+        if content.trim_end_matches('\n') != file.trim_end_matches('\n') {
             behind.push(api::local_instance::PodConfig {
                 name: pod.name.clone(),
                 config_hash: Some(sha256(without_nonce(&content))),
@@ -487,15 +497,42 @@ async fn run(
     }
     status.pods.clear();
     if spec.hot_reload && status.applied_hash.as_deref() != Some(target_hash.as_str()) {
-        approve(
-            &pods,
-            gateway.as_ref(),
-            &target,
-            &target_hash,
+        let approval = Approval {
+            pods: &pods,
+            gateway: gateway.as_ref(),
+            target: &target,
+            hash: &target_hash,
             state,
-            report,
-        )
-        .await?;
+            policy,
+            // BatleHub merges the credentials layer, and expands the
+            // environment, before it quotes a value.
+            sensitive: rendered.sensitive || credentials.is_some(),
+            // Pods that started on it owe it nothing, whatever BatleHub
+            // compares (`*` when a placeholder names an entry).
+            may_owe: restart_hash != target_hash,
+        };
+        if approval.run(report).await? == Approved::Roll {
+            // Restart-only keys the dry run or a pod reported (the
+            // credentials layer's, a pod's environment): the pods restart
+            // onto the configuration.
+            let status = report.instance.config.as_ref().expect("set above");
+            let keys = status.restart_keys.clone();
+            deploy.apply(workloads, &target_hash).await?;
+            report.rolled_out = Some(RolledOut {
+                keys: keys.clone(),
+                interrupts: strategy == UpdateStrategy::Recreate,
+            });
+            report.instance.due_in = Some(PROPAGATION_RETRY_SECS);
+            return Err(Failure::new(
+                ReasonCode::WorkloadNotReady,
+                format!(
+                    "keys BatleHub reads at startup changed ({}): the proxy pods restart onto \
+                     configuration {}",
+                    keys.join(", "),
+                    short(&target_hash)
+                ),
+            ));
+        }
     } else if spec.hot_reload {
         // Steady state: a reload a pod's watcher staged from the operator's
         // files (the credentials arriving late) is the desired state.
@@ -543,112 +580,330 @@ async fn run(
     ))
 }
 
+/// `keys` added to `list`, each once, in order.
+fn merge_into(list: &mut Vec<String>, keys: impl IntoIterator<Item = String>) {
+    for key in keys {
+        if !list.contains(&key) {
+            list.push(key);
+        }
+    }
+}
+
+/// What `reload.restart` and `reload.partial` make of changed keys.
+#[derive(Debug, Clone, Copy)]
+struct Policy {
+    /// `reload.restart: Rollout`.
+    rollout: bool,
+    /// `reload.partial: Restart`: the `Partial` tier counts as restart.
+    partial_restarts: bool,
+}
+
+impl Policy {
+    /// Records keys a reload doesn't fully apply: owed a restart
+    /// (`status.restartKeys`), or partially applied
+    /// (`status.partialKeys`).
+    fn owe(self, status: &mut ConfigStatus, restart: Vec<String>, partial: Vec<String>) {
+        merge_into(&mut status.restart_keys, restart);
+        if self.partial_restarts {
+            merge_into(&mut status.restart_keys, partial);
+        } else {
+            merge_into(&mut status.partial_keys, partial);
+        }
+    }
+}
+
+/// The objects of the pass, applied with a pod template hash.
+struct Deploy<'a> {
+    pass: &'a ManagedPass<'a>,
+    file: &'a str,
+    facts: &'a DocumentFacts,
+    target_hash: &'a str,
+}
+
+impl Deploy<'_> {
+    /// Applies every object, the proxy pods' template carrying
+    /// `restart_hash`; then the TokenReview binding and what the spec no
+    /// longer asks for.
+    async fn apply(
+        &self,
+        workloads: &dyn Workloads,
+        restart_hash: &str,
+    ) -> Result<Option<Advisory>, Failure> {
+        let pass = self.pass;
+        let spec = pass.spec;
+        let input = WorkloadInput {
+            name: &pass.owner.name,
+            namespace: &pass.owner.namespace,
+            spec,
+            file: self.file,
+            facts: self.facts,
+            restart_hash,
+            config_hash: self.target_hash,
+            operator_namespace: pass.operator_namespace.as_deref(),
+        };
+        workloads
+            .apply(&pass.owner, &objects(&input))
+            .await
+            .map_err(workload_failure)?;
+        let mut advisory = None;
+        // TokenReview, for a `kubernetes` auth provider.
+        let token_review = self.facts.kubernetes_auth && spec.service_account.auto_token_review;
+        match (&pass.token_review_role, token_review) {
+            (Some(role), true) => {
+                let account = spec
+                    .service_account
+                    .name
+                    .clone()
+                    .unwrap_or_else(|| pass.owner.name.clone());
+                workloads
+                    .bind_token_review(&pass.owner, &account, role)
+                    .await
+                    .map_err(workload_failure)?;
+            }
+            (None, true) => {
+                advisory = Some(Advisory {
+                    reason: ReasonCode::TokenReviewUnavailable,
+                    message: "the configuration has a kubernetes auth provider, and the operator \
+                              (limited to one namespace) binds no ClusterRole: bind TokenReview \
+                              (create) to the instance's ServiceAccount yourself"
+                        .into(),
+                })
+            }
+            // No role (limited to one namespace, `tokenReview.enabled:
+            // false`): the operator binds nothing, so has nothing to unbind
+            // — nor the right to read a cluster-scoped binding.
+            (Some(role), false) => workloads
+                .unbind_token_review(&pass.owner, role)
+                .await
+                .map_err(workload_failure)?,
+            (None, false) => {}
+        }
+        for (api_version, kind, name) in removed(&input) {
+            workloads
+                .remove(&pass.owner, api_version, kind, &name)
+                .await
+                .map_err(workload_failure)?;
+        }
+        Ok(advisory)
+    }
+}
+
+/// How an approval ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Approved {
+    /// Every pod loaded the configuration.
+    Done,
+    /// Keys read at startup only are owed and `reload.restart: Rollout`:
+    /// the pods restart onto it.
+    Roll,
+}
+
 /// The approval of a new configuration every pod serves: one dry run,
 /// then a reload on each pod.
-async fn approve(
-    pods: &[PodGateway],
-    gateway: &dyn AdminGateway,
-    target: &str,
-    hash: &str,
-    state: &ConfigState,
-    report: &mut ManagedReport,
-) -> Result<(), Failure> {
-    let status = report.instance.config.as_mut().expect("set above");
-    if status.rejected_hash.as_deref() == Some(hash)
-        && let Some(at) = status.rejected_at
-        && state.now - at < REJECTION_BACKOFF_SECS
-    {
-        report.instance.due_in = Some((REJECTION_BACKOFF_SECS - (state.now - at)) as u64);
-        return Err(Failure::new(
-            ReasonCode::ConfigRejected,
-            format!(
-                "configuration {}: {} (reloaded again 10 minutes after \
-                 status.lastRejectionTime, or at once on a change of the spec)",
-                short(hash),
-                status
-                    .rejection_message
-                    .as_deref()
-                    .unwrap_or("the instance refused it")
-            ),
-        ));
-    }
-    let rejected = |message: String, status: &mut ConfigStatus| {
-        status.rejected_hash = Some(hash.to_string());
-        status.rejected_at = Some(state.now);
-        status.rejection_message = Some(message.clone());
-        Failure::new(
-            ReasonCode::ConfigRejected,
-            format!(
-                "configuration {}: {message} (reloaded again 10 minutes after \
-                 status.lastRejectionTime, or at once on a change of the spec)",
-                short(hash)
-            ),
-        )
-    };
-    match gateway.validate_config(target).await {
-        Ok(_) => {}
-        Err(GatewayError::Rejected(message)) => {
-            let failure = rejected(format!("the instance refuses it: {message}"), status);
-            report.instance.due_in = Some(REJECTION_BACKOFF_SECS as u64);
-            return Err(failure);
-        }
-        Err(e) => return Err(fail(e)),
-    }
-    let mut done: Vec<String> = Vec::new();
-    for pod in pods {
-        let partial = |done: &[String]| match done {
-            [] => String::new(),
-            done => format!(" ({} already loaded it)", done.join(", ")),
-        };
-        match pod.gateway.reload().await {
-            Ok(loaded) => {
-                if loaded {
-                    report.instance.reloaded = true;
-                    status.reloaded_at = Some(state.now);
-                }
-            }
-            Err(GatewayError::NoPending(why)) => {
-                // BatleHub let its pending expire: new bytes, staged by the
-                // watcher on the next sync.
-                status.nonce += 1;
-                report.instance.due_in = Some(PROPAGATION_RETRY_SECS);
+struct Approval<'a> {
+    pods: &'a [PodGateway],
+    gateway: &'a dyn AdminGateway,
+    target: &'a str,
+    hash: &'a str,
+    state: &'a ConfigState,
+    policy: Policy,
+    /// BatleHub's messages keep key paths and positions only.
+    sensitive: bool,
+    /// The pods didn't start on the configuration: the restart-only keys
+    /// BatleHub reports are owed.
+    may_owe: bool,
+}
+
+impl Approval<'_> {
+    async fn run(&self, report: &mut ManagedReport) -> Result<Approved, Failure> {
+        let (hash, state) = (self.hash, self.state);
+        let status = report.instance.config.as_mut().expect("set above");
+        let retry = "reloaded again 10 minutes after status.lastRejectionTime, or at once on a \
+                     change of the spec";
+        if status.rejected_hash.as_deref() == Some(hash)
+            && let Some(at) = status.rejected_at
+        {
+            if state.now - at < REJECTION_BACKOFF_SECS {
+                report.instance.due_in = Some((REJECTION_BACKOFF_SECS - (state.now - at)) as u64);
                 return Err(Failure::new(
-                    ReasonCode::ConfigPropagating,
+                    ReasonCode::ConfigRejected,
                     format!(
-                        "{}: {why}; written again under nonce {}{}",
-                        pod.name,
-                        status.nonce,
-                        partial(&done)
+                        "configuration {}: {} ({retry})",
+                        short(hash),
+                        status
+                            .rejection_message
+                            .as_deref()
+                            .unwrap_or("the instance refused it")
                     ),
                 ));
             }
+            // Waited out. The pods tried these bytes already (a reload of
+            // them stages nothing — it would read as loaded): new ones
+            // first, and a pod staging nothing for them refused them.
+            status.nonce += 1;
+            status.rejected_at = None;
+            report.instance.due_in = Some(PROPAGATION_RETRY_SECS);
+            return Err(Failure::new(
+                ReasonCode::ConfigPropagating,
+                format!(
+                    "configuration {} was refused 10 minutes ago: written again under nonce {} to \
+                     be retried",
+                    short(hash),
+                    status.nonce
+                ),
+            ));
+        }
+        // Retried under fresh bytes: a pod that had tried them already
+        // refused them, or let their pending reload expire.
+        let fresh = status.rejected_hash.as_deref() == Some(hash) && status.rejected_at.is_none();
+        let said = |message: String| {
+            if self.sensitive {
+                crate::redact::values(&message)
+            } else {
+                message
+            }
+        };
+        let rejected = |message: String, status: &mut ConfigStatus| {
+            status.rejected_hash = Some(hash.to_string());
+            status.rejected_at = Some(state.now);
+            status.rejection_message = Some(message.clone());
+            Failure::new(
+                ReasonCode::ConfigRejected,
+                format!("configuration {}: {message} ({retry})", short(hash)),
+            )
+        };
+        let check = match self.gateway.validate_config(self.target).await {
+            Ok(check) => check,
             Err(GatewayError::Rejected(message)) => {
                 let failure = rejected(
-                    format!(
-                        "{} failed to load it: {message}{}",
-                        pod.name,
-                        partial(&done)
-                    ),
+                    format!("the instance refuses it: {}", said(message)),
                     status,
                 );
                 report.instance.due_in = Some(REJECTION_BACKOFF_SECS as u64);
                 return Err(failure);
             }
-            Err(GatewayError::HotReloadDisabled(why)) => {
-                return Err(Failure::new(
-                    ReasonCode::HotReloadDisabled,
-                    format!(
-                        "{}: {why}. Hot reload is disabled by the pods' environment: set \
-                         managed.hotReload: false, every change then restarts the pods",
-                        pod.name
-                    ),
-                ));
-            }
             Err(e) => return Err(fail(e)),
+        };
+        if self.may_owe && !check.restart_required.is_empty() {
+            merge_into(&mut status.restart_keys, check.restart_required);
+            if self.policy.rollout {
+                return Ok(Approved::Roll);
+            }
         }
-        done.push(pod.name.clone());
+        let mut done: Vec<String> = Vec::new();
+        for pod in self.pods {
+            let partial = |done: &[String]| match done {
+                [] => String::new(),
+                done => format!(" ({} already loaded it)", done.join(", ")),
+            };
+            // Stopped half-way, some pods loaded it: those would find these
+            // bytes tried next time. New ones, and a pod staging nothing
+            // for them refused them.
+            let restage = |status: &mut ConfigStatus, done: &[String]| {
+                if !done.is_empty() {
+                    status.nonce += 1;
+                    if status.rejected_hash.as_deref() != Some(hash) {
+                        status.rejected_hash = Some(hash.to_string());
+                        status.rejected_at = None;
+                    }
+                }
+            };
+            match pod.gateway.reload().await {
+                Ok(Reloaded::Loaded {
+                    restart_required,
+                    partially_applied,
+                }) => {
+                    report.instance.reloaded = true;
+                    status.reloaded_at = Some(state.now);
+                    let restart = if self.may_owe {
+                        restart_required
+                    } else {
+                        Vec::new()
+                    };
+                    self.policy.owe(status, restart, partially_applied);
+                }
+                Ok(Reloaded::AlreadyTried) if fresh => {
+                    let failure = rejected(
+                        format!(
+                            "{} staged nothing for bytes written for it anew: it refused them \
+                             (its file watcher tried them first) or let their reload expire{}",
+                            pod.name,
+                            partial(&done)
+                        ),
+                        status,
+                    );
+                    report.instance.due_in = Some(REJECTION_BACKOFF_SECS as u64);
+                    return Err(failure);
+                }
+                Ok(Reloaded::AlreadyTried) => {
+                    // These bytes were tried before — run, refused, or let
+                    // expire: BatleHub doesn't say. Never read as loaded.
+                    status.nonce += 1;
+                    status.rejected_hash = Some(hash.to_string());
+                    status.rejected_at = None;
+                    report.instance.due_in = Some(PROPAGATION_RETRY_SECS);
+                    return Err(Failure::new(
+                        ReasonCode::ConfigPropagating,
+                        format!(
+                            "{} had already tried these bytes and doesn't say it runs them: \
+                             written again under nonce {}{}",
+                            pod.name,
+                            status.nonce,
+                            partial(&done)
+                        ),
+                    ));
+                }
+                Err(GatewayError::NoPending(why)) => {
+                    // BatleHub let its pending expire: new bytes, staged by
+                    // the watcher on the next sync.
+                    status.nonce += 1;
+                    report.instance.due_in = Some(PROPAGATION_RETRY_SECS);
+                    return Err(Failure::new(
+                        ReasonCode::ConfigPropagating,
+                        format!(
+                            "{}: {why}; written again under nonce {}{}",
+                            pod.name,
+                            status.nonce,
+                            partial(&done)
+                        ),
+                    ));
+                }
+                Err(GatewayError::Rejected(message)) => {
+                    let failure = rejected(
+                        format!(
+                            "{} failed to load it: {}{}",
+                            pod.name,
+                            said(message),
+                            partial(&done)
+                        ),
+                        status,
+                    );
+                    report.instance.due_in = Some(REJECTION_BACKOFF_SECS as u64);
+                    return Err(failure);
+                }
+                Err(GatewayError::HotReloadDisabled(why)) => {
+                    restage(status, &done);
+                    return Err(Failure::new(
+                        ReasonCode::HotReloadDisabled,
+                        format!(
+                            "{}: {why}. Hot reload is disabled by the pods' environment: set \
+                             managed.hotReload: false, every change then restarts the pods",
+                            pod.name
+                        ),
+                    ));
+                }
+                Err(e) => {
+                    restage(status, &done);
+                    return Err(fail(e));
+                }
+            }
+            done.push(pod.name.clone());
+        }
+        if self.policy.rollout && self.may_owe && !status.restart_keys.is_empty() {
+            return Ok(Approved::Roll);
+        }
+        Ok(Approved::Done)
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -709,6 +964,7 @@ mod tests {
             hash: sha256(&document),
             document,
             advisories: vec![],
+            sensitive: false,
         }
     }
 
@@ -719,7 +975,9 @@ mod tests {
         reach: FakeReach,
         state: ConfigState,
         restart_keys: Vec<String>,
+        partial_keys: Vec<String>,
         credentials: Option<String>,
+        token_review_role: Option<String>,
     }
 
     impl World {
@@ -734,7 +992,9 @@ mod tests {
                     ..Default::default()
                 },
                 restart_keys: vec![],
+                partial_keys: vec![],
                 credentials: None,
+                token_review_role: Some("weebo-batlehub-tokenreview".into()),
             }
         }
 
@@ -751,8 +1011,9 @@ mod tests {
                 credentials: self.credentials.clone().map(Ok),
                 state: self.state.clone(),
                 restart_keys: self.restart_keys.clone(),
+                partial_keys: self.partial_keys.clone(),
                 operator_namespace: None,
-                token_review_role: Some("weebo-batlehub-tokenreview".into()),
+                token_review_role: self.token_review_role.clone(),
             };
             let report =
                 reconcile_managed(pass, &FakeConfigParser, &self.workloads, &self.reach).await;
@@ -764,8 +1025,31 @@ mod tests {
                 self.state.rejected_at = config.rejected_at;
                 self.state.rejection_message = config.rejection_message.clone();
                 self.restart_keys = config.restart_keys.clone();
+                self.partial_keys = config.partial_keys.clone();
             }
             report
+        }
+
+        fn advised(report: &ManagedReport, reason: ReasonCode) -> bool {
+            report
+                .instance
+                .outcome
+                .advisories
+                .iter()
+                .any(|a| a.reason == reason)
+        }
+
+        /// Deployed, every pod on `config`.
+        async fn running(&mut self, config: Value) {
+            self.pass(config.clone()).await;
+            self.reach.sync(&self.workloads);
+            let report = self.pass(config).await;
+            assert_eq!(
+                reason(&report),
+                ReasonCode::Reconciled,
+                "{:?}",
+                report.instance.outcome
+            );
         }
 
         fn annotation(&self) -> String {
@@ -986,6 +1270,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_cache_claim_is_never_resized_but_said_so() {
+        let mut world = World::new();
+        let report = world.pass(json!({})).await;
+        assert!(
+            world
+                .workloads
+                .object("PersistentVolumeClaim", "hub-cache")
+                .is_some()
+        );
+        assert!(
+            !report
+                .instance
+                .outcome
+                .advisories
+                .iter()
+                .any(|a| a.reason == ReasonCode::CacheVolumeNotResized)
+        );
+        world.spec.persistence.size =
+            k8s_openapi::apimachinery::pkg::api::resource::Quantity("20Gi".into());
+        world.spec.replicas = 2;
+        let report = world.pass(json!({})).await;
+        let reasons: Vec<ReasonCode> = report
+            .instance
+            .outcome
+            .advisories
+            .iter()
+            .map(|a| a.reason)
+            .collect();
+        assert!(
+            reasons.contains(&ReasonCode::CacheVolumeNotResized),
+            "{reasons:?}"
+        );
+        assert!(
+            reasons.contains(&ReasonCode::CacheVolumeSingleWriter),
+            "{reasons:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn without_a_token_review_role_nothing_is_bound_nor_unbound() {
+        let mut world = World::new();
+        world.token_review_role = None;
+        let report = world.pass(json!({"auth": [{"type": "kubernetes"}]})).await;
+        assert!(
+            report
+                .instance
+                .outcome
+                .advisories
+                .iter()
+                .any(|a| a.reason == ReasonCode::TokenReviewUnavailable)
+        );
+        world.pass(json!({})).await;
+        // No cluster-scoped call at all: it would be forbidden.
+        assert!(
+            world.workloads.removed().is_empty(),
+            "{:?}",
+            world.workloads.removed()
+        );
+    }
+
+    #[tokio::test]
     async fn a_rollout_in_progress_waits() {
         let mut world = World::new();
         world.workloads.hold_rollout(true);
@@ -1009,5 +1354,220 @@ mod tests {
         assert_eq!(reason(&again), ReasonCode::ConfigRejected);
         // Waited out: nothing reloaded.
         assert!(!world.reach.pods[0].1.calls().iter().any(|c| c == "reload"));
+    }
+
+    #[tokio::test]
+    async fn restart_keys_stay_owed_until_the_pods_start_on_the_configuration() {
+        let mut world = World::new();
+        world.running(json!({"restart": 1})).await;
+        let first = world.annotation();
+        // The Secret is written, then an object after it can't be: the
+        // Deployment keeps its template.
+        world.workloads.foreign("Service", "hub");
+        let report = world.pass(json!({"restart": 2})).await;
+        assert_eq!(reason(&report), ReasonCode::OwnedObjectConflict);
+        assert_eq!(report.rolled_out, None);
+        assert_eq!(world.restart_keys, ["restart"]);
+        // Fixed: the file is already the new one, the keys are still owed.
+        world.workloads.unforeign("Service", "hub");
+        let report = world.pass(json!({"restart": 2})).await;
+        assert_ne!(world.annotation(), first);
+        assert_eq!(
+            report.rolled_out,
+            Some(RolledOut {
+                keys: vec!["restart".into()],
+                interrupts: true
+            })
+        );
+        // Started on it: nothing owed any more, nothing rolled again.
+        world.reach.sync(&world.workloads);
+        let report = world.pass(json!({"restart": 2})).await;
+        assert_eq!(reason(&report), ReasonCode::Reconciled);
+        assert!(world.restart_keys.is_empty());
+        assert_eq!(report.rolled_out, None);
+    }
+
+    #[tokio::test]
+    async fn never_turned_into_rollout_rolls_the_keys_held_back() {
+        let mut world = World::new();
+        world.reload.restart = RestartPolicy::Never;
+        world.running(json!({"restart": 1})).await;
+        let first = world.annotation();
+        world.pass(json!({"restart": 2})).await;
+        world.reach.sync(&world.workloads);
+        let report = world.pass(json!({"restart": 2})).await;
+        assert_eq!(reason(&report), ReasonCode::Reconciled);
+        assert!(World::advised(&report, ReasonCode::RestartRequired));
+        assert_eq!(world.annotation(), first);
+
+        world.reload.restart = RestartPolicy::Rollout;
+        let report = world.pass(json!({"restart": 2})).await;
+        assert_ne!(world.annotation(), first);
+        assert!(report.rolled_out.is_some());
+        assert!(!World::advised(&report, ReasonCode::RestartRequired));
+    }
+
+    #[tokio::test]
+    async fn a_restart_key_only_batlehub_sees_rolls_the_pods_too() {
+        // A key of the credentials layer, or one an environment sets: the
+        // operator's documents don't show it, the dry run does.
+        let mut world = World::new();
+        world.running(json!({"a": 1})).await;
+        let first = world.annotation();
+        world.reach.service.require_restart(&["database.url"]);
+        world.pass(json!({"a": 2})).await;
+        world.reach.sync(&world.workloads);
+        let reloads = world.reach.pods[0].1.calls().len();
+        let report = world.pass(json!({"a": 2})).await;
+        assert_eq!(reason(&report), ReasonCode::WorkloadNotReady);
+        assert_eq!(
+            report.rolled_out.as_ref().map(|r| r.keys.clone()),
+            Some(vec!["database.url".to_string()])
+        );
+        assert_ne!(world.annotation(), first);
+        // Not reloaded: the pods restart onto it.
+        assert!(
+            !world.reach.pods[0].1.calls()[reloads..]
+                .iter()
+                .any(|c| c == "reload")
+        );
+        // Once they did, BatleHub's comparison against their startup
+        // configuration owes nothing.
+        let report = world.pass(json!({"a": 2})).await;
+        assert_eq!(
+            reason(&report),
+            ReasonCode::Reconciled,
+            "{:?}",
+            report.instance.outcome
+        );
+        assert!(world.restart_keys.is_empty());
+
+        // `Never`: reloaded, the keys reported.
+        let mut world = World::new();
+        world.reload.restart = RestartPolicy::Never;
+        world.running(json!({"a": 1})).await;
+        for (_, pod) in &world.reach.pods {
+            pod.require_restart(&["database.url"]);
+        }
+        world.pass(json!({"a": 2})).await;
+        world.reach.sync(&world.workloads);
+        let report = world.pass(json!({"a": 2})).await;
+        assert_eq!(reason(&report), ReasonCode::Reconciled);
+        assert_eq!(world.restart_keys, ["database.url"]);
+        assert!(World::advised(&report, ReasonCode::RestartRequired));
+    }
+
+    #[tokio::test]
+    async fn bytes_a_pod_already_tried_never_read_as_loaded() {
+        // A pod that staged nothing — it may run them, have refused them,
+        // or let them expire: written again, then a refusal.
+        let mut world = World::new();
+        world.running(json!({"a": 1})).await;
+        world.pass(json!({"a": 2})).await;
+        world.reach.sync(&world.workloads);
+        let file = world.workloads.config_file("hub").unwrap();
+        world.reach.pods[1].1.attempted(&file);
+        let report = world.pass(json!({"a": 2})).await;
+        assert_eq!(reason(&report), ReasonCode::ConfigPropagating);
+        let status = report.instance.config.clone().unwrap();
+        assert_eq!(status.nonce, 1);
+        assert_ne!(status.applied_hash, status.config_hash);
+        // New bytes, not synced yet: nothing is reloaded meanwhile.
+        let report = world.pass(json!({"a": 2})).await;
+        assert_eq!(reason(&report), ReasonCode::ConfigPropagating);
+        world.reach.sync(&world.workloads);
+        let file = world.workloads.config_file("hub").unwrap();
+        // Its watcher tried the new bytes first and refused them.
+        world.reach.pods[1].1.attempted(&file);
+        let report = world.pass(json!({"a": 2})).await;
+        assert_eq!(reason(&report), ReasonCode::ConfigRejected);
+        let status = report.instance.config.clone().unwrap();
+        assert_ne!(status.applied_hash, status.config_hash);
+        assert_eq!(status.rejected_at, Some(world.state.now));
+    }
+
+    #[tokio::test]
+    async fn a_refusal_waited_out_is_retried_under_new_bytes() {
+        let mut world = World::new();
+        world.running(json!({"a": 1})).await;
+        // Every pod refuses it at load time.
+        for (_, pod) in &world.reach.pods {
+            pod.refuse(Some("bad"));
+        }
+        world.pass(json!({"a": "bad"})).await;
+        world.reach.sync(&world.workloads);
+        let report = world.pass(json!({"a": "bad"})).await;
+        assert_eq!(reason(&report), ReasonCode::ConfigRejected);
+        // Fixed on the pods' side (a database back), ten minutes later.
+        for (_, pod) in &world.reach.pods {
+            pod.refuse(None);
+        }
+        world.state.now += REJECTION_BACKOFF_SECS;
+        // The bytes they tried would stage nothing: new ones first.
+        let report = world.pass(json!({"a": "bad"})).await;
+        assert_eq!(reason(&report), ReasonCode::ConfigPropagating);
+        assert!(
+            !report
+                .instance
+                .config
+                .as_ref()
+                .unwrap()
+                .applied_hash
+                .as_ref()
+                .is_some_and(|h| Some(h)
+                    == report
+                        .instance
+                        .config
+                        .as_ref()
+                        .unwrap()
+                        .config_hash
+                        .as_ref())
+        );
+        // Written under the new nonce, then synced.
+        let report = world.pass(json!({"a": "bad"})).await;
+        assert_eq!(reason(&report), ReasonCode::ConfigPropagating);
+        world.reach.sync(&world.workloads);
+        let report = world.pass(json!({"a": "bad"})).await;
+        assert_eq!(
+            reason(&report),
+            ReasonCode::Reconciled,
+            "{:?}",
+            report.instance.outcome
+        );
+        let status = report.instance.config.unwrap();
+        assert_eq!(status.applied_hash, status.config_hash);
+        assert_eq!(status.rejected_hash, None);
+        let file = world.workloads.config_file("hub").unwrap();
+        for (_, pod) in &world.reach.pods {
+            assert_eq!(pod.loaded().as_deref(), Some(file.as_str()));
+        }
+    }
+
+    #[tokio::test]
+    async fn partial_keys_are_reported_or_rolled() {
+        let mut world = World::new();
+        world.running(json!({"partial": 1})).await;
+        let first = world.annotation();
+        world.pass(json!({"partial": 2})).await;
+        world.reach.sync(&world.workloads);
+        let report = world.pass(json!({"partial": 2})).await;
+        assert_eq!(reason(&report), ReasonCode::Reconciled);
+        assert_eq!(world.annotation(), first);
+        assert_eq!(world.partial_keys, ["partial"]);
+        assert!(World::advised(&report, ReasonCode::PartiallyApplied));
+
+        world.reload.partial = PartialPolicy::Restart;
+        let report = world.pass(json!({"partial": 3})).await;
+        assert_ne!(world.annotation(), first);
+        assert_eq!(
+            report.rolled_out.map(|r| r.keys),
+            Some(vec!["partial".to_string()])
+        );
+        // Started on it: neither list is kept.
+        world.reach.sync(&world.workloads);
+        let report = world.pass(json!({"partial": 3})).await;
+        assert_eq!(reason(&report), ReasonCode::Reconciled);
+        assert!(world.partial_keys.is_empty() && world.restart_keys.is_empty());
+        assert!(!World::advised(&report, ReasonCode::PartiallyApplied));
     }
 }

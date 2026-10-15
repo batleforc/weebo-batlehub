@@ -48,6 +48,16 @@
 3. Creating a BatleHubLocalInstance sends a Secret of its namespace to the
    URL it names: grant the kind like you grant pods.
 
+{{- if .Release.IsUpgrade }}
+
+4. Upgrading from 0.1.0: the TokenReview bindings are now one
+   ClusterRoleBinding, {{ include "weebo-operator.fullname" . }}-tokenreview, and the operator may no
+   longer delete the per-instance ones 0.1.0 created. Once every managed
+   instance with a kubernetes auth provider is Ready again, delete them:
+
+     kubectl delete clusterrolebinding -l app.kubernetes.io/managed-by=weebo-batlehub,batlehub.weebo.io/instance-name
+{{- end }}
+
 Argo CD: paste the health check of the
 {{ include "weebo-operator.fullname" . }}-argocd-health ConfigMap into argocd-cm under
 `resource.customizations.health.batlehub.weebo.io_*`.

@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use application::ports::{ConfigError, ConfigParser, ConfigVerdict, TokenCheck};
+use application::ports::{ConfigError, ConfigParser, ConfigVerdict, KeyChanges, TokenCheck};
 use argon2::password_hash::phc::PasswordHash;
 use argon2::{Argon2, PasswordVerifier};
 use serde_json::Value as Json;
@@ -87,9 +87,12 @@ impl BatleHubConfigParser {
 }
 
 impl ConfigParser for BatleHubConfigParser {
-    fn restart_keys(&self, before: &str, after: &str) -> Result<Vec<String>, ConfigError> {
+    fn classify(&self, before: &str, after: &str) -> Result<KeyChanges, ConfigError> {
         batlehub_config::reload_keys::classify(before, after)
-            .map(|verdict| verdict.restart)
+            .map(|verdict| KeyChanges {
+                restart: verdict.restart,
+                partial: verdict.partial,
+            })
             .map_err(|e| ConfigError::Invalid(without_source(&format!("{e:#}"))))
     }
 
@@ -314,7 +317,7 @@ path = "/var/cache/batlehub"
     }
 
     #[test]
-    fn restart_keys_are_batlehub_s() {
+    fn key_tiers_are_batlehub_s() {
         let parser = parser();
         let before = parser.merge(&[BASE]).unwrap();
         let after = parser
@@ -323,12 +326,19 @@ path = "/var/cache/batlehub"
                 "[server]\nport = 9090\n[[registries]]\nname = \"npm\"\ntype = \"npm\"\n",
             ])
             .unwrap();
-        let keys = parser.restart_keys(&before, &after).unwrap();
+        let changes = parser.classify(&before, &after).unwrap();
+        let keys = &changes.restart;
         assert!(keys.contains(&"server.port".to_string()), "{keys:?}");
         assert!(
             keys.iter()
                 .all(|k| !k.starts_with("registries[npm]") || k.contains('.')),
             "{keys:?}"
+        );
+        // A registry added is applied to requests, not to what was built
+        // at startup (warming, imports): BatleHub's Partial tier.
+        assert!(
+            changes.partial.iter().any(|k| k.starts_with("registries")),
+            "{changes:?}"
         );
     }
 

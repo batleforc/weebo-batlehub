@@ -926,6 +926,11 @@ spec:
                     properties:
                       pullPolicy:
                         description: Default `IfNotPresent`.
+                        enum:
+                        - Always
+                        - IfNotPresent
+                        - Never
+                        - null
                         nullable: true
                         type: string
                       repository:
@@ -1052,7 +1057,14 @@ spec:
                     properties:
                       accessMode:
                         default: ReadWriteOnce
-                        description: Default `ReadWriteOnce`.
+                        description: |-
+                          Default `ReadWriteOnce`. A single-writer mode (`ReadWriteOnce`,
+                          `ReadWriteOncePod`) allows one proxy pod; `ReadWriteOncePod`, no
+                          separate worker either (it mounts the cache too).
+                        enum:
+                        - ReadWriteOnce
+                        - ReadWriteOncePod
+                        - ReadWriteMany
                         type: string
                       enabled:
                         default: true
@@ -1178,6 +1190,10 @@ spec:
                       type:
                         default: ClusterIP
                         description: Default `ClusterIP`.
+                        enum:
+                        - ClusterIP
+                        - NodePort
+                        - LoadBalancer
                         type: string
                     type: object
                   serviceAccount:
@@ -1260,7 +1276,7 @@ spec:
                           minReplicas:
                             default: 1
                             format: int32
-                            minimum: 0.0
+                            minimum: 1.0
                             type: integer
                           targetQueued:
                             default: 20
@@ -1280,6 +1296,11 @@ spec:
                         properties:
                           pullPolicy:
                             description: Default `IfNotPresent`.
+                            enum:
+                            - Always
+                            - IfNotPresent
+                            - Never
+                            - null
                             nullable: true
                             type: string
                           repository:
@@ -1458,6 +1479,20 @@ spec:
               reload:
                 description: How a new configuration reaches the instance.
                 properties:
+                  partial:
+                    default: Reload
+                    description: |-
+                      `managed`: what a change of a key BatleHub applies to requests but
+                      not to the components it built at startup (warming, release
+                      imports, the scan worker — BatleHub's `Partial` tier, every
+                      `registries[*]` among them) is. `Reload` (default) hot-reloads it
+                      and raises `PartiallyApplied`, naming the keys, until the pods
+                      restart; `Restart` treats it as a key read at startup
+                      (`reload.restart` decides).
+                    enum:
+                    - Reload
+                    - Restart
+                    type: string
                   restart:
                     default: Rollout
                     description: |-
@@ -1572,6 +1607,14 @@ spec:
                 format: int64
                 nullable: true
                 type: integer
+              partialKeys:
+                description: |-
+                  `managed`: keys of BatleHub's `Partial` tier changed since the proxy
+                  pods started, hot-reloaded (`reload.partial: Reload`): what was
+                  built at startup keeps their old value until a restart.
+                items:
+                  type: string
+                type: array
               pendingConfigHash:
                 description: |-
                   SHA-256 of a configuration held by `reload.strategy: Manual`: set
@@ -1599,7 +1642,9 @@ spec:
                 description: |-
                   The last configuration the instance refused (or loaded without
                   being able to write it, `unpersistedConfigHash`), and when: the same
-                  one is pushed again at most every 10 minutes.
+                  one is pushed again at most every 10 minutes. `managed`: without a
+                  time, it is being retried under a new `reloadNonce` — a pod that
+                  stages nothing for those new bytes refused them.
                 nullable: true
                 type: string
               rejectionMessage:
@@ -1616,8 +1661,9 @@ spec:
                 type: integer
               restartKeys:
                 description: |-
-                  The keys needing a restart the instance doesn't run yet, while the
-                  push is held back.
+                  The keys needing a restart the instance doesn't run yet: external,
+                  while the push is held back; managed, until the proxy pods start on
+                  the configuration (rolled out, or `RestartRequired`).
                 items:
                   type: string
                 type: array
@@ -1663,6 +1709,9 @@ spec:
         - spec
         title: BatleHubLocalInstance
         type: object
+        x-kubernetes-validations:
+        - message: 'a managed instance''s name names its Service: a DNS-1035 label (lowercase letters, digits and ''-'', starting with a letter), at most 63 characters'
+          rule: '!has(self.spec.managed) || (size(self.metadata.name) <= 63 && self.metadata.name.matches(''^[a-z]([-a-z0-9]*[a-z0-9])?$''))'
     served: true
     storage: true
     subresources:

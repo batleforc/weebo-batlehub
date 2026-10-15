@@ -39,6 +39,7 @@ pub use weebo_kit_runtime::controller::{controller, drive};
 
 pub mod local_instance;
 pub mod maintenance;
+pub mod metrics;
 pub mod namespace_claim;
 pub mod package_grant;
 pub mod package_policy;
@@ -87,6 +88,67 @@ pub struct Ctx {
     /// What the controllers watch (`WEEBO_WATCH_NAMESPACE`,
     /// `WEEBO_WATCH_LABEL_SELECTOR`): every watch goes through it.
     pub scope: WatchScope,
+    /// The images a managed instance runs when its spec names none
+    /// (`WEEBO_BATLEHUB_DEFAULT_IMAGE`, `…_DEFAULT_WORKER_IMAGE`).
+    pub images: ImageDefaults,
+}
+
+/// The default images of managed instances: `repository[:tag]` each,
+/// the operator's built-in ones when unset.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ImageDefaults {
+    pub proxy: Option<api::managed::Image>,
+    pub worker: Option<api::managed::Image>,
+}
+
+impl ImageDefaults {
+    /// `repository[:tag]` as an image; `Err` on an empty value or tag.
+    pub fn parse(reference: &str) -> Result<api::managed::Image, String> {
+        let reference = reference.trim();
+        let (repository, tag) = match reference.rsplit_once(':') {
+            // A port of the registry host is not a tag.
+            Some((repository, tag)) if !tag.contains('/') => (repository, Some(tag)),
+            _ => (reference, None),
+        };
+        if repository.is_empty() || tag.is_some_and(str::is_empty) || reference.contains('@') {
+            return Err(format!(
+                "{reference:?}: expected repository[:tag] (no digest)"
+            ));
+        }
+        Ok(api::managed::Image {
+            repository: Some(repository.into()),
+            tag: tag.map(String::from),
+            pull_policy: None,
+        })
+    }
+
+    /// `managed` with the default images where it names none: a field the
+    /// spec sets wins, field by field (a spec that sets only the tag keeps
+    /// the default repository).
+    pub fn fill(&self, managed: &api::managed::ManagedInstance) -> api::managed::ManagedInstance {
+        let mut managed = managed.clone();
+        let fill = |image: &mut api::managed::Image, default: &api::managed::Image| {
+            if image.repository.is_none() {
+                image.repository = default.repository.clone();
+                if image.tag.is_none() {
+                    image.tag = default.tag.clone();
+                }
+            }
+        };
+        if let Some(default) = &self.proxy {
+            fill(&mut managed.image, default);
+        }
+        if let (Some(default), Some(worker)) = (&self.worker, managed.worker.as_mut()) {
+            let image = worker.image.get_or_insert_with(Default::default);
+            fill(image, default);
+            // The worker follows the proxy's tag by default: the
+            // operator's default worker tag only when the proxy has none.
+            if image.tag.is_none() && managed.image.tag.is_some() {
+                image.tag = managed.image.tag.clone();
+            }
+        }
+        managed
+    }
 }
 
 /// What stopped a reconcile before (or instead of) its status.
@@ -419,6 +481,52 @@ where
         cleanup,
     )
     .await
+}
+
+#[cfg(test)]
+mod image_tests {
+    use super::*;
+
+    #[test]
+    fn default_images_fill_what_the_spec_leaves_out() {
+        let mirror = ImageDefaults::parse("registry.local:5000/batlehub/batlehub:1.6.1").unwrap();
+        assert_eq!(
+            mirror.repository.as_deref(),
+            Some("registry.local:5000/batlehub/batlehub")
+        );
+        assert_eq!(mirror.tag.as_deref(), Some("1.6.1"));
+        let bare = ImageDefaults::parse("registry.local:5000/batlehub").unwrap();
+        assert_eq!(bare.tag, None);
+        assert!(ImageDefaults::parse("").is_err());
+        assert!(ImageDefaults::parse("x@sha256:abc").is_err());
+
+        let defaults = ImageDefaults {
+            proxy: Some(mirror.clone()),
+            worker: Some(ImageDefaults::parse("registry.local:5000/batlehub/worker").unwrap()),
+        };
+        let mut managed = api::managed::ManagedInstance {
+            worker: Some(serde_json::from_value(serde_json::json!({})).unwrap()),
+            ..Default::default()
+        };
+        let filled = defaults.fill(&managed);
+        assert_eq!(filled.image, mirror);
+        let worker = filled.worker.unwrap().image.unwrap();
+        assert_eq!(
+            worker.repository.as_deref(),
+            Some("registry.local:5000/batlehub/worker")
+        );
+        assert_eq!(worker.tag.as_deref(), Some("1.6.1"));
+
+        // What the spec names wins.
+        managed.image.repository = Some("ghcr.io/batlehub/batlehub".into());
+        let filled = defaults.fill(&managed);
+        assert_eq!(
+            filled.image.repository.as_deref(),
+            Some("ghcr.io/batlehub/batlehub")
+        );
+        assert_eq!(filled.image.tag, None);
+        assert_eq!(ImageDefaults::default().fill(&managed), managed);
+    }
 }
 
 #[cfg(test)]

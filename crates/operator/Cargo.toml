@@ -13,6 +13,7 @@ path = "src/main.rs"
 adapters-inbound = { workspace = true }
 adapters-outbound = { workspace = true }
 api = { workspace = true }
+application = { workspace = true }
 anyhow = { workspace = true }
 futures = { workspace = true }
 kube = { workspace = true }

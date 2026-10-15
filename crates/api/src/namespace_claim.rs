@@ -57,10 +57,11 @@ pub struct BatleHubNamespaceClaimSpec {
     pub registry: String,
     /// The package name prefix, in the ecosystem's own spelling: an npm
     /// scope (`@acme`), a Go module or Maven path, an OpenVSX publisher… A
-    /// claim covers `prefix` itself and every package under it. Immutable.
+    /// claim covers `prefix` itself and every package under it. No part
+    /// between slashes may be `.` or `..`. Immutable.
     #[schemars(length(min = 1, max = 1024), extend("x-kubernetes-validations" = [
         {"rule": "self == oldSelf", "message": "prefix is immutable"},
-        {"rule": "self == self.trim() && self != '.' && self != '..'", "message": "prefix may not be blank, `.` or `..`, nor start or end with a space"}
+        {"rule": "self == self.trim() && self.split('/').all(s, s != '.' && s != '..')", "message": "prefix may not be blank, have a `.` or `..` part between slashes, nor start or end with a space"}
     ]))]
     pub prefix: String,
     /// The group owning the prefix, as the instance's auth providers name

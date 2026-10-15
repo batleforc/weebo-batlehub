@@ -37,13 +37,31 @@ first (an `emptyDir` filled by an init container), or the operator reports
 **Let the operator deploy it** (`--mode managed`). Every value maps to its
 field of `spec.managed`, following the [table of the plan](/docs/guides/managed-instance):
 replicas, image, service, ingress, persistence, worker and its autoscaling,
-PDB, NetworkPolicy, scheduling, environment, `credentials.existingSecret`.
+PDB, NetworkPolicy, scheduling, environment, the credentials layer.
 The importer warns about what it can't carry over: `externalManifest`,
 `trivy`, the worker's YARA rules. Its objects take the names of the
 release's. Uninstall the release first, or pick another name (`--name`):
 the operator never takes over an object it didn't create
 (`OwnedObjectConflict`). A PVC kept with `helm.sh/resource-policy` can be
 reused through `persistence.existingClaim`.
+
+**The credentials layer.** With `credentials.existingSecret`, the instance
+reads that Secret as it is: something else manages it, it outlives the
+release. Label it `batlehub.weebo.io/credential=true` (the importer prints
+the command). With `credentials.config`, the chart renders its own Secret
+(`<fullname>-credentials`), which goes away with the release. The
+instance reads a copy instead, `<instance>-credentials`, labelled for the
+operator:
+
+- with `--apply`, the importer makes the copy (same bytes, refused when a
+  different Secret already has that name), then creates the instance;
+- printing, the importer writes no secret value to its output: it prints
+  the `kubectl` commands that copy the key and label the copy. Run them
+  before applying the instance (it reports `ConfigLayerMissing` until
+  then).
+
+Your values file holds the credentials in clear (`helm get values --all`):
+delete it once imported.
 
 ## Grants and policies → adopted CRs
 
@@ -53,6 +71,8 @@ over a grant or a policy it didn't write (`GrantConflict`,
 `PolicyConflict`). The importer is the only way to bring them under it:
 
 ```bash
+# The token is read from the environment only (never an argument: it
+# would show in the process list and the shell history).
 export BATLEHUB_URL=https://batlehub.example.com BATLEHUB_TOKEN=<an admin token>
 weebo-batlehub-importer governance -n infra --instance-ref registry          # prints
 weebo-batlehub-importer governance -n infra --instance-ref registry --apply  # adopts
@@ -79,6 +99,22 @@ The operator then finds these grants and policies its own: it reports
 source of truth, drift is rewritten, and deleting a CR revokes what it
 holds.
 
-A re-run adopts nothing twice. A CR that already exists and is bound to
+**Only `--apply` adopts.** The printed CRs show the status `--apply`
+would seed, but `kubectl apply` drops a status (it is a subresource): CRs
+applied from the printed output find the rows foreign and report
+`GrantConflict` or `PolicyConflict`. Read the output, then run `--apply`.
+
+**What CRs already hold is left out.** Rows a `BatleHubPackageGrant` of the
+namespace already lists (or recorded as written) and nodes a
+`BatleHubPackagePolicy` already writes are not imported again: the
+webhook would refuse a second CR on them. Each skip is a warning.
+
+A re-run adopts nothing twice, and never changes a CR it adopted earlier.
+Subjects granted at the console on an adopted node *after* the import are
+reported, not adopted: that CR leaves subjects it doesn't list alone, and
+listing them in it is a `GrantConflict` (a row it didn't write). Revoke
+them at the console and list them in the CR, or leave them unmanaged. A
+policy changed at the console after its adoption is drift: its CR
+rewrites it (the importer warns). A CR that already exists and is bound to
 nothing is refused, because the operator may be writing its object right
 now. `--force` takes it over.

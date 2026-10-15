@@ -1134,6 +1134,12 @@
           "properties": {
             "pullPolicy": {
               "description": "Default `IfNotPresent`.",
+              "enum": [
+                "Always",
+                "IfNotPresent",
+                "Never",
+                null
+              ],
               "nullable": true,
               "type": "string"
             },
@@ -1287,7 +1293,12 @@
           "properties": {
             "accessMode": {
               "default": "ReadWriteOnce",
-              "description": "Default `ReadWriteOnce`.",
+              "description": "Default `ReadWriteOnce`. A single-writer mode (`ReadWriteOnce`,\n`ReadWriteOncePod`) allows one proxy pod; `ReadWriteOncePod`, no\nseparate worker either (it mounts the cache too).",
+              "enum": [
+                "ReadWriteOnce",
+                "ReadWriteOncePod",
+                "ReadWriteMany"
+              ],
               "type": "string"
             },
             "enabled": {
@@ -1430,6 +1441,11 @@
             "type": {
               "default": "ClusterIP",
               "description": "Default `ClusterIP`.",
+              "enum": [
+                "ClusterIP",
+                "NodePort",
+                "LoadBalancer"
+              ],
               "type": "string"
             }
           },
@@ -1522,7 +1538,7 @@
                 "minReplicas": {
                   "default": 1,
                   "format": "int32",
-                  "minimum": 0,
+                  "minimum": 1,
                   "type": "integer"
                 },
                 "targetQueued": {
@@ -1550,6 +1566,12 @@
               "properties": {
                 "pullPolicy": {
                   "description": "Default `IfNotPresent`.",
+                  "enum": [
+                    "Always",
+                    "IfNotPresent",
+                    "Never",
+                    null
+                  ],
                   "nullable": true,
                   "type": "string"
                 },
@@ -1783,6 +1805,15 @@
     "reload": {
       "description": "How a new configuration reaches the instance.",
       "properties": {
+        "partial": {
+          "default": "Reload",
+          "description": "`managed`: what a change of a key BatleHub applies to requests but\nnot to the components it built at startup (warming, release\nimports, the scan worker — BatleHub's `Partial` tier, every\n`registries[*]` among them) is. `Reload` (default) hot-reloads it\nand raises `PartiallyApplied`, naming the keys, until the pods\nrestart; `Restart` treats it as a key read at startup\n(`reload.restart` decides).",
+          "enum": [
+            "Reload",
+            "Restart"
+          ],
+          "type": "string"
+        },
         "restart": {
           "default": "Rollout",
           "description": "`managed`: `Rollout` restarts the pods when a key BatleHub reads at\nstartup changes; `Never` raises `RestartRequired` instead, naming\nthe keys, until the pods restart otherwise.",

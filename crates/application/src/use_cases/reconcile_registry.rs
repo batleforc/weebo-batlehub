@@ -150,6 +150,7 @@ mod tests {
             registry_name: "npm".into(),
             bound: bound(),
             rendered,
+            from_secret: false,
         };
         let ready = Ok("applied".to_string());
         let rendered = decision(Ok(true));

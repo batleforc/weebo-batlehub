@@ -35,4 +35,24 @@ Registries of other namespaces are not seen.
 supported: ConfigMap layers and `external.podSelector` need the
 ClusterRole's reads, and deleting a finished maintenance
 (`ttlSecondsAfterFinished`) its delete; they fail with
-`KubernetesApiError` in that mode.
+`KubernetesApiError` in that mode. A managed instance is refused there
+(`Ready: False`, `InvalidSpec`): the objects it deploys need the
+ClusterRole too.
+
+## Images of managed instances
+
+A managed `BatleHubLocalInstance` runs only images whose repository is in
+`managedInstances.allowedImages` (default `ghcr.io/batlehub/batlehub` and
+`ghcr.io/batlehub/batlehub-worker`, env `WEEBO_BATLEHUB_ALLOWED_IMAGES`):
+the webhook refuses another, and the operator applies nothing for it
+(`InvalidSpec`). Add your mirror there:
+
+```bash
+helm upgrade weebo-batlehub oci://ghcr.io/batleforc/charts/weebo-batlehub \
+  --reuse-values \
+  --set 'managedInstances.allowedImages={registry.example.com/batlehub/batlehub,registry.example.com/batlehub/batlehub-worker}'
+```
+
+Creating a `BatleHubLocalInstance` still lets its author run BatleHub
+with the Secrets of the namespace labelled
+`batlehub.weebo.io/credential: "true"`: give the kind as you give pods.

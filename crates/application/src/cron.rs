@@ -86,8 +86,10 @@ impl Schedule {
             days: field(day, 1, 31, "day-of-month")?,
             months: field(month, 1, 12, "month")?,
             weekdays,
-            any_day: day == "*",
-            any_weekday: weekday == "*",
+            // Vixie cron: a field starting with `*` (`*/2` too) is
+            // unrestricted for the day-of-month / day-of-week OR rule.
+            any_day: day.starts_with('*'),
+            any_weekday: weekday.starts_with('*'),
         })
     }
 
@@ -212,6 +214,21 @@ mod tests {
         assert_eq!(
             next("0 0 20 * 6", "2026-10-15T00:00:00Z"),
             "2026-10-17T00:00:00Z"
+        );
+        // A field starting with `*` is unrestricted (Vixie cron): every
+        // other day of the month AND Saturdays, not OR.
+        assert_eq!(
+            next("0 0 */2 * 6", "2026-10-15T00:00:00Z"),
+            "2026-10-17T00:00:00Z"
+        );
+        assert_eq!(
+            next("0 0 */2 * 6", "2026-10-17T00:00:00Z"),
+            "2026-10-31T00:00:00Z"
+        );
+        // Mondays, on days 1-5 only (`*/1` in the day-of-week).
+        assert_eq!(
+            next("0 0 1-5 * */1", "2026-10-15T00:00:00Z"),
+            "2026-11-01T00:00:00Z"
         );
     }
 

@@ -7,11 +7,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use adapters_inbound::admission::{BatleHubAdmission, KubeSiblings};
-use adapters_inbound::controller::{self, Ctx, Shutdown};
+use adapters_inbound::controller::{self, Ctx, ImageDefaults, Shutdown};
 use adapters_inbound::webhook;
 use adapters_outbound::{
     BatleHubConfigParser, ClusterDependents, HttpGatewayFactory, KubeConfigSources, KubeWorkloads,
-    LocalInstanceDirectory,
+    LocalInstanceDirectory, MeteredFactory,
 };
 use api::{LocalInstance, Maintenance, NamespaceClaim, PackageGrant, PackagePolicy, Registry};
 use futures::StreamExt;
@@ -93,6 +93,10 @@ async fn run(telemetry: &telemetry::Telemetry) -> anyhow::Result<()> {
     telemetry.serve_metrics().await?;
     register_leader_gauge();
 
+    // This operator's own settings: an invalid value stops the start.
+    let settings = Settings::from_env()?;
+    adapters_outbound::admin_gateway::set_request_timeout(settings.admin_timeout);
+
     let client = Client::try_default().await?;
     // The whole cluster, or one namespace (with or without the
     // cluster-scoped kinds) and/or a label selector (the chart's
@@ -140,18 +144,31 @@ async fn run(telemetry: &telemetry::Telemetry) -> anyhow::Result<()> {
         ),
     );
     let parser = Arc::new(BatleHubConfigParser::default());
+    // What a managed instance's pods may run (the chart's
+    // `managedInstances.allowedImages`): checked by the webhook and again
+    // before every apply.
+    let allowed_images = application::pod_safety::parse_allowed_images(
+        std::env::var("WEEBO_BATLEHUB_ALLOWED_IMAGES")
+            .ok()
+            .as_deref(),
+    );
 
     let holder_id = std::env::var("HOSTNAME").unwrap_or_else(|_| uuid::Uuid::new_v4().to_string());
     let ctx = Arc::new(Ctx {
         client: client.clone(),
-        gateways: Arc::new(HttpGatewayFactory::new(client.clone(), instances.clone())),
+        gateways: Arc::new(MeteredFactory::new(HttpGatewayFactory::new(
+            client.clone(),
+            instances.clone(),
+        ))),
         instances: instances.clone(),
         registries: instances,
         dependents: Arc::new(
             ClusterDependents::new(client.clone(), scope.watched_namespace().map(String::from))
                 .with_selector(scope.selector().cloned()),
         ),
-        workloads: Arc::new(KubeWorkloads::new(client.clone())),
+        workloads: Arc::new(
+            KubeWorkloads::new(client.clone()).with_allowed_images(allowed_images.clone()),
+        ),
         operator_namespace: std::env::var("POD_NAMESPACE").ok(),
         token_review_role: std::env::var("WEEBO_BATLEHUB_TOKENREVIEW_CLUSTERROLE")
             .ok()
@@ -168,6 +185,7 @@ async fn run(telemetry: &telemetry::Telemetry) -> anyhow::Result<()> {
         shutdown: shutdown.clone(),
         health: health.clone(),
         scope: scope.clone(),
+        images: settings.images,
     });
 
     // The HTTPS server (probes, the scope guard, the admission webhook)
@@ -179,6 +197,7 @@ async fn run(telemetry: &telemetry::Telemetry) -> anyhow::Result<()> {
         sources,
         config: parser,
         siblings: Arc::new(KubeSiblings(client.clone())),
+        allowed_images,
     });
     let server = webhook_server::spawn(
         webhook::router(health.clone(), scope, admission),
@@ -215,6 +234,51 @@ async fn run(telemetry: &telemetry::Telemetry) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The default image of managed instances' proxy pods.
+const DEFAULT_IMAGE_ENV: &str = "WEEBO_BATLEHUB_DEFAULT_IMAGE";
+/// The default image of their worker pods.
+const DEFAULT_WORKER_IMAGE_ENV: &str = "WEEBO_BATLEHUB_DEFAULT_WORKER_IMAGE";
+/// The timeout of the admin calls, in seconds (maintenances have theirs).
+const ADMIN_TIMEOUT_ENV: &str = "WEEBO_BATLEHUB_ADMIN_TIMEOUT_SECONDS";
+
+/// The `WEEBO_BATLEHUB_*` settings (the chart's `defaults.*`).
+#[derive(Debug, PartialEq)]
+struct Settings {
+    images: ImageDefaults,
+    admin_timeout: Duration,
+}
+
+impl Settings {
+    fn from_env() -> anyhow::Result<Self> {
+        Self::from_values(|name| std::env::var(name).ok())
+    }
+
+    fn from_values(var: impl Fn(&str) -> Option<String>) -> anyhow::Result<Self> {
+        let set = |name: &str| var(name).filter(|v| !v.trim().is_empty());
+        let image = |name: &str| {
+            set(name)
+                .map(|v| ImageDefaults::parse(&v).map_err(|e| anyhow::anyhow!("{name}: {e}")))
+                .transpose()
+        };
+        let admin_timeout = match set(ADMIN_TIMEOUT_ENV) {
+            None => adapters_outbound::admin_gateway::REQUEST_TIMEOUT,
+            Some(v) => match v.trim().parse::<u64>() {
+                Ok(secs) if (1..=600).contains(&secs) => Duration::from_secs(secs),
+                _ => anyhow::bail!(
+                    "{ADMIN_TIMEOUT_ENV}: {v:?} is not a number of seconds in 1..=600"
+                ),
+            },
+        };
+        Ok(Self {
+            images: ImageDefaults {
+                proxy: image(DEFAULT_IMAGE_ENV)?,
+                worker: image(DEFAULT_WORKER_IMAGE_ENV)?,
+            },
+            admin_timeout,
+        })
+    }
+}
+
 /// `<prefix>_leader`: 1 on the replica holding the lease.
 fn register_leader_gauge() {
     // The callback lives as long as the meter provider: the handle can go.
@@ -223,4 +287,37 @@ fn register_leader_gauge() {
         .with_description("1 when this replica holds the leader lease")
         .with_callback(|observer| observer.observe(u64::from(leader::is_leader()), &[]))
         .build();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn settings_default_and_refuse_garbage() {
+        let none = Settings::from_values(|_| None).unwrap();
+        assert_eq!(none.images, ImageDefaults::default());
+        assert_eq!(none.admin_timeout, Duration::from_secs(15));
+        let set = Settings::from_values(|name| match name {
+            DEFAULT_IMAGE_ENV => Some("mirror.local/batlehub:1.6.0".into()),
+            ADMIN_TIMEOUT_ENV => Some("30".into()),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(
+            set.images.proxy.unwrap().repository.as_deref(),
+            Some("mirror.local/batlehub")
+        );
+        assert_eq!(set.admin_timeout, Duration::from_secs(30));
+        for (name, value) in [
+            (ADMIN_TIMEOUT_ENV, "0"),
+            (ADMIN_TIMEOUT_ENV, "soon"),
+            (DEFAULT_IMAGE_ENV, "x@sha256:1"),
+        ] {
+            assert!(
+                Settings::from_values(|n| (n == name).then(|| value.to_string())).is_err(),
+                "{name}={value}"
+            );
+        }
+    }
 }

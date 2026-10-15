@@ -4,14 +4,24 @@
 //! refused — a layer not created yet, an instance absent, may appear on
 //! their own and are left to the status.
 //!
-//! - `BatleHubLocalInstance` with `external.manageConfig`: no
-//!   configuration at all, or a `spec.config` that isn't one
-//!   (`InvalidSpec`, `ConfigInvalid`), and — when it has no
-//!   `configLayers` — a `spec.config` BatleHub's parser refuses
-//!   (`reload.validation: Strict`). A layer (a ConfigMap may be fixed
-//!   without touching the CR) or a registry (another team's) that breaks
-//!   the configuration never blocks the instance's own edits: the status
-//!   says so.
+//! - `BatleHubLocalInstance` whose configuration the operator renders
+//!   (`external.manageConfig`, `managed`): no configuration at all, or a
+//!   `spec.config` that isn't one (`InvalidSpec`, `ConfigInvalid`), and —
+//!   when it has no `configLayers` and names no registry a
+//!   `BatleHubRegistry` could provide or complete — a `spec.config`
+//!   BatleHub's parser refuses (`reload.validation: Strict`). A layer (a
+//!   ConfigMap may be fixed without touching the CR) or a registry
+//!   (another team's, or one not created yet) that breaks or completes the
+//!   configuration never decides: the status says so. `managed` with a
+//!   generated token: a credentials layer whose `[[auth]] type = "token"`
+//!   provider lists tokens without the operator's entry
+//!   (`OperatorTokenShadowed`).
+//! - `BatleHubLocalInstance` with `managed`: pods the operator doesn't run
+//!   (`InvalidSpec`: an image off the operator's allow-list, a `hostPath`,
+//!   a privileged container, privilege escalation, an added capability),
+//!   or reading an existing `Secret` that lacks
+//!   `batlehub.weebo.io/credential: "true"` (`SecretNotAllowed`; one not
+//!   created yet is left to the status).
 //! - `BatleHubRegistry`: a `configFrom` fragment that is not TOML, or that
 //!   sets `type`/`name` (`ConfigInvalid`); a `${` in a registry naming an
 //!   instance of another namespace (`NamespaceNotAllowed`).
@@ -22,13 +32,17 @@
 //!   already writes (`PolicyConflict`), a gate both set in `policy.rules`
 //!   and exempted (`InvalidSpec`).
 //! - `BatleHubMaintenance`: a `schedule` or a `params.before` that can't
-//!   be read (`InvalidSpec`).
+//!   be read, `restart` on an external instance (`InvalidSpec`).
+//!
+//! A governance object or maintenance without `instanceRef` targets the
+//! namespace's only instance: it collides with one naming it.
 
 use std::sync::Arc;
 
+use api::config::ConfigSource;
 use api::{LocalInstance, Maintenance, PackageGrant, PackagePolicy, Registry};
 use application::ports::{ConfigParser, ConfigSources, SourceError};
-use application::use_cases::render_config::{base_layers, render_config};
+use application::use_cases::render_config::{base_layers, instance_env, render_config};
 use domain::error::ReasonCode;
 use kube::api::{Api, ListParams};
 use kube::core::DynamicObject;
@@ -38,6 +52,9 @@ pub struct BatleHubAdmission {
     pub sources: Arc<dyn ConfigSources>,
     pub config: Arc<dyn ConfigParser>,
     pub siblings: Arc<dyn Siblings>,
+    /// The image repositories a managed instance may run
+    /// (`WEEBO_BATLEHUB_ALLOWED_IMAGES`).
+    pub allowed_images: Vec<String>,
 }
 
 /// The other governance objects of a namespace, which a new one may
@@ -46,6 +63,7 @@ pub struct BatleHubAdmission {
 pub trait Siblings: Send + Sync {
     async fn grants(&self, namespace: &str) -> Result<Vec<PackageGrant>, String>;
     async fn policies(&self, namespace: &str) -> Result<Vec<PackagePolicy>, String>;
+    async fn instances(&self, namespace: &str) -> Result<Vec<LocalInstance>, String>;
 }
 
 /// [`Siblings`] read from the API server.
@@ -68,12 +86,35 @@ impl Siblings for KubeSiblings {
             .map(|l| l.items)
             .map_err(|e| e.to_string())
     }
+
+    async fn instances(&self, namespace: &str) -> Result<Vec<LocalInstance>, String> {
+        Api::<LocalInstance>::namespaced(self.0.clone(), namespace)
+            .list(&ListParams::default())
+            .await
+            .map(|l| l.items)
+            .map_err(|e| e.to_string())
+    }
 }
 
-/// The instance, by name, a governance object of the namespace targets
-/// (`None`: the namespace's only one).
-fn target(instance_ref: Option<&application::ports::InstanceRef>) -> Option<&str> {
-    instance_ref.map(|r| r.name.as_str())
+/// The instance, by name, a governance object of the namespace targets:
+/// the one `instanceRef` names, else the namespace's only one (`None`:
+/// none or several, unresolved).
+fn target(
+    instance_ref: Option<&application::ports::InstanceRef>,
+    only: Option<&str>,
+) -> Option<String> {
+    instance_ref
+        .map(|r| r.name.clone())
+        .or_else(|| only.map(String::from))
+}
+
+/// Whether `value` has a key `key` at any depth.
+fn mentions(value: &serde_json::Value, key: &str) -> bool {
+    match value {
+        serde_json::Value::Object(map) => map.iter().any(|(k, v)| k == key || mentions(v, key)),
+        serde_json::Value::Array(items) => items.iter().any(|v| mentions(v, key)),
+        _ => false,
+    }
 }
 
 /// The reasons a rendering refusal is certain for.
@@ -87,29 +128,163 @@ impl BatleHubAdmission {
         namespace: &str,
         instance: LocalInstance,
     ) -> Result<(), Denial<ReasonCode>> {
+        let deny = |failure: domain::Failure| Denial::new(failure.reason, failure.message);
+        if let Some(managed) = &instance.spec.managed {
+            self.managed_pods(namespace, &kube::ResourceExt::name_any(&instance), managed)
+                .await
+                .map_err(deny)?;
+        }
+        let deny = |failure: domain::Failure| Denial::new(failure.reason, failure.message);
+        if let Some(managed) = &instance.spec.managed {
+            self.managed_pods(namespace, &kube::ResourceExt::name_any(&instance), managed)
+                .await
+                .map_err(deny)?;
+        }
         if !instance.spec.manages_config() {
             return Ok(());
         }
-        let deny = |failure: domain::Failure| Denial::new(failure.reason, failure.message);
-        let base = match base_layers(
+        self.token_shadowed(namespace, &instance).await?;
+        // With layers, only `spec.config` itself is certain: nothing read.
+        if !instance.spec.config_layers.is_empty() {
+            return match &instance.spec.config {
+                serde_json::Value::Null => Ok(()),
+                object @ serde_json::Value::Object(_) => match self.config.layer(object) {
+                    Ok(_) => Ok(()),
+                    Err(e) => Err(Denial::new(
+                        ReasonCode::ConfigInvalid,
+                        format!("spec.config: {e}"),
+                    )),
+                },
+                _ => Err(Denial::new(
+                    ReasonCode::InvalidSpec,
+                    "spec.config must be an object",
+                )),
+            };
+        }
+        let base = base_layers(
             &instance,
             namespace,
             self.sources.as_ref(),
             self.config.as_ref(),
         )
         .await
-        {
-            Ok(base) => base,
-            Err(failure) if certain(failure.reason) => return Err(deny(failure)),
-            // A layer missing or not labelled yet: the status says so.
-            Err(_) => return Ok(()),
-        };
-        if !instance.spec.config_layers.is_empty() {
+        .map_err(deny)?;
+        let layers: Vec<&str> = base.iter().map(String::as_str).collect();
+        if let Err(e) = self.config.merge(&layers) {
+            return Err(Denial::new(
+                ReasonCode::ConfigInvalid,
+                format!("merging the configuration: {e}"),
+            ));
+        }
+        // A `BatleHubRegistry` may complete a `[[registries]]` entry, or be
+        // the registry a key names (`[worker] registries`, imports…) — one
+        // not created yet too: the parser's verdict without it is not
+        // certain.
+        if mentions(&instance.spec.config, "registries") {
             return Ok(());
         }
-        match render_config(&instance, &base, Vec::new(), self.config.as_ref()) {
+        let env = instance_env(&instance, namespace, self.sources.as_ref()).await;
+        match render_config(
+            &instance,
+            &base,
+            Vec::new(),
+            false,
+            &env,
+            self.config.as_ref(),
+        ) {
             Err(failure) if certain(failure.reason) => Err(deny(failure)),
             _ => Ok(()),
+        }
+    }
+
+    /// `managed` with a generated token: the credentials layer is merged
+    /// last, and a `[[auth]] type = "token"` provider there replaces the
+    /// configuration's token list — the operator's entry included, unless
+    /// it lists it (its `user_id`), or a `${VAR}` value the operator can't
+    /// judge.
+    async fn token_shadowed(
+        &self,
+        namespace: &str,
+        instance: &LocalInstance,
+    ) -> Result<(), Denial<ReasonCode>> {
+        let Some(managed) = &instance.spec.managed else {
+            return Ok(());
+        };
+        let (Some(credentials), true) =
+            (&managed.credentials, managed.operator_access.generate_token)
+        else {
+            return Ok(());
+        };
+        // Missing or not labelled yet: the status says so.
+        let Ok(text) = self
+            .sources
+            .read(
+                namespace,
+                &ConfigSource::secret(&credentials.name, &credentials.key),
+            )
+            .await
+        else {
+            return Ok(());
+        };
+        let Ok(layer) = self.config.fragment(&text) else {
+            return Ok(());
+        };
+        let user_id = managed.operator_access.user_id.as_str();
+        let shadowing = layer
+            .get("auth")
+            .and_then(|a| a.as_array())
+            .into_iter()
+            .flatten()
+            .filter(|p| p.get("type").and_then(|t| t.as_str()) == Some("token"))
+            .filter_map(|p| p.get("tokens")?.as_array())
+            .any(|tokens| {
+                !tokens.iter().any(|t| {
+                    t.get("user_id").and_then(|u| u.as_str()) == Some(user_id)
+                        || t.get("value")
+                            .and_then(|v| v.as_str())
+                            .is_some_and(|v| v.contains("${"))
+                })
+            });
+        if shadowing {
+            return Err(Denial::new(
+                ReasonCode::OperatorTokenShadowed,
+                format!(
+                    "the credentials layer (managed.credentials) declares an [[auth]] type = \
+                     \"token\" provider whose token list replaces the configuration's, without \
+                     the operator's entry (user_id = \"{user_id}\"): the operator would lock \
+                     itself out. Add the entry from the rendered configuration (Secret \
+                     <instance>-config) to that list"
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    /// The pods a managed instance asks for: what the operator would
+    /// refuse to apply.
+    async fn managed_pods(
+        &self,
+        namespace: &str,
+        name: &str,
+        managed: &api::managed::ManagedInstance,
+    ) -> Result<(), domain::Failure> {
+        use application::pod_safety;
+        let objects = pod_safety::sketch(name, namespace, managed);
+        pod_safety::check(&objects, &self.allowed_images)?;
+        for secret in pod_safety::secrets_to_check(&objects) {
+            // Absent or unreadable: nothing certain, the status says.
+            if let Ok(Some(false)) = self.sources.secret_consents(namespace, &secret).await {
+                return Err(pod_safety::secret_not_allowed(namespace, &secret));
+            }
+        }
+        Ok(())
+    }
+
+    /// The namespace's only instance, when it has exactly one.
+    async fn only_instance(&self, namespace: &str) -> Option<LocalInstance> {
+        match self.siblings.instances(namespace).await {
+            Ok(mut instances) if instances.len() == 1 => instances.pop(),
+            _ => None,
         }
     }
 
@@ -175,6 +350,11 @@ impl BatleHubAdmission {
         };
         let name = kube::ResourceExt::name_any(&grant);
         let spec = &grant.spec;
+        let only = self
+            .only_instance(namespace)
+            .await
+            .map(|i| kube::ResourceExt::name_any(&i));
+        let only = only.as_deref();
         for other in siblings
             .iter()
             .filter(|o| kube::ResourceExt::name_any(*o) != name)
@@ -182,7 +362,8 @@ impl BatleHubAdmission {
                 o.spec.registry == spec.registry
                     && o.spec.package == spec.package
                     && o.spec.version == spec.version
-                    && target(o.spec.instance_ref.as_ref()) == target(spec.instance_ref.as_ref())
+                    && target(o.spec.instance_ref.as_ref(), only)
+                        == target(spec.instance_ref.as_ref(), only)
             })
         {
             if let Some(subject) = spec
@@ -232,12 +413,18 @@ impl BatleHubAdmission {
             return Ok(());
         };
         let name = kube::ResourceExt::name_any(&policy);
+        let only = self
+            .only_instance(namespace)
+            .await
+            .map(|i| kube::ResourceExt::name_any(&i));
+        let only = only.as_deref();
         if let Some(other) = siblings.iter().find(|o| {
             kube::ResourceExt::name_any(*o) != name
                 && o.spec.registry == spec.registry
                 && o.spec.package == spec.package
                 && o.spec.version == spec.version
-                && target(o.spec.instance_ref.as_ref()) == target(spec.instance_ref.as_ref())
+                && target(o.spec.instance_ref.as_ref(), only)
+                    == target(spec.instance_ref.as_ref(), only)
         }) {
             return Err(Denial::new(
                 ReasonCode::PolicyConflict,
@@ -251,7 +438,45 @@ impl BatleHubAdmission {
     }
 }
 
-fn maintenance(maintenance: Maintenance) -> Result<(), Denial<ReasonCode>> {
+impl BatleHubAdmission {
+    /// `restart` restarts what the operator deploys: refused on an
+    /// external instance (the one `instanceRef` names, or the namespace's
+    /// only one). An instance not found yet is left to the run.
+    async fn maintenance(
+        &self,
+        namespace: &str,
+        maintenance: Maintenance,
+    ) -> Result<(), Denial<ReasonCode>> {
+        if maintenance.spec.action == api::maintenance::MaintenanceAction::Restart {
+            let instance = match &maintenance.spec.instance_ref {
+                Some(r) => self
+                    .siblings
+                    .instances(namespace)
+                    .await
+                    .ok()
+                    .and_then(|all| {
+                        all.into_iter()
+                            .find(|i| kube::ResourceExt::name_any(i) == r.name)
+                    }),
+                None => self.only_instance(namespace).await,
+            };
+            if let Some(instance) = instance
+                && instance.spec.managed.is_none()
+            {
+                return Err(Denial::new(
+                    ReasonCode::InvalidSpec,
+                    format!(
+                        "restart restarts the pods the operator deploys: {} is external",
+                        kube::ResourceExt::name_any(&instance)
+                    ),
+                ));
+            }
+        }
+        maintenance_fields(maintenance)
+    }
+}
+
+fn maintenance_fields(maintenance: Maintenance) -> Result<(), Denial<ReasonCode>> {
     let invalid = |why: String| Denial::new(ReasonCode::InvalidSpec, why);
     if let Some(schedule) = &maintenance.spec.schedule {
         application::cron::Schedule::parse(schedule)
@@ -286,7 +511,10 @@ impl Admission for BatleHubAdmission {
                     .await
             }
             "BatleHubPackageGrant" => self.grant(namespace, typed(object).map_err(invalid)?).await,
-            "BatleHubMaintenance" => maintenance(typed(object).map_err(invalid)?),
+            "BatleHubMaintenance" => {
+                self.maintenance(namespace, typed(object).map_err(invalid)?)
+                    .await
+            }
             "BatleHubPackagePolicy" => {
                 self.policy(namespace, typed(object).map_err(invalid)?)
                     .await
@@ -318,6 +546,7 @@ mod tests {
     struct FakeSiblings {
         grants: std::sync::Mutex<Vec<PackageGrant>>,
         policies: std::sync::Mutex<Vec<PackagePolicy>>,
+        instances: std::sync::Mutex<Vec<LocalInstance>>,
     }
 
     #[async_trait::async_trait]
@@ -328,6 +557,10 @@ mod tests {
 
         async fn policies(&self, _: &str) -> Result<Vec<PackagePolicy>, String> {
             Ok(self.policies.lock().unwrap().clone())
+        }
+
+        async fn instances(&self, _: &str) -> Result<Vec<LocalInstance>, String> {
+            Ok(self.instances.lock().unwrap().clone())
         }
     }
 
@@ -429,6 +662,7 @@ mod tests {
             sources: sources.clone(),
             config: Arc::new(FakeConfigParser),
             siblings,
+            allowed_images: application::pod_safety::default_allowed_images(),
         };
         (sources, admission)
     }
@@ -566,6 +800,47 @@ mod tests {
         assert_eq!(decide(&instance(true, json!({"server": {}}))).await, Ok(()));
     }
 
+    fn managed(value: serde_json::Value) -> LocalInstance {
+        let mut instance = instance(false, json!({"storage": {}}));
+        instance.spec.external = None;
+        instance.spec.managed = Some(serde_json::from_value(value).unwrap());
+        instance
+    }
+
+    #[tokio::test]
+    async fn a_managed_instance_is_refused_pods_the_operator_doesn_t_run() {
+        let (sources, admission) = admission();
+        let decide = async |i: &LocalInstance| {
+            admission
+                .admit("BatleHubLocalInstance", "ns", &object(i))
+                .await
+                .map_err(|d| d.reason)
+        };
+        assert_eq!(decide(&managed(json!({"worker": {}}))).await, Ok(()));
+        for refused in [
+            json!({"image": {"repository": "docker.io/evil/miner"}}),
+            json!({"securityContext": {"privileged": true}}),
+            json!({"securityContext": {"capabilities": {"add": ["NET_ADMIN"]}}}),
+            json!({"extraVolumes": [{"name": "root", "hostPath": {"path": "/"}}]}),
+        ] {
+            assert_eq!(
+                decide(&managed(refused.clone())).await,
+                Err(ReasonCode::InvalidSpec),
+                "{refused}"
+            );
+        }
+        // A Secret read by the pods: refused only once it exists unlabelled.
+        let reading = managed(json!({
+            "env": [{"name": "A", "valueFrom": {"secretKeyRef": {"name": "db", "key": "url"}}}],
+            "envFrom": [{"secretRef": {"name": "more"}}],
+        }));
+        assert_eq!(decide(&reading).await, Ok(()));
+        sources.put("ns", "db", "labelled");
+        assert_eq!(decide(&reading).await, Ok(()));
+        sources.refuse("ns", "more");
+        assert_eq!(decide(&reading).await, Err(ReasonCode::SecretNotAllowed));
+    }
+
     #[tokio::test]
     async fn a_registry_is_refused_for_bad_fragments_and_foreign_placeholders() {
         let (sources, admission) = admission();
@@ -606,5 +881,124 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    fn managed_named(name: &str, config: serde_json::Value) -> LocalInstance {
+        let mut i = instance(true, config);
+        i.metadata.name = Some(name.into());
+        i.spec.external = None;
+        i.spec.managed = Some(Default::default());
+        i
+    }
+
+    #[tokio::test]
+    async fn a_configuration_a_registry_may_complete_is_not_refused() {
+        let (_, admission) = admission();
+        let decide = async |i: &LocalInstance| {
+            admission
+                .admit("BatleHubLocalInstance", "ns", &object(i))
+                .await
+                .map_err(|d| d.reason)
+        };
+        // An entry without `type` a BatleHubRegistry named npm completes.
+        assert_eq!(
+            decide(&instance(
+                true,
+                json!({"invalid": 1, "registries": [{"name": "npm"}]})
+            ))
+            .await,
+            Ok(())
+        );
+        // Nothing to complete: certain.
+        assert_eq!(
+            decide(&managed_named("hub", json!({"invalid": 1}))).await,
+            Err(ReasonCode::ConfigInvalid)
+        );
+        assert_eq!(
+            decide(&managed_named("hub", serde_json::Value::Null)).await,
+            Err(ReasonCode::InvalidSpec)
+        );
+    }
+
+    #[tokio::test]
+    async fn credentials_dropping_the_operator_s_entry_are_refused() {
+        let (sources, admission) = admission();
+        let decide = async |i: &LocalInstance| {
+            admission
+                .admit("BatleHubLocalInstance", "ns", &object(i))
+                .await
+                .map_err(|d| d.reason)
+        };
+        let mut hub = managed_named("hub", json!({"server": {}}));
+        hub.spec.managed.as_mut().unwrap().credentials = Some(LocalSecretKeyRef {
+            name: "creds".into(),
+            key: "credentials.toml".into(),
+        });
+        // Not created yet: the status will say.
+        assert_eq!(decide(&hub).await, Ok(()));
+        sources.put(
+            "ns",
+            "creds",
+            r#"{"auth": [{"type": "token", "tokens": [{"value": "theirs", "role": "admin"}]}]}"#,
+        );
+        assert_eq!(decide(&hub).await, Err(ReasonCode::OperatorTokenShadowed));
+        sources.put(
+            "ns",
+            "creds",
+            r#"{"auth": [{"type": "token", "tokens": [{"value": "x", "role": "admin", "user_id": "weebo-batlehub-operator"}]}]}"#,
+        );
+        assert_eq!(decide(&hub).await, Ok(()));
+        sources.put("ns", "creds", r#"{"database": {"url": "x"}}"#);
+        assert_eq!(decide(&hub).await, Ok(()));
+    }
+
+    #[tokio::test]
+    async fn restart_is_refused_on_an_external_instance_and_the_default_instance_is_named() {
+        let siblings = Arc::new(FakeSiblings::default());
+        *siblings.instances.lock().unwrap() = vec![instance(true, json!({}))];
+        *siblings.grants.lock().unwrap() = vec![grant("first", None, &["user:alice"])];
+        let (_, admission) = admission_with(siblings.clone());
+        let restart = |instance_ref: Option<InstanceRef>| {
+            Maintenance::new(
+                "m",
+                api::maintenance::MaintenanceSpec {
+                    instance_ref,
+                    action: api::maintenance::MaintenanceAction::Restart,
+                    params: Default::default(),
+                    schedule: None,
+                    suspend: false,
+                    ttl_seconds_after_finished: None,
+                    timeout_seconds: 600,
+                },
+            )
+        };
+        let decide = async |m: &Maintenance| {
+            admission
+                .admit("BatleHubMaintenance", "ns", &object(m))
+                .await
+                .map_err(|d| d.reason)
+        };
+        assert_eq!(decide(&restart(None)).await, Err(ReasonCode::InvalidSpec));
+        assert_eq!(
+            decide(&restart(Some(InstanceRef::named("hub")))).await,
+            Err(ReasonCode::InvalidSpec)
+        );
+        // Not found yet: left to the run.
+        assert_eq!(
+            decide(&restart(Some(InstanceRef::named("other")))).await,
+            Ok(())
+        );
+        // A grant naming the only instance collides with one naming none.
+        let mut named = grant("second", None, &["user:alice"]);
+        named.spec.instance_ref = Some(InstanceRef::named("hub"));
+        assert_eq!(
+            admission
+                .admit("BatleHubPackageGrant", "ns", &object(&named))
+                .await
+                .map_err(|d| d.reason),
+            Err(ReasonCode::GrantConflict)
+        );
+        *siblings.instances.lock().unwrap() = vec![managed_named("hub", json!({}))];
+        assert_eq!(decide(&restart(None)).await, Ok(()));
     }
 }

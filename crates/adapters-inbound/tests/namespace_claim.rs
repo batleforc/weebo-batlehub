@@ -84,6 +84,7 @@ fn ctx(client: &Client, gateway: Arc<FakeGateway>) -> Arc<Ctx> {
         shutdown: Shutdown::never(),
         health: Arc::new(Health::default()),
         scope: WatchScope::cluster(),
+        images: Default::default(),
     })
 }
 
@@ -184,6 +185,13 @@ async fn a_claim_is_made_moved_released_and_never_taken_over() {
         .create(&pp, &claim("nowhere", "pypi", "acme", "oidc:web"))
         .await
         .unwrap();
+    // A dot part would leave the claim's path: refused by the CRD.
+    for prefix in ["acme/..", "./acme", "a/./b", ".."] {
+        let refused = claims
+            .create(&pp, &claim("dots", "npm", prefix, "oidc:web"))
+            .await;
+        assert!(refused.is_err(), "{prefix}: {refused:?}");
+    }
     let mut kept = claim("kept", "npm", "@acme/kept", "oidc:web");
     kept.spec.deletion_policy = DeletionPolicy::Orphan;
     claims.create(&pp, &kept).await.unwrap();

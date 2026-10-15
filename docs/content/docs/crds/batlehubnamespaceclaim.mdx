@@ -44,7 +44,7 @@ spec:
 | `deletionPolicy` | `string` | no | `"Delete"` | `Delete` (default) releases the prefix when this object is deleted; `Orphan` leaves the claim on the instance. |
 | `group` | `string` | yes |  | The group owning the prefix, as the instance's auth providers name it: `oidc:frontend-team`, `kubernetes:system:serviceaccounts:ci`… Changing it releases the prefix then claims it for the new group. |
 | `instanceRef` | `object` | no |  | The `BatleHubLocalInstance` of this namespace holding the registry; unset, the only one of this namespace. Immutable. |
-| `prefix` | `string` | yes |  | The package name prefix, in the ecosystem's own spelling: an npm scope (`@acme`), a Go module or Maven path, an OpenVSX publisher… A claim covers `prefix` itself and every package under it. Immutable. |
+| `prefix` | `string` | yes |  | The package name prefix, in the ecosystem's own spelling: an npm scope (`@acme`), a Go module or Maven path, an OpenVSX publisher… A claim covers `prefix` itself and every package under it. No part between slashes may be `.` or `..`. Immutable. |
 | `registry` | `string` | yes |  | The registry's name on the instance (a `[[registries]]` entry, from the instance's configuration or a `BatleHubRegistry`). Immutable. |
 
 ## Build a manifest

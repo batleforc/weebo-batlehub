@@ -18,7 +18,7 @@ use api::package_grant::{PackageGrantSpec, PackageGrantStatus};
 use api::package_policy::{PackagePolicySpec, PackagePolicyStatus};
 use api::{LocalInstance, PackageGrant, PackagePolicy};
 use application::ports::PackageNode;
-use application::use_cases::import::Imported;
+use application::use_cases::import::{Imported, Owned, OwningCr};
 use kube::api::{Api, ObjectMeta};
 use kube::{Client, Resource, ResourceExt};
 use serde_json::{Map, Value, json};
@@ -129,10 +129,8 @@ pub fn chart_instance(
         ),
         _ => None,
     };
-    let credentials_key = values["credentials"]["key"]
-        .as_str()
-        .unwrap_or("credentials.toml")
-        .to_string();
+    let credentials_key = credentials_key(values);
+    let credentials_copied = credentials_copy(values, options);
     if values["externalManifest"]
         .as_array()
         .is_some_and(|a| !a.is_empty())
@@ -318,16 +316,27 @@ pub fn chart_instance(
                 }
                 managed.insert("worker".into(), Value::Object(out));
             }
-            if let Some(secret) = &credentials_secret {
-                managed.insert(
-                    "credentials".into(),
-                    json!({"name": secret, "key": credentials_key}),
-                );
-                warnings.push(format!(
-                    "label the credentials Secret for the operator: kubectl -n {} label \
-                     secret {secret} batlehub.weebo.io/credential=true",
-                    options.namespace
-                ));
+            match (&credentials_copied, &credentials_secret) {
+                // The chart's own Secret goes with the release: a copy.
+                (Some(copy), _) => {
+                    managed.insert(
+                        "credentials".into(),
+                        json!({"name": copy.to, "key": copy.key}),
+                    );
+                }
+                // `existingSecret`: something else manages it, it stays.
+                (None, Some(secret)) => {
+                    managed.insert(
+                        "credentials".into(),
+                        json!({"name": secret, "key": credentials_key}),
+                    );
+                    warnings.push(format!(
+                        "label the credentials Secret for the operator: kubectl -n {} label \
+                         secret {secret} batlehub.weebo.io/credential=true",
+                        options.namespace
+                    ));
+                }
+                (None, None) => {}
             }
             if fullname == name {
                 warnings.push(format!(
@@ -344,6 +353,134 @@ pub fn chart_instance(
     let mut instance = LocalInstance::new(&name, spec);
     instance.metadata.namespace = Some(options.namespace.clone());
     Ok((instance, warnings))
+}
+
+fn credentials_key(values: &Value) -> String {
+    values["credentials"]["key"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("credentials.toml")
+        .to_string()
+}
+
+/// The credentials layer of a release taken over (`managed`), when the
+/// chart renders it into its own Secret (`credentials.config`, no
+/// `existingSecret`): that Secret belongs to the release and goes with
+/// it, so the instance reads a copy the importer makes, labelled
+/// `batlehub.weebo.io/credential=true`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CredentialsCopy {
+    /// The chart's Secret, `<fullname>-credentials`.
+    pub from: String,
+    /// The copy, `<instance>-credentials` (`-copy` appended when that is
+    /// the chart's own name).
+    pub to: String,
+    pub key: String,
+}
+
+/// See [`CredentialsCopy`]; `None` in external mode, without a
+/// credentials layer, or with `existingSecret`.
+pub fn credentials_copy(values: &Value, options: &ChartOptions) -> Option<CredentialsCopy> {
+    let credentials = &values["credentials"];
+    if options.mode != Mode::Managed
+        || credentials["enabled"].as_bool() != Some(true)
+        || credentials["existingSecret"]
+            .as_str()
+            .is_some_and(|s| !s.is_empty())
+    {
+        return None;
+    }
+    let from = format!("{}-credentials", chart_fullname(&options.release, values));
+    let name = options.name.as_deref().unwrap_or(&options.release);
+    let mut to = format!("{name}-credentials");
+    if to == from {
+        to.push_str("-copy");
+    }
+    Some(CredentialsCopy {
+        from,
+        to,
+        key: credentials_key(values),
+    })
+}
+
+/// The commands that make the copy by hand (print mode: the importer
+/// writes no secret value to its output).
+pub fn credentials_commands(copy: &CredentialsCopy, namespace: &str) -> String {
+    format!(
+        "kubectl -n {namespace} get secret {from} -o go-template='{{{{index .data \"{key}\"}}}}' \
+         | base64 -d > {key} && kubectl -n {namespace} create secret generic {to} \
+         --from-file={key}={key} && kubectl -n {namespace} label secret {to} \
+         {label}=true && rm {key}",
+        from = copy.from,
+        to = copy.to,
+        key = copy.key,
+        label = api::CREDENTIAL_LABEL,
+    )
+}
+
+/// Copies the release's credentials Secret (see [`CredentialsCopy`]):
+/// the same bytes under the copy's name, labelled for the operator. A copy
+/// already there with the same content is fine; another is an error.
+pub async fn copy_credentials(
+    client: &Client,
+    namespace: &str,
+    copy: &CredentialsCopy,
+) -> Result<(), String> {
+    use k8s_openapi::api::core::v1::Secret;
+    let secrets: Api<Secret> = Api::namespaced(client.clone(), namespace);
+    let source = secrets
+        .get_opt(&copy.from)
+        .await
+        .map_err(|e| format!("reading Secret {namespace}/{}: {e}", copy.from))?
+        .ok_or_else(|| format!("Secret {namespace}/{} not found", copy.from))?;
+    let data = source
+        .data
+        .as_ref()
+        .and_then(|d| d.get(&copy.key))
+        .cloned()
+        .ok_or_else(|| format!("Secret {namespace}/{} has no key {}", copy.from, copy.key))?;
+    if let Some(existing) = secrets
+        .get_opt(&copy.to)
+        .await
+        .map_err(|e| format!("reading Secret {namespace}/{}: {e}", copy.to))?
+    {
+        let same = existing.data.as_ref().and_then(|d| d.get(&copy.key)) == Some(&data);
+        let labelled = existing
+            .metadata
+            .labels
+            .as_ref()
+            .and_then(|l| l.get(api::CREDENTIAL_LABEL))
+            .is_some_and(|v| v == "true");
+        return match (same, labelled) {
+            (true, true) => Ok(()),
+            _ => Err(format!(
+                "Secret {namespace}/{} exists already and isn't the labelled copy of {}",
+                copy.to, copy.from
+            )),
+        };
+    }
+    let secret = Secret {
+        metadata: ObjectMeta {
+            name: Some(copy.to.clone()),
+            namespace: Some(namespace.into()),
+            labels: Some(BTreeMap::from([
+                (api::CREDENTIAL_LABEL.to_string(), "true".to_string()),
+                (
+                    "app.kubernetes.io/managed-by".to_string(),
+                    FIELD_MANAGER.to_string(),
+                ),
+            ])),
+            ..Default::default()
+        },
+        data: Some(BTreeMap::from([(copy.key.clone(), data)])),
+        type_: Some("Opaque".into()),
+        ..Default::default()
+    };
+    secrets
+        .create(&kube::api::PostParams::default(), &secret)
+        .await
+        .map_err(|e| format!("creating Secret {namespace}/{}: {e}", copy.to))?;
+    Ok(())
 }
 
 /// A Kubernetes name for a node's CR: readable, unique (a digest of the
@@ -514,6 +651,94 @@ fn policy_bound(cr: &PackagePolicy) -> Option<String> {
     })
 }
 
+fn node_of(registry: &str, package: &str, version: &Option<String>) -> PackageNode {
+    PackageNode {
+        registry: registry.to_string(),
+        package: package.to_string(),
+        version: version.clone(),
+    }
+}
+
+/// Whether a CR naming `theirs` may write on the instance `ours` names:
+/// either left empty (the namespace's only instance) is taken as the same.
+fn same_instance(theirs: Option<&InstanceRef>, ours: Option<&str>) -> bool {
+    match (theirs, ours) {
+        (Some(theirs), Some(ours)) => theirs.name == ours,
+        _ => true,
+    }
+}
+
+/// What the governance CRs of the namespace already hold on the instance
+/// `instance_ref` names: the subjects a grant lists or recorded as written,
+/// the nodes a policy writes.
+pub fn owned(
+    grants: &[PackageGrant],
+    policies: &[PackagePolicy],
+    instance_ref: Option<&str>,
+) -> Owned {
+    let mut owned = Owned::default();
+    for cr in grants
+        .iter()
+        .filter(|cr| same_instance(cr.spec.instance_ref.as_ref(), instance_ref))
+    {
+        let mut subjects: Vec<String> = cr.spec.grants.iter().map(|g| g.subject.clone()).collect();
+        if let Some(status) = &cr.status {
+            subjects.extend(status.applied.iter().map(|a| a.subject.clone()));
+        }
+        subjects.sort();
+        subjects.dedup();
+        owned
+            .grants
+            .entry(node_of(
+                &cr.spec.registry,
+                &cr.spec.package,
+                &cr.spec.version,
+            ))
+            .or_default()
+            .push(OwningCr {
+                name: cr.name_any(),
+                subjects,
+                observed_policy_hash: None,
+            });
+    }
+    for cr in policies
+        .iter()
+        .filter(|cr| same_instance(cr.spec.instance_ref.as_ref(), instance_ref))
+    {
+        owned
+            .policies
+            .entry(node_of(
+                &cr.spec.registry,
+                &cr.spec.package,
+                &cr.spec.version,
+            ))
+            .or_default()
+            .push(OwningCr {
+                name: cr.name_any(),
+                subjects: Vec::new(),
+                observed_policy_hash: cr
+                    .status
+                    .as_ref()
+                    .and_then(|s| s.observed_policy_hash.clone()),
+            });
+    }
+    owned
+}
+
+/// The governance CRs of `namespace`, for [`owned`].
+pub async fn existing(
+    client: &Client,
+    namespace: &str,
+) -> Result<(Vec<PackageGrant>, Vec<PackagePolicy>), kube::Error> {
+    let grants: Api<PackageGrant> = Api::namespaced(client.clone(), namespace);
+    let policies: Api<PackagePolicy> = Api::namespaced(client.clone(), namespace);
+    let params = kube::api::ListParams::default();
+    Ok((
+        grants.list(&params).await?.items,
+        policies.list(&params).await?.items,
+    ))
+}
+
 /// Adopts every CR, each reported on stderr as it happens.
 pub async fn adopt_all(
     client: &Client,
@@ -674,11 +899,109 @@ config:
         assert!(managed.pod_disruption_budget.is_some());
         assert!(managed.network_policy.is_none());
         assert_eq!(managed.env[0].name, "DATABASE_URL");
+        // The chart's own credentials Secret goes with the release: the
+        // instance reads the importer's copy.
         let credentials = managed.credentials.unwrap();
-        assert_eq!(credentials.name, "registry-batlehub-credentials");
+        assert_eq!(credentials.name, "registry-credentials");
+        assert_eq!(credentials.key, "credentials.toml");
         assert!(
-            warnings.iter().any(|w| w.contains("credential=true")),
+            !warnings.iter().any(|w| w.contains("credential=true")),
             "{warnings:?}"
+        );
+        assert_eq!(
+            credentials_copy(&values(), &options(Mode::Managed)),
+            Some(CredentialsCopy {
+                from: "registry-batlehub-credentials".into(),
+                to: "registry-credentials".into(),
+                key: "credentials.toml".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn credentials_are_copied_only_from_the_chart_s_own_secret() {
+        // external: the release keeps its Secret.
+        assert_eq!(credentials_copy(&values(), &options(Mode::External)), None);
+        // existingSecret: managed by something else, referenced as is.
+        let mut existing = values();
+        existing["credentials"]["existingSecret"] = json!("vault-creds");
+        assert_eq!(credentials_copy(&existing, &options(Mode::Managed)), None);
+        let (instance, warnings) = chart_instance(&existing, &options(Mode::Managed)).unwrap();
+        assert_eq!(
+            instance.spec.managed.unwrap().credentials.unwrap().name,
+            "vault-creds"
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("label secret vault-creds"))
+        );
+        // An instance named as the release's fullname: never the chart's name.
+        let mut named = options(Mode::Managed);
+        named.name = Some("registry-batlehub".into());
+        let copy = credentials_copy(&values(), &named).unwrap();
+        assert_eq!(copy.to, "registry-batlehub-credentials-copy");
+        let commands = credentials_commands(&copy, "infra");
+        assert!(
+            commands.contains("get secret registry-batlehub-credentials "),
+            "{commands}"
+        );
+        assert!(
+            commands.contains("batlehub.weebo.io/credential=true"),
+            "{commands}"
+        );
+    }
+
+    #[test]
+    fn existing_crs_own_what_they_list_on_their_instance() {
+        let grant = |name: &str, instance: Option<&str>, subjects: &[&str]| {
+            let mut cr = PackageGrant::new(
+                name,
+                PackageGrantSpec {
+                    instance_ref: instance.map(InstanceRef::named),
+                    registry: "npm".into(),
+                    package: "a".into(),
+                    version: None,
+                    grants: subjects
+                        .iter()
+                        .map(|s| api::package_grant::SubjectGrant {
+                            subject: s.to_string(),
+                            actions: vec!["releases:read".into()],
+                        })
+                        .collect(),
+                    deletion_policy: Default::default(),
+                },
+            );
+            cr.status = Some(PackageGrantStatus {
+                applied: vec![api::package_grant::AppliedGrant {
+                    subject: "user:written".into(),
+                    requested: vec![],
+                    stored: vec![],
+                    warnings: vec![],
+                }],
+                ..Default::default()
+            });
+            cr
+        };
+        let crs = [
+            grant("mine", Some("hub"), &["user:alice"]),
+            grant("default", None, &["user:bob"]),
+            grant("other-instance", Some("other"), &["user:carol"]),
+        ];
+        let owned = owned(&crs, &[], Some("hub"));
+        let node = PackageNode {
+            registry: "npm".into(),
+            package: "a".into(),
+            version: None,
+        };
+        let names: Vec<_> = owned.grants[&node]
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(names, ["mine", "default"]);
+        assert_eq!(
+            owned.grants[&node][0].subjects,
+            ["user:alice", "user:written"]
         );
     }
 

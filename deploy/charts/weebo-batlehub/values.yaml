@@ -66,7 +66,8 @@ watch:
   # of its own read rules either — a ConfigMap of `configLayers` or of a
   # registry's `configFrom`, `external.podSelector` and a maintenance's
   # `ttlSecondsAfterFinished` then fail with KubernetesApiError (only
-  # Secret layers and `url` work).
+  # Secret layers and `url` work), and a managed instance is refused
+  # (InvalidSpec): use external mode.
   clusterKinds: true
 
 references:
@@ -317,3 +318,42 @@ networkPolicy:
 # -- Extra environment variables, e.g. OTEL_EXPORTER_OTLP_ENDPOINT or
 # RUST_LOG.
 extraEnv: []
+
+# weebo-batlehub's own: what a managed BatleHubLocalInstance may deploy.
+managedInstances:
+  # -- Image repositories (no tag) the pods of a managed instance may run
+  # (env WEEBO_BATLEHUB_ALLOWED_IMAGES): checked by the webhook and before
+  # every apply. Add a mirror here; anyone who may create a
+  # BatleHubLocalInstance runs these images with the namespace's Secrets
+  # they are allowed to read (labelled batlehub.weebo.io/credential).
+  allowedImages:
+    - ghcr.io/batlehub/batlehub
+    - ghcr.io/batlehub/batlehub-worker
+
+# weebo-batlehub's own settings.
+defaults:
+  # -- The image of a managed instance's proxy pods when its
+  # `managed.image` names none, `repository[:tag]` (env
+  # WEEBO_BATLEHUB_DEFAULT_IMAGE), e.g. a mirror. Empty: the BatleHub
+  # release this operator targets (`ghcr.io/batlehub/batlehub:<version>`).
+  # A mirror's repository must also be in managedInstances.allowedImages.
+  image: ""
+  # -- The same for the worker pods (env
+  # WEEBO_BATLEHUB_DEFAULT_WORKER_IMAGE); without a tag they follow the
+  # proxy's. Empty: `ghcr.io/batlehub/batlehub-worker`.
+  workerImage: ""
+  # -- Timeout of each call of BatleHub's admin API, in seconds (env
+  # WEEBO_BATLEHUB_ADMIN_TIMEOUT_SECONDS, 1-600); a maintenance's call
+  # takes its `timeoutSeconds` instead.
+  adminTimeoutSeconds: 15
+
+tokenReview:
+  # -- Render the `<fullname>-tokenreview` ClusterRole (TokenReview
+  # create) and let the operator bind it, through one ClusterRoleBinding
+  # of the same name, to the ServiceAccount of every managed instance
+  # with a `kubernetes` auth provider (`managed.serviceAccount.autoTokenReview`).
+  # Cluster-wide only (not with `watch.namespace` nor
+  # `watch.clusterKinds: false`). `false`: no ClusterRole, no rule on
+  # ClusterRoleBindings; such instances get the TokenReviewUnavailable
+  # advisory and their account is bound by hand.
+  enabled: true

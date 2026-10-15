@@ -163,7 +163,26 @@ pub struct Image {
     pub tag: Option<String>,
     /// Default `IfNotPresent`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pull_policy: Option<String>,
+    pub pull_policy: Option<PullPolicy>,
+}
+
+/// The container's `imagePullPolicy`.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq, JsonSchema)]
+pub enum PullPolicy {
+    Always,
+    #[default]
+    IfNotPresent,
+    Never,
+}
+
+impl PullPolicy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PullPolicy::Always => "Always",
+            PullPolicy::IfNotPresent => "IfNotPresent",
+            PullPolicy::Never => "Never",
+        }
+    }
 }
 
 impl Image {
@@ -193,8 +212,8 @@ pub enum UpdateStrategy {
 #[serde(rename_all = "camelCase")]
 pub struct Service {
     /// Default `ClusterIP`.
-    #[serde(default = "cluster_ip", rename = "type")]
-    pub r#type: String,
+    #[serde(default, rename = "type")]
+    pub r#type: ServiceType,
     /// The `Service`'s port (default 8080); the container's follows
     /// `config.server.port`.
     #[serde(default = "http_port")]
@@ -204,8 +223,23 @@ pub struct Service {
     pub annotations: BTreeMap<String, String>,
 }
 
-fn cluster_ip() -> String {
-    "ClusterIP".into()
+/// The `Service`'s `type` (`ExternalName` names no pod: not offered).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq, JsonSchema)]
+pub enum ServiceType {
+    #[default]
+    ClusterIP,
+    NodePort,
+    LoadBalancer,
+}
+
+impl ServiceType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ServiceType::ClusterIP => "ClusterIP",
+            ServiceType::NodePort => "NodePort",
+            ServiceType::LoadBalancer => "LoadBalancer",
+        }
+    }
 }
 
 fn http_port() -> i32 {
@@ -215,7 +249,7 @@ fn http_port() -> i32 {
 impl Default for Service {
     fn default() -> Self {
         Self {
-            r#type: cluster_ip(),
+            r#type: ServiceType::default(),
             port: http_port(),
             annotations: BTreeMap::new(),
         }
@@ -254,9 +288,11 @@ pub struct Persistence {
     pub size: Quantity,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub storage_class: Option<String>,
-    /// Default `ReadWriteOnce`.
-    #[serde(default = "rwo")]
-    pub access_mode: String,
+    /// Default `ReadWriteOnce`. A single-writer mode (`ReadWriteOnce`,
+    /// `ReadWriteOncePod`) allows one proxy pod; `ReadWriteOncePod`, no
+    /// separate worker either (it mounts the cache too).
+    #[serde(default)]
+    pub access_mode: AccessMode,
     /// A claim of this namespace to use instead of creating one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub existing_claim: Option<String>,
@@ -272,8 +308,23 @@ fn one_gi() -> Quantity {
     Quantity("1Gi".into())
 }
 
-fn rwo() -> String {
-    "ReadWriteOnce".into()
+/// The claim's access mode.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq, JsonSchema)]
+pub enum AccessMode {
+    #[default]
+    ReadWriteOnce,
+    ReadWriteOncePod,
+    ReadWriteMany,
+}
+
+impl AccessMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AccessMode::ReadWriteOnce => "ReadWriteOnce",
+            AccessMode::ReadWriteOncePod => "ReadWriteOncePod",
+            AccessMode::ReadWriteMany => "ReadWriteMany",
+        }
+    }
 }
 
 impl Default for Persistence {
@@ -282,7 +333,7 @@ impl Default for Persistence {
             enabled: true,
             size: ten_gi(),
             storage_class: None,
-            access_mode: rwo(),
+            access_mode: AccessMode::default(),
             existing_claim: None,
             ephemeral_size_limit: one_gi(),
         }
@@ -298,8 +349,8 @@ impl Persistence {
     pub fn single_writer(&self) -> bool {
         self.enabled
             && matches!(
-                self.access_mode.as_str(),
-                "ReadWriteOnce" | "ReadWriteOncePod"
+                self.access_mode,
+                AccessMode::ReadWriteOnce | AccessMode::ReadWriteOncePod
             )
     }
 }
@@ -341,7 +392,7 @@ fn four_gi() -> Quantity {
 ]))]
 pub struct Autoscaling {
     #[serde(default = "one")]
-    #[schemars(range(min = 0))]
+    #[schemars(range(min = 1))]
     pub min_replicas: i32,
     #[schemars(range(min = 1))]
     pub max_replicas: i32,
@@ -476,8 +527,9 @@ pub struct Names {
 }
 
 /// `app.kubernetes.io/managed-by` of every object the operator creates: an
-/// object carrying it (or an owner reference to the instance) may be
-/// written over; any other is a conflict.
+/// object carrying it with `app.kubernetes.io/instance: <instance>` (and
+/// controlled by no other object), or an owner reference to the instance,
+/// may be written over; any other is a conflict.
 pub const MANAGED_BY: &str = "weebo-batlehub";
 /// The key of the generated token in `<name>-operator-token`.
 pub const TOKEN_KEY: &str = "token";

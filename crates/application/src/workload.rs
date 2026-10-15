@@ -371,10 +371,7 @@ fn proxy(input: &WorkloadInput<'_>) -> Deployment {
                         name: "batlehub".into(),
                         image: Some(spec.image.reference()),
                         image_pull_policy: Some(
-                            spec.image
-                                .pull_policy
-                                .clone()
-                                .unwrap_or_else(|| "IfNotPresent".into()),
+                            spec.image.pull_policy.unwrap_or_default().as_str().into(),
                         ),
                         args: Some(args(spec, spec.worker.as_ref().map(|_| "proxy"))),
                         env: env(spec, Vec::new()),
@@ -466,7 +463,7 @@ fn worker(input: &WorkloadInput<'_>, worker: &api::managed::Worker) -> Deploymen
                         name: "worker".into(),
                         image: Some(reference),
                         image_pull_policy: Some(
-                            image.pull_policy.unwrap_or_else(|| "IfNotPresent".into()),
+                            image.pull_policy.unwrap_or_default().as_str().into(),
                         ),
                         args: Some(args(spec, Some("worker"))),
                         env: env(
@@ -556,7 +553,7 @@ pub fn objects(input: &WorkloadInput<'_>) -> Vec<OwnedObject> {
             &PersistentVolumeClaim {
                 metadata: meta(input, names.cache(), "proxy"),
                 spec: Some(PersistentVolumeClaimSpec {
-                    access_modes: Some(vec![spec.persistence.access_mode.clone()]),
+                    access_modes: Some(vec![spec.persistence.access_mode.as_str().into()]),
                     storage_class_name: spec.persistence.storage_class.clone(),
                     resources: Some(VolumeResourceRequirements {
                         requests: Some(BTreeMap::from([(
@@ -578,7 +575,7 @@ pub fn objects(input: &WorkloadInput<'_>) -> Vec<OwnedObject> {
         &Service {
             metadata: service_meta,
             spec: Some(ServiceSpec {
-                type_: Some(spec.service.r#type.clone()),
+                type_: Some(spec.service.r#type.as_str().into()),
                 selector: Some(names.selector("proxy")),
                 ports: Some(vec![ServicePort {
                     name: Some("http".into()),

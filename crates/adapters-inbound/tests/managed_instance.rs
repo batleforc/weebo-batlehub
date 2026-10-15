@@ -78,6 +78,7 @@ fn ctx(client: &Client) -> Arc<Ctx> {
         shutdown: Shutdown::never(),
         health: Arc::new(Health::default()),
         scope: WatchScope::cluster(),
+        images: Default::default(),
     })
 }
 
@@ -123,6 +124,28 @@ async fn a_managed_instance_deploys_its_objects_and_never_takes_one_over() {
         .unwrap(),
     );
     assert!(instances.create(&pp, &both).await.is_err());
+    // A managed instance's name names its Service (DNS-1035, ≤ 63).
+    for name in ["1hub", &"h".repeat(64)] {
+        let refused = instances
+            .create(&pp, &instance(name, ManagedInstance::default()))
+            .await;
+        assert!(refused.is_err(), "{name}: {refused:?}");
+    }
+    // Kubernetes spellings only (not deserializable into the type: sent raw).
+    let raw: Api<kube::api::DynamicObject> = Api::namespaced_with(
+        client.clone(),
+        NS,
+        &kube::api::ApiResource::erase::<LocalInstance>(&()),
+    );
+    let typo: kube::api::DynamicObject = serde_json::from_value(json!({
+        "apiVersion": "batlehub.weebo.io/v1alpha1",
+        "kind": "BatleHubLocalInstance",
+        "metadata": {"name": "typo"},
+        "spec": {"managed": {"service": {"type": "Loadbalancer"}}},
+    }))
+    .unwrap();
+    let refused = raw.create(&pp, &typo).await;
+    assert!(refused.is_err(), "{refused:?}");
 
     // A Service of the same name someone else created.
     Api::<Service>::namespaced(client.clone(), NS)
@@ -240,4 +263,83 @@ async fn a_managed_instance_deploys_its_objects_and_never_takes_one_over() {
         .unwrap();
     let hub = until(&instances, "hub", "NoReadyPod").await;
     assert_eq!(hub.status.unwrap().available_replicas, Some(1));
+
+    // Pods the operator doesn't run, or that read a Secret that didn't opt
+    // in: nothing is applied (the webhook refuses them first).
+    secrets
+        .create(
+            &pp,
+            &serde_json::from_value(json!({
+                "metadata": {"name": "db"}, "stringData": {"url": "postgres://x"},
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let reader: ManagedInstance =
+        serde_json::from_value(json!({"envFrom": [{"secretRef": {"name": "db"}}]})).unwrap();
+    instances
+        .create(&pp, &instance("reader", reader))
+        .await
+        .unwrap();
+    let foreign: ManagedInstance =
+        serde_json::from_value(json!({"image": {"repository": "docker.io/evil/miner"}})).unwrap();
+    instances
+        .create(&pp, &instance("foreign", foreign))
+        .await
+        .unwrap();
+    until(&instances, "reader", "SecretNotAllowed").await;
+    until(&instances, "foreign", "InvalidSpec").await;
+    for name in ["reader", "foreign"] {
+        assert!(deployments.get_opt(name).await.unwrap().is_none());
+        assert!(
+            secrets
+                .get_opt(&format!("{name}-config"))
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+    // Labelled, it is read.
+    secrets
+        .patch(
+            "db",
+            &PatchParams::default(),
+            &Patch::Merge(
+                json!({"metadata": {"labels": {"batlehub.weebo.io/credential": "true"}}}),
+            ),
+        )
+        .await
+        .unwrap();
+    instances
+        .patch(
+            "reader",
+            &PatchParams::default(),
+            &Patch::Merge(json!({"metadata": {"annotations": {"touch": "1"}}})),
+        )
+        .await
+        .unwrap();
+    until(&instances, "reader", "WorkloadNotReady").await;
+
+    // Two instances never take one object from each other: `twin`'s
+    // worker is `twin-worker`'s proxy Deployment.
+    let twin: ManagedInstance = serde_json::from_value(json!({"worker": {}})).unwrap();
+    instances
+        .create(&pp, &instance("twin", twin))
+        .await
+        .unwrap();
+    until(&instances, "twin", "WorkloadNotReady").await;
+    instances
+        .create(&pp, &instance("twin-worker", ManagedInstance::default()))
+        .await
+        .unwrap();
+    until(&instances, "twin-worker", "OwnedObjectConflict").await;
+    let twin = instances.get("twin").await.unwrap();
+    let worker = deployments.get("twin-worker").await.unwrap();
+    assert!(
+        worker
+            .owner_references()
+            .iter()
+            .any(|r| Some(&r.uid) == twin.uid().as_ref())
+    );
 }

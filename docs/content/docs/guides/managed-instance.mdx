@@ -26,6 +26,10 @@ spec:
       - { name: npm, type: npm, upstreams: ["https://registry.npmjs.org"] }
 ```
 
+The Secret `batlehub-db` must carry the label
+`batlehub.weebo.io/credential: "true"` (see [What the pods may
+be](#what-the-pods-may-be)).
+
 The defaults follow BatleHub's own Helm chart (image, probes, security
 contexts, resources, cache volume), so a `values.yaml` translates field by
 field: `replicaCount` → `managed.replicas`, `image.*`, `service.*`,
@@ -49,12 +53,40 @@ instance deletes them):
 | `Service`, proxy `Deployment` | `<name>` | always |
 | worker `Deployment` (`--roles worker`), its HPA | `<name>-worker` | `worker`, `worker.autoscaling` |
 | `Ingress`, `PodDisruptionBudget`, `NetworkPolicy` | `<name>` | `ingress`; `podDisruptionBudget` from 2 replicas; `networkPolicy` |
-| `ClusterRoleBinding` to TokenReview | `weebo-batlehub-tokenreview-<hash>` | a `kubernetes` auth provider, `serviceAccount.autoTokenReview` |
+| a subject of the `ClusterRoleBinding` to TokenReview, shared by every instance | `<release>-tokenreview` | a `kubernetes` auth provider, `serviceAccount.autoTokenReview` |
 
 **Nothing is taken over.** An object of one of these names that exists
-without an owner reference to the instance nor the label
-`app.kubernetes.io/managed-by: weebo-batlehub` is left alone:
-`OwnedObjectConflict` names it. Label it to hand it over.
+without an owner reference to the instance nor the labels
+`app.kubernetes.io/managed-by: weebo-batlehub` and
+`app.kubernetes.io/instance: <name>` is left alone:
+`OwnedObjectConflict` names it. Label it to hand it over. An object
+another instance controls is never taken, whatever its labels: instances
+`hub` (with a worker, `hub-worker`) and `hub-worker` can't share one; the
+second is in conflict. A `serviceAccount.name` with `create: false` is
+used as is, never created, labelled nor deleted.
+
+## What the pods may be
+
+Creating a `BatleHubLocalInstance` makes the operator write pods in the
+namespace. So that it gives no more than running BatleHub, the webhook
+refuses — and the operator checks again before applying anything:
+
+- an image whose repository is not on the operator's allow-list
+  (`InvalidSpec`; the chart's `managedInstances.allowedImages`, by default
+  `ghcr.io/batlehub/batlehub` and `ghcr.io/batlehub/batlehub-worker`; add
+  your mirror there);
+- a `hostPath` volume, a privileged container, `allowPrivilegeEscalation:
+  true`, an added capability, a Windows host process (`InvalidSpec`);
+- a Secret the pods would read — `env[].valueFrom.secretKeyRef`,
+  `envFrom[].secretRef`, a `secret` or `projected` volume of
+  `extraVolumes` — that exists without the label
+  `batlehub.weebo.io/credential: "true"` (`SecretNotAllowed`; one not
+  created yet is reported by the status, the pods wait for it). Label the
+  Secrets the instance may read: `kubectl label secret batlehub-db
+  batlehub.weebo.io/credential=true`.
+
+`imagePullSecrets` are not checked: the kubelet only presents them to the
+image's registry, an allowed one.
 
 ## The operator's token
 
@@ -107,7 +139,34 @@ behind) tell where a change stands.
 
 The operator's ClusterRole grants the kinds it deploys (Deployments,
 Services, ServiceAccounts, claims, Ingresses, NetworkPolicies, PDBs,
-HPAs) and `bind` on the chart's `<release>-tokenreview` ClusterRole only.
-Limited to one namespace (`watch.namespace`), it binds no ClusterRole: a
-`kubernetes` auth provider then raises `TokenReviewUnavailable`, bind
-TokenReview to the instance's ServiceAccount yourself.
+HPAs), `get`/`bind` on the chart's `<release>-tokenreview` ClusterRole
+only, and `get`/`patch` on the one ClusterRoleBinding of the same name:
+every instance with a `kubernetes` auth provider adds its ServiceAccount
+to its subjects, and removes it on deletion (an account two instances
+share stays while one still uses it). It may create ClusterRoleBindings
+(Kubernetes can't limit `create` by name; its escalation check still
+refuses binding a role the operator neither holds nor may bind), and
+never deletes one. The binding is owned by the ClusterRole: it goes with
+the release.
+
+Limited to one namespace (`watch.namespace`), or with
+`tokenReview.enabled: false`, it binds no ClusterRole: a `kubernetes`
+auth provider then raises `TokenReviewUnavailable`, bind TokenReview to
+the instance's ServiceAccount yourself. Fully namespaced
+(`watch.clusterKinds: false`) the operator has none of the rules above:
+a managed instance is refused (`Ready: False`, `InvalidSpec`); use
+external mode there.
+
+**Upgrading from 0.1.0**: 0.1.0 created one binding per instance
+(`weebo-batlehub-tokenreview-<hash>`), which the operator may no longer
+delete. Once your managed instances are `Ready` again on the new
+release, delete them:
+`kubectl delete clusterrolebinding -l app.kubernetes.io/managed-by=weebo-batlehub,batlehub.weebo.io/instance-name`.
+
+## Images
+
+`managed.image` (and `managed.worker.image`) default to the BatleHub
+release the operator targets (`ghcr.io/batlehub/batlehub`,
+`ghcr.io/batlehub/batlehub-worker`). The chart's `defaults.image` and
+`defaults.workerImage` (`repository[:tag]`) change that default for
+every instance, e.g. to a mirror; a field the instance sets wins.

@@ -8,7 +8,8 @@
 //! `watch.namespace` (+ a label selector): the kinds in a Role of the
 //! watched namespace; Secrets and Events in the ClusterRole
 //! (`params.clusterSecrets: true`). BatleHub has no cluster-scoped kind,
-//! and the chart refuses `watch.clusterKinds: false` (spec §7.1).
+//! and `watch.clusterKinds: false` (all in Roles) refuses managed mode
+//! (spec §7.1).
 //!
 //! The rules below mirror the library chart's `clusterRole` and
 //! `watchRole` (`weebo-operator.kindRules`): keep them in step.
@@ -232,6 +233,7 @@ fn ctx(operator: &Client, scope: WatchScope) -> (Arc<Ctx>, Arc<Health>) {
         shutdown: Shutdown::never(),
         health: health.clone(),
         scope,
+        images: Default::default(),
     });
     (ctx, health)
 }
@@ -309,4 +311,184 @@ async fn a_namespaced_scope_runs_on_namespaced_rbac_and_sees_only_its_instances(
         assert!(untouched.status.is_none(), "{name} was reconciled");
     }
     assert_eq!(health.live(), Ok(()));
+}
+
+/// Fully namespaced (`watch.clusterKinds: false`): no ClusterRole, so no
+/// rule a managed instance's objects need. A managed instance says so on
+/// `Ready` instead of looping on forbidden writes, and its deletion
+/// doesn't wait on a cluster-scoped binding it can't read.
+#[tokio::test]
+async fn a_managed_instance_without_cluster_rules_is_refused_and_still_deletable() {
+    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+    let cluster = testkit::envtest::start().await;
+    let admin = cluster.client();
+    grant_rbac(&admin, "team-a").await;
+    let operator = operator_client(&cluster).await;
+    let scope = WatchScope::namespace("team-a")
+        .without_cluster_kinds()
+        .unwrap();
+    let (ctx, _) = ctx(&operator, scope);
+    tokio::spawn(controller::local_instance::run(operator.clone(), ctx));
+
+    let mut managed = local_instance("managed");
+    managed.spec.external = None;
+    managed.spec.managed = Some(Default::default());
+    let team_a: Api<LocalInstance> = Api::namespaced(admin.clone(), "team-a");
+    team_a
+        .create(&PostParams::default(), &managed)
+        .await
+        .unwrap();
+    let state = testkit::polling::wait_for(&team_a, "managed", TIMEOUT, POLL, |i| {
+        ready(i).filter(|(_, reason)| reason == "InvalidSpec")
+    })
+    .await;
+    assert_eq!(state.0, "False");
+
+    team_a.delete("managed", &Default::default()).await.unwrap();
+    let deadline = tokio::time::Instant::now() + TIMEOUT;
+    while team_a.get_opt("managed").await.unwrap().is_some() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the finalizer stayed"
+        );
+        tokio::time::sleep(POLL).await;
+    }
+}
+
+/// The chart's rules for the TokenReview binding: `create` (which RBAC
+/// can't restrict by name), `get`/`patch` on the one binding named after
+/// the chart's ClusterRole, `get`/`bind` on that ClusterRole — no
+/// `delete`, nothing on any other binding.
+fn token_review_rules(role: &str) -> Vec<PolicyRule> {
+    let rule = |resource: &str, verbs: &[&str], names: Option<&str>| PolicyRule {
+        api_groups: Some(vec!["rbac.authorization.k8s.io".into()]),
+        resources: Some(vec![resource.into()]),
+        verbs: verbs.iter().map(|v| v.to_string()).collect(),
+        resource_names: names.map(|n| vec![n.to_string()]),
+        ..Default::default()
+    };
+    vec![
+        rule("clusterrolebindings", &["create"], None),
+        rule("clusterrolebindings", &["get", "patch"], Some(role)),
+        rule("clusterroles", &["get", "bind"], Some(role)),
+    ]
+}
+
+#[tokio::test]
+async fn the_token_review_binding_is_shared_and_edited_with_the_chart_rules_only() {
+    use adapters_outbound::KubeWorkloads;
+    use application::ports::{Owner, Workloads};
+    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+    let cluster = testkit::envtest::start().await;
+    let admin = cluster.client();
+    grant_rbac(&admin, "team-a").await;
+    const ROLE: &str = "weebo-batlehub-tokenreview";
+    let pp = PostParams::default();
+    Api::<ClusterRole>::all(admin.clone())
+        .create(
+            &pp,
+            &ClusterRole {
+                metadata: meta(ROLE, None),
+                rules: Some(vec![PolicyRule {
+                    api_groups: Some(vec!["authentication.k8s.io".into()]),
+                    resources: Some(vec!["tokenreviews".into()]),
+                    verbs: vec!["create".into()],
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    Api::<ClusterRole>::all(admin.clone())
+        .create(
+            &pp,
+            &ClusterRole {
+                metadata: meta("operator-tokenreview-binding", None),
+                rules: Some(token_review_rules(ROLE)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    Api::<ClusterRoleBinding>::all(admin.clone())
+        .create(
+            &pp,
+            &ClusterRoleBinding {
+                metadata: meta("operator-tokenreview-binding", None),
+                role_ref: role_ref("ClusterRole", "operator-tokenreview-binding"),
+                subjects: Some(subject()),
+            },
+        )
+        .await
+        .unwrap();
+    let operator = operator_client(&cluster).await;
+    let workloads = KubeWorkloads::new(operator.clone());
+    let owner = |ns: &str, name: &str| Owner {
+        namespace: ns.into(),
+        name: name.into(),
+        uid: format!("{ns}-{name}"),
+    };
+    let subjects = || async {
+        let binding = Api::<ClusterRoleBinding>::all(admin.clone())
+            .get(ROLE)
+            .await
+            .unwrap();
+        binding
+            .subjects
+            .unwrap_or_default()
+            .into_iter()
+            .map(|s| format!("{}/{}", s.namespace.unwrap_or_default(), s.name))
+            .collect::<Vec<_>>()
+    };
+
+    // Two instances share an account, a third has its own.
+    workloads
+        .bind_token_review(&owner("team-a", "hub"), "batlehub", ROLE)
+        .await
+        .unwrap();
+    workloads
+        .bind_token_review(&owner("team-a", "hub-2"), "batlehub", ROLE)
+        .await
+        .unwrap();
+    workloads
+        .bind_token_review(&owner("elsewhere", "hub"), "hub", ROLE)
+        .await
+        .unwrap();
+    assert_eq!(subjects().await, ["elsewhere/hub", "team-a/batlehub"]);
+    let binding = Api::<ClusterRoleBinding>::all(admin.clone())
+        .get(ROLE)
+        .await
+        .unwrap();
+    // Gone with the chart's ClusterRole.
+    assert_eq!(
+        binding.metadata.owner_references.unwrap()[0].name,
+        ROLE.to_string()
+    );
+
+    // The shared account stays while one instance still binds it.
+    workloads
+        .unbind_token_review(&owner("team-a", "hub"), ROLE)
+        .await
+        .unwrap();
+    assert_eq!(subjects().await, ["elsewhere/hub", "team-a/batlehub"]);
+    workloads
+        .unbind_token_review(&owner("team-a", "hub-2"), ROLE)
+        .await
+        .unwrap();
+    workloads
+        .unbind_token_review(&owner("elsewhere", "hub"), ROLE)
+        .await
+        .unwrap();
+    assert!(subjects().await.is_empty());
+    // Unbinding twice is fine.
+    workloads
+        .unbind_token_review(&owner("elsewhere", "hub"), ROLE)
+        .await
+        .unwrap();
+
+    // Nothing else: no other binding read, patched or deleted.
+    let bindings = Api::<ClusterRoleBinding>::all(operator);
+    assert!(bindings.get("operator").await.is_err());
+    assert!(bindings.delete(ROLE, &Default::default()).await.is_err());
 }

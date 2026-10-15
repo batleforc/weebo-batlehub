@@ -10,8 +10,8 @@ use serde_json::Value;
 use crate::ports::{
     AdminGateway, AdminRequest, BoundInstance, ConfigError, ConfigParser, ConfigSource,
     ConfigSources, ConfigVerdict, ConfigWarning, Exemption, GatewayError, GrantWrite,
-    InstanceDependents, InstanceInfo, Ledger, PackageNode, PendingSource, RegistryView,
-    ReloadCheck, SourceError, StoredGrant, TeamNamespace, TokenCheck,
+    InstanceDependents, InstanceInfo, KeyChanges, Ledger, PackageNode, PendingSource, RegistryView,
+    ReloadCheck, Reloaded, SourceError, StoredGrant, TeamNamespace, TokenCheck,
 };
 
 /// What `releases:*` expands to, as BatleHub stores it.
@@ -93,7 +93,7 @@ impl FakeGateway {
         self.loaded.lock().unwrap().clone()
     }
 
-    /// The restart-only keys every dry run reports from now on.
+    /// The restart-only keys every dry run and reload reports from now on.
     pub fn require_restart(&self, keys: &[&str]) {
         *self.restart_required.lock().unwrap() = keys.iter().map(|k| k.to_string()).collect();
     }
@@ -338,18 +338,21 @@ impl AdminGateway for FakeGateway {
 
     /// Reads the file: loads it when its bytes differ from the last
     /// attempt (refused like a stage), else nothing to apply.
-    async fn reload(&self) -> Result<bool, GatewayError> {
+    async fn reload(&self) -> Result<Reloaded, GatewayError> {
         self.call("reload")?;
         let file = self.file();
         let mut last = self.last_attempt.lock().unwrap();
         if last.as_deref() == Some(file.as_str()) {
-            return Ok(false);
+            return Ok(Reloaded::AlreadyTried);
         }
         *last = Some(file.clone());
         drop(last);
         self.judge(&file)?;
         *self.loaded.lock().unwrap() = Some(file);
-        Ok(true)
+        Ok(Reloaded::Loaded {
+            restart_required: self.restart_required.lock().unwrap().clone(),
+            partially_applied: Vec::new(),
+        })
     }
 
     async fn registry_names(&self) -> Result<Vec<String>, GatewayError> {
@@ -759,17 +762,23 @@ impl ConfigParser for FakeConfigParser {
     }
 
     /// A changed `restart` key (`"restart": …` at the top level) is the
-    /// one restart key.
-    fn restart_keys(&self, before: &str, after: &str) -> Result<Vec<String>, ConfigError> {
-        let read = |doc: &str| {
-            serde_json::from_str::<Value>(doc)
-                .ok()
-                .and_then(|v| v.get("restart").cloned())
+    /// one restart key, a changed `partial` key the one partial key.
+    fn classify(&self, before: &str, after: &str) -> Result<KeyChanges, ConfigError> {
+        let changed = |key: &str| {
+            let read = |doc: &str| {
+                serde_json::from_str::<Value>(doc)
+                    .ok()
+                    .and_then(|v| v.get(key).cloned())
+            };
+            if read(before) != read(after) {
+                vec![key.to_string()]
+            } else {
+                Vec::new()
+            }
         };
-        Ok(if read(before) != read(after) {
-            vec!["restart".into()]
-        } else {
-            Vec::new()
+        Ok(KeyChanges {
+            restart: changed("restart"),
+            partial: changed("partial"),
         })
     }
 
@@ -837,8 +846,35 @@ impl ConfigSources for FakeSources {
             .ok_or_else(|| SourceError::Missing(format!("{namespace}/{name} not found")))
     }
 
+    /// The text put for the source, read as a JSON object of strings.
+    async fn read_all(
+        &self,
+        namespace: &str,
+        source: &ConfigSource,
+    ) -> Result<BTreeMap<String, String>, SourceError> {
+        let text = self.read(namespace, source).await?;
+        serde_json::from_str(&text).map_err(|e| SourceError::Missing(e.to_string()))
+    }
+
     async fn registries(&self) -> Result<Vec<RegistryView>, String> {
         Ok(self.registries.lock().unwrap().clone())
+    }
+
+    async fn secret_consents(
+        &self,
+        namespace: &str,
+        name: &str,
+    ) -> Result<Option<bool>, SourceError> {
+        let key = (namespace.to_string(), name.to_string());
+        if self.refused.lock().unwrap().contains(&key) {
+            return Ok(Some(false));
+        }
+        Ok(self
+            .texts
+            .lock()
+            .unwrap()
+            .contains_key(&key)
+            .then_some(true))
     }
 }
 
@@ -862,6 +898,14 @@ impl FakeWorkloads {
             .lock()
             .unwrap()
             .push((kind.into(), name.into()));
+    }
+
+    /// `kind/name` is the operator's again (or gone).
+    pub fn unforeign(&self, kind: &str, name: &str) {
+        self.foreign
+            .lock()
+            .unwrap()
+            .retain(|(k, n)| (k.as_str(), n.as_str()) != (kind, name));
     }
 
     pub fn object(&self, kind: &str, name: &str) -> Option<crate::ports::OwnedObject> {
@@ -985,8 +1029,10 @@ impl crate::ports::Workloads for FakeWorkloads {
     async fn unbind_token_review(
         &self,
         owner: &crate::ports::Owner,
+        cluster_role: &str,
     ) -> Result<(), crate::ports::WorkloadError> {
         let mut log = self.removed.lock().unwrap();
+        log.push(format!("unbind {} from {cluster_role}", owner.name));
         if log
             .iter()
             .any(|l| l.starts_with(&format!("bound {}/", owner.namespace)))
@@ -1015,6 +1061,20 @@ impl crate::ports::Workloads for FakeWorkloads {
             .unwrap()
             .push(format!("restarted {name}"));
         Ok(true)
+    }
+
+    async fn claim_size(
+        &self,
+        _owner: &crate::ports::Owner,
+        name: &str,
+    ) -> Result<Option<String>, crate::ports::WorkloadError> {
+        Ok(self
+            .object("PersistentVolumeClaim", name)
+            .and_then(|claim| {
+                claim.manifest["spec"]["resources"]["requests"]["storage"]
+                    .as_str()
+                    .map(String::from)
+            }))
     }
 
     async fn rollout(
