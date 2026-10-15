@@ -136,6 +136,11 @@ pub enum MaintenanceAction {
     BannerSet,
     /// `DELETE /admin/banner`.
     BannerClear,
+    /// A managed instance's pods restarted, worker included (a rolling
+    /// restart, or `Recreate`'s): what applies the keys BatleHub reads at
+    /// startup under `reload.restart: Never`. Refused on an external
+    /// instance.
+    Restart,
     /// `GET /healthz` (database, storage, version) and `GET
     /// /admin/health` (each registry), both in the result.
     HealthCheck,
@@ -211,6 +216,7 @@ impl MaintenanceAction {
             rule(QuotaReset, &["registry", "user"], false),
             rule(BannerSet, &["message", "level"], false),
             rule(BannerClear, &[], false),
+            rule(Restart, &[], false),
             rule(HealthCheck, &[], false),
         ]
     };

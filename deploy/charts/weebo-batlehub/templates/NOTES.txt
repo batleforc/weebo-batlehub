@@ -21,6 +21,10 @@
 
    `kubectl get bhli` shows whether it answers (Ready, Reason).
 
+   Or let the operator deploy BatleHub: `spec.managed` instead of
+   `spec.external` (Deployments, Service, cache, its own admin token):
+   https://batleforc.github.io/weebo-batlehub/docs/guides/managed-instance
+
 2. With `spec.external.manageConfig: true` the operator pushes the
    configuration rendered from `spec.config`, `spec.configLayers` and the
    BatleHubRegistry objects it accepts (`kubectl get bhr`). A Secret whose

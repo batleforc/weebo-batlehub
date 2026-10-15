@@ -909,6 +909,54 @@ impl crate::ports::Workloads for FakeWorkloads {
             .and_then(|instance| self.config_file(instance)))
     }
 
+    async fn bind_token_review(
+        &self,
+        owner: &crate::ports::Owner,
+        service_account: &str,
+        cluster_role: &str,
+    ) -> Result<(), crate::ports::WorkloadError> {
+        self.removed.lock().unwrap().push(format!(
+            "bound {}/{service_account} to {cluster_role}",
+            owner.namespace
+        ));
+        Ok(())
+    }
+
+    async fn unbind_token_review(
+        &self,
+        owner: &crate::ports::Owner,
+    ) -> Result<(), crate::ports::WorkloadError> {
+        let mut log = self.removed.lock().unwrap();
+        if log
+            .iter()
+            .any(|l| l.starts_with(&format!("bound {}/", owner.namespace)))
+        {
+            log.push(format!("unbound {}", owner.name));
+        }
+        Ok(())
+    }
+
+    async fn restart(
+        &self,
+        _owner: &crate::ports::Owner,
+        name: &str,
+        config_hash: Option<&str>,
+    ) -> Result<bool, crate::ports::WorkloadError> {
+        let mut objects = self.objects.lock().unwrap();
+        let Some(deployment) = objects.get_mut(&("Deployment".into(), name.into())) else {
+            return Ok(false);
+        };
+        if let Some(hash) = config_hash {
+            deployment.manifest["spec"]["template"]["metadata"]["annotations"]
+                [api::managed::CONFIG_HASH_ANNOTATION] = Value::String(hash.into());
+        }
+        self.removed
+            .lock()
+            .unwrap()
+            .push(format!("restarted {name}"));
+        Ok(true)
+    }
+
     async fn rollout(
         &self,
         _owner: &crate::ports::Owner,

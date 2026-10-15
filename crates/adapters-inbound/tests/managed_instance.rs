@@ -65,6 +65,7 @@ fn ctx(client: &Client) -> Arc<Ctx> {
         dependents: Arc::new(ClusterDependents::new(client.clone(), None)),
         workloads: Arc::new(KubeWorkloads::new(client.clone())),
         operator_namespace: Some("weebo-batlehub-system".into()),
+        token_review_role: Some("weebo-batlehub-tokenreview".into()),
         config: Arc::new(BatleHubConfigParser::default()),
         sources: Arc::new(KubeConfigSources::new(client.clone(), instances)),
         recorder: Recorder::new(

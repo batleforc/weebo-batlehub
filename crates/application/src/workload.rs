@@ -18,11 +18,11 @@ use k8s_openapi::api::autoscaling::v2::{
     HorizontalPodAutoscalerSpec, MetricIdentifier, MetricSpec, MetricTarget,
 };
 use k8s_openapi::api::core::v1::{
-    Capabilities, Container, ContainerPort, EmptyDirVolumeSource, EnvVar, HTTPGetAction, KeyToPath,
-    PersistentVolumeClaim, PersistentVolumeClaimSpec, PersistentVolumeClaimVolumeSource,
-    PodSecurityContext, PodSpec, PodTemplateSpec, Probe, ResourceRequirements, SeccompProfile,
-    Secret, SecretVolumeSource, SecurityContext, Service, ServiceAccount, ServicePort, ServiceSpec,
-    Volume, VolumeMount, VolumeResourceRequirements,
+    Affinity, Capabilities, Container, ContainerPort, EmptyDirVolumeSource, EnvVar, HTTPGetAction,
+    KeyToPath, PersistentVolumeClaim, PersistentVolumeClaimSpec, PersistentVolumeClaimVolumeSource,
+    PodAffinity, PodAffinityTerm, PodSecurityContext, PodSpec, PodTemplateSpec, Probe,
+    ResourceRequirements, SeccompProfile, Secret, SecretVolumeSource, SecurityContext, Service,
+    ServiceAccount, ServicePort, ServiceSpec, Volume, VolumeMount, VolumeResourceRequirements,
 };
 use k8s_openapi::api::networking::v1::{
     HTTPIngressPath, HTTPIngressRuleValue, Ingress, IngressBackend, IngressRule,
@@ -460,6 +460,7 @@ fn worker(input: &WorkloadInput<'_>, worker: &api::managed::Worker) -> Deploymen
                     node_selector: some_map(&worker.node_selector),
                     tolerations: (!worker.tolerations.is_empty())
                         .then(|| worker.tolerations.clone()),
+                    affinity: beside_the_proxy(input),
                     volumes: Some(volumes),
                     containers: vec![Container {
                         name: "worker".into(),
@@ -496,6 +497,26 @@ fn worker(input: &WorkloadInput<'_>, worker: &api::managed::Worker) -> Deploymen
         }),
         ..Default::default()
     }
+}
+
+/// A filesystem cache on a single-writer claim is mounted by one node: the
+/// worker goes where a proxy pod runs.
+fn beside_the_proxy(input: &WorkloadInput<'_>) -> Option<Affinity> {
+    let spec = input.spec;
+    (input.facts.cache_path.is_some() && spec.persistence.single_writer()).then(|| Affinity {
+        pod_affinity: Some(PodAffinity {
+            required_during_scheduling_ignored_during_execution: Some(vec![PodAffinityTerm {
+                label_selector: Some(LabelSelector {
+                    match_labels: Some(Names::new(input.name).selector("proxy")),
+                    ..Default::default()
+                }),
+                topology_key: "kubernetes.io/hostname".into(),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        }),
+        ..Default::default()
+    })
 }
 
 /// Every object of the instance, in the order they are applied (what a pod
@@ -908,6 +929,8 @@ mod tests {
         assert_eq!(container["env"][0]["name"], "BATLEHUB_DISABLE_HOT_RELOAD");
         let worker = &objects[5].manifest["spec"];
         assert!(worker.get("replicas").is_none());
+        // ReadWriteMany: no need to share a node.
+        assert!(worker["template"]["spec"].get("affinity").is_none());
         assert_eq!(
             worker["template"]["metadata"]["annotations"][CONFIG_HASH_ANNOTATION],
             "c1"
@@ -920,6 +943,25 @@ mod tests {
         assert_eq!(ingress.as_array().unwrap().len(), 2);
         let from = &objects[9].manifest["spec"]["ingress"][0]["from"];
         assert_eq!(from.as_array().unwrap().len(), 2, "{from}");
+    }
+
+    #[test]
+    fn a_worker_sharing_a_single_writer_cache_goes_beside_the_proxy() {
+        let spec: ManagedInstance = serde_json::from_value(json!({"worker": {}})).unwrap();
+        let facts = facts();
+        let objects = objects(&input(&spec, &facts));
+        let worker = &objects
+            .iter()
+            .find(|o| o.name == "hub-worker" && o.kind == "Deployment")
+            .unwrap()
+            .manifest;
+        let term = &worker["spec"]["template"]["spec"]["affinity"]["podAffinity"]["requiredDuringSchedulingIgnoredDuringExecution"]
+            [0];
+        assert_eq!(term["topologyKey"], "kubernetes.io/hostname");
+        assert_eq!(
+            term["labelSelector"]["matchLabels"]["app.kubernetes.io/component"],
+            "proxy"
+        );
     }
 
     #[test]

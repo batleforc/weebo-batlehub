@@ -35,6 +35,7 @@
         "quotaReset",
         "bannerSet",
         "bannerClear",
+        "restart",
         "healthCheck"
       ],
       "type": "string"

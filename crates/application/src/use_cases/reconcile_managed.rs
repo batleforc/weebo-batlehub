@@ -59,6 +59,9 @@ pub struct ManagedPass<'a> {
     /// `status.restartKeys`: keys changed and not yet restarted.
     pub restart_keys: Vec<String>,
     pub operator_namespace: Option<String>,
+    /// The chart's TokenReview `ClusterRole`; `None` when the operator may
+    /// not bind it (limited to one namespace).
+    pub token_review_role: Option<String>,
 }
 
 /// The managed fields of the status, besides the configuration's.
@@ -345,6 +348,10 @@ async fn run(
             .map_err(|e| Failure::new(ReasonCode::ConfigInvalid, e.to_string()))?,
         _ => Vec::new(),
     };
+    // Pods that started on the configuration run every key of it.
+    if current.as_deref() == Some(target_hash.as_str()) {
+        status.restart_keys.clear();
+    }
     let restart_hash = match current {
         None => target_hash.clone(),
         Some(_) if !spec.hot_reload => target_hash.clone(),
@@ -396,6 +403,32 @@ async fn run(
         .apply(&pass.owner, &objects(&input))
         .await
         .map_err(workload_failure)?;
+    // TokenReview, for a `kubernetes` auth provider.
+    let token_review = facts.kubernetes_auth && spec.service_account.auto_token_review;
+    match (&pass.token_review_role, token_review) {
+        (Some(role), true) => {
+            let account = spec
+                .service_account
+                .name
+                .clone()
+                .unwrap_or_else(|| pass.owner.name.clone());
+            workloads
+                .bind_token_review(&pass.owner, &account, role)
+                .await
+                .map_err(workload_failure)?;
+        }
+        (None, true) => report.instance.outcome.advisories.push(Advisory {
+            reason: ReasonCode::TokenReviewUnavailable,
+            message: "the configuration has a kubernetes auth provider, and the operator \
+                      (limited to one namespace) binds no ClusterRole: bind TokenReview \
+                      (create) to the instance's ServiceAccount yourself"
+                .into(),
+        }),
+        (_, false) => workloads
+            .unbind_token_review(&pass.owner)
+            .await
+            .map_err(workload_failure)?,
+    }
     for (api_version, kind, name) in removed(&input) {
         workloads
             .remove(&pass.owner, api_version, kind, &name)
@@ -719,6 +752,7 @@ mod tests {
                 state: self.state.clone(),
                 restart_keys: self.restart_keys.clone(),
                 operator_namespace: None,
+                token_review_role: Some("weebo-batlehub-tokenreview".into()),
             };
             let report =
                 reconcile_managed(pass, &FakeConfigParser, &self.workloads, &self.reach).await;
@@ -829,6 +863,31 @@ mod tests {
                 .iter()
                 .any(|a| a.reason == ReasonCode::RestartRequired)
         );
+
+        // Restarted onto the configuration (the `restart` maintenance):
+        // nothing left to restart for.
+        let hash = report.instance.config.unwrap().config_hash.unwrap();
+        let owner = Owner {
+            namespace: "team".into(),
+            name: "hub".into(),
+            uid: "u-1".into(),
+        };
+        world
+            .workloads
+            .restart(&owner, "hub", Some(&hash))
+            .await
+            .unwrap();
+        world.reach.sync(&world.workloads);
+        let report = world.pass(json!({"restart": 3, "hot": 2})).await;
+        assert!(world.restart_keys.is_empty(), "{:?}", world.restart_keys);
+        assert!(
+            !report
+                .instance
+                .outcome
+                .advisories
+                .iter()
+                .any(|a| a.reason == ReasonCode::RestartRequired)
+        );
     }
 
     #[tokio::test]
@@ -896,6 +955,34 @@ mod tests {
         world.state.approved_hash = Some(held);
         world.pass(json!({"a": 2})).await;
         assert_ne!(world.workloads.config_file("hub").unwrap(), applied);
+    }
+
+    #[tokio::test]
+    async fn a_kubernetes_provider_binds_token_review_and_unbinds_without() {
+        let mut world = World::new();
+        world.pass(json!({"auth": [{"type": "kubernetes"}]})).await;
+        assert!(
+            world
+                .workloads
+                .removed()
+                .contains(&"bound team/hub to weebo-batlehub-tokenreview".to_string())
+        );
+        let pod = &world
+            .workloads
+            .object("Deployment", "hub")
+            .unwrap()
+            .manifest;
+        assert_eq!(
+            pod["spec"]["template"]["spec"]["automountServiceAccountToken"],
+            true
+        );
+        world.pass(json!({})).await;
+        assert!(
+            world
+                .workloads
+                .removed()
+                .contains(&"unbound hub".to_string())
+        );
     }
 
     #[tokio::test]

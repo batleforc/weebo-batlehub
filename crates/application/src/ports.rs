@@ -358,6 +358,12 @@ pub trait GatewayFactory: Send + Sync {
         &self,
         instance: &BoundInstance,
     ) -> Result<Option<Vec<PodGateway>>, GatewayFactoryError>;
+
+    /// How many proxy pods of `instance` exist but aren't ready yet: one
+    /// becoming ready must be approved soon, not at the next resync.
+    async fn waiting_pods(&self, _instance: &BoundInstance) -> Result<usize, GatewayFactoryError> {
+        Ok(0)
+    }
 }
 
 /// Where a governance reconcile records what it wrote, right after each
@@ -457,6 +463,27 @@ pub trait Workloads: Send + Sync {
     ) -> Result<Option<String>, WorkloadError>;
     /// The `Deployment` `name`, `None` when absent.
     async fn rollout(&self, owner: &Owner, name: &str) -> Result<Option<Rollout>, WorkloadError>;
+    /// Binds the account `service_account` of the owner's namespace to the
+    /// `ClusterRole` `cluster_role` (TokenReview): a `ClusterRoleBinding`,
+    /// cluster-scoped, so without owner reference — named after the owner,
+    /// labelled, and removed by [`Self::unbind_token_review`].
+    async fn bind_token_review(
+        &self,
+        owner: &Owner,
+        service_account: &str,
+        cluster_role: &str,
+    ) -> Result<(), WorkloadError>;
+    /// Removes the owner's TokenReview binding (none is fine).
+    async fn unbind_token_review(&self, owner: &Owner) -> Result<(), WorkloadError>;
+    /// Restarts the pods of the `Deployment` `name` (its template's
+    /// `kubectl.kubernetes.io/restartedAt`), its `config-hash` set to
+    /// `config_hash` when given; `false` when it doesn't exist.
+    async fn restart(
+        &self,
+        owner: &Owner,
+        name: &str,
+        config_hash: Option<&str>,
+    ) -> Result<bool, WorkloadError>;
 }
 
 /// The CRs bound to an instance, which hold its deletion.

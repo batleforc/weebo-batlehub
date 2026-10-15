@@ -75,13 +75,27 @@ clusterRules:
   - apiGroups: [autoscaling]
     resources: [horizontalpodautoscalers]
     verbs: [get, create, patch, delete]
+  # The TokenReview binding of a managed instance with a kubernetes auth
+  # provider: cluster-scoped, so the operator creates and deletes it, and
+  # may bind the chart's tokenreview ClusterRole only.
+  - apiGroups: [rbac.authorization.k8s.io]
+    resources: [clusterrolebindings]
+    verbs: [get, create, patch, delete]
+  - apiGroups: [rbac.authorization.k8s.io]
+    resources: [clusterroles]
+    verbs: [bind]
+    resourceNames: [{{ include "weebo-operator.fullname" . }}-tokenreview]
   # A single maintenance run is deleted ttlSecondsAfterFinished after it
   # finished (the kit grants its kinds no delete).
   - apiGroups: [batlehub.weebo.io]
     resources: [batlehubmaintenances]
     verbs: [delete]
 # The operator's own environment variables.
-env: []
+env:
+  {{- if not (include "weebo-operator.watchNamespace" .) }}
+  - name: WEEBO_BATLEHUB_TOKENREVIEW_CLUSTERROLE
+    value: {{ include "weebo-operator.fullname" . }}-tokenreview
+  {{- end }}
 egress:
   - comment: BatleHub instances.
     rules: {{ toJson .Values.networkPolicy.egress.batlehub }}

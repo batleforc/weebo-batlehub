@@ -28,8 +28,8 @@ use api::{LocalInstance, Registry};
 use application::ports::{AdminGateway, BoundInstance, InstanceAccess, Owner, PodGateway};
 use application::use_cases::Outcome;
 use application::use_cases::reconcile_instance::{
-    ConfigState, ConfigStatus, InstanceReport, ManagedConfig, Targets, reconcile_instance,
-    release_instance,
+    ConfigState, ConfigStatus, InstanceReport, ManagedConfig, PROPAGATION_RETRY_SECS, Targets,
+    reconcile_instance, release_instance,
 };
 use application::use_cases::reconcile_managed::{
     ManagedPass, ManagedReport, Reach, reconcile_managed,
@@ -332,7 +332,16 @@ async fn apply(
         rolled_out = report.rolled_out;
         report.instance
     } else {
-        external_pass(&obj, &bound, rendered, ctx).await
+        let mut report = external_pass(&obj, &bound, rendered, ctx).await;
+        // A pod of `podSelector` not ready yet: approved once it is, not
+        // at the next resync.
+        if report.due_in.is_none()
+            && obj.spec.manages_config()
+            && matches!(ctx.gateways.waiting_pods(&bound).await, Ok(n) if n > 0)
+        {
+            report.due_in = Some(PROPAGATION_RETRY_SECS);
+        }
+        report
     };
     let mut outcome = report.outcome.clone();
     let from = obj.spec.registry_selector.namespaces.from;
@@ -509,6 +518,7 @@ async fn managed_pass(
             .map(|s| s.restart_keys.clone())
             .unwrap_or_default(),
         operator_namespace: ctx.operator_namespace.clone(),
+        token_review_role: ctx.token_review_role.clone(),
     };
     let reach = FactoryReach { ctx, bound };
     reconcile_managed(pass, ctx.config.as_ref(), ctx.workloads.as_ref(), &reach).await
@@ -621,6 +631,18 @@ async fn cleanup(
         .await
         .map_err(|e| Error::Cleanup(Failure::new(ReasonCode::KubernetesApiError, e)))?;
     let Err(in_use) = release_instance(&bound.to_string(), &dependents) else {
+        // Its namespaced objects go with it (owner references); the
+        // cluster-scoped TokenReview binding is the operator's to remove.
+        if instance.spec.managed.is_some() {
+            ctx.workloads
+                .unbind_token_review(&Owner {
+                    namespace: bound.namespace.clone().unwrap_or_default(),
+                    name: bound.name.clone(),
+                    uid: instance.uid().unwrap_or_default(),
+                })
+                .await
+                .map_err(|e| Error::Cleanup(Failure::new(e.reason(), e.to_string())))?;
+        }
         return Ok(());
     };
     // `InstanceInUse` replaces whatever `Ready` said while the deletion

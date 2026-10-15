@@ -153,6 +153,9 @@ async fn run(telemetry: &telemetry::Telemetry) -> anyhow::Result<()> {
         ),
         workloads: Arc::new(KubeWorkloads::new(client.clone())),
         operator_namespace: std::env::var("POD_NAMESPACE").ok(),
+        token_review_role: std::env::var("WEEBO_BATLEHUB_TOKENREVIEW_CLUSTERROLE")
+            .ok()
+            .filter(|r| !r.is_empty() && scope.watched_namespace().is_none()),
         config: parser.clone(),
         sources: sources.clone(),
         recorder: Recorder::new(

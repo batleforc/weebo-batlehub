@@ -142,13 +142,13 @@ fn pod_endpoint(pod: &Pod) -> Option<String> {
     Some(format!("http://{host}:{port}"))
 }
 
-#[async_trait::async_trait]
-impl GatewayFactory for HttpGatewayFactory {
-    async fn pod_gateways(
+impl HttpGatewayFactory {
+    /// The proxy pods of `instance` (external: `podSelector`; managed: its
+    /// own), sorted by name; `None` without a selector.
+    async fn proxy_pods(
         &self,
-        bound: &BoundInstance,
-    ) -> Result<Option<Vec<PodGateway>>, GatewayFactoryError> {
-        let instance = self.instance(bound).await?;
+        instance: &LocalInstance,
+    ) -> Result<Option<Vec<Pod>>, GatewayFactoryError> {
         let selector = match (&instance.spec.external, &instance.spec.managed) {
             (Some(external), _) => match &external.pod_selector {
                 None => return Ok(None),
@@ -166,13 +166,38 @@ impl GatewayFactory for HttpGatewayFactory {
             (None, None) => return Ok(None),
         };
         let namespace = instance.namespace().unwrap_or_default();
-        let token = self.admin_token(&instance).await?;
         let mut pods = Api::<Pod>::namespaced(self.client.clone(), &namespace)
             .list(&ListParams::default().labels_from(&selector))
             .await
             .map_err(|e| GatewayFactoryError::Kubernetes(format!("listing pods: {e}")))?
             .items;
         pods.sort_by_key(|p| p.name_any());
+        Ok(Some(pods))
+    }
+}
+
+#[async_trait::async_trait]
+impl GatewayFactory for HttpGatewayFactory {
+    async fn waiting_pods(&self, bound: &BoundInstance) -> Result<usize, GatewayFactoryError> {
+        let instance = self.instance(bound).await?;
+        Ok(self
+            .proxy_pods(&instance)
+            .await?
+            .unwrap_or_default()
+            .iter()
+            .filter(|p| p.metadata.deletion_timestamp.is_none() && pod_endpoint(p).is_none())
+            .count())
+    }
+
+    async fn pod_gateways(
+        &self,
+        bound: &BoundInstance,
+    ) -> Result<Option<Vec<PodGateway>>, GatewayFactoryError> {
+        let instance = self.instance(bound).await?;
+        let Some(pods) = self.proxy_pods(&instance).await? else {
+            return Ok(None);
+        };
+        let token = self.admin_token(&instance).await?;
         // Pods are reached in the cluster, over plain HTTP: no CA to read.
         let client =
             HttpAdminGateway::client(None, false).map_err(GatewayFactoryError::InvalidSpec)?;

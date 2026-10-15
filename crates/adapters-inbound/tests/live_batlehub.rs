@@ -106,6 +106,7 @@ fn ctx(client: &Client) -> Arc<Ctx> {
         dependents: Arc::new(ClusterDependents::new(client.clone(), None)),
         workloads: Arc::new(application::test_support::FakeWorkloads::default()),
         operator_namespace: None,
+        token_review_role: None,
         config: Arc::new(BatleHubConfigParser::default()),
         sources: Arc::new(KubeConfigSources::new(client.clone(), instances)),
         recorder: Recorder::new(

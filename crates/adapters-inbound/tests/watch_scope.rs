@@ -219,6 +219,7 @@ fn ctx(operator: &Client, scope: WatchScope) -> (Arc<Ctx>, Arc<Health>) {
         dependents: Arc::new(FakeDependents::default()),
         workloads: Arc::new(application::test_support::FakeWorkloads::default()),
         operator_namespace: None,
+        token_review_role: None,
         config: Arc::new(FakeConfigParser),
         sources: Arc::new(FakeSources::default()),
         recorder: Recorder::new(

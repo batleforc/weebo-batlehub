@@ -84,6 +84,7 @@ spec:
                 - quotaReset
                 - bannerSet
                 - bannerClear
+                - restart
                 - healthCheck
                 type: string
               instanceRef:

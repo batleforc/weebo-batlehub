@@ -1,0 +1,113 @@
+---
+title: Deploy a managed instance
+description: Let the operator deploy BatleHub, roll its configuration and keep its pods on it.
+---
+
+With `spec.managed` (instead of `spec.external`), the operator deploys
+BatleHub in the instance's namespace and manages its configuration:
+
+```yaml
+apiVersion: batlehub.weebo.io/v1alpha1
+kind: BatleHubLocalInstance
+metadata:
+  name: hub
+  namespace: infra
+spec:
+  managed:
+    replicas: 1
+    env:
+      - name: DATABASE_URL
+        valueFrom: { secretKeyRef: { name: batlehub-db, key: url } }
+  config:
+    server: { host: 0.0.0.0, port: 8080 }
+    database: { type: postgresql, url: "${DATABASE_URL}" }
+    storage: { type: filesystem, path: /var/cache/batlehub }
+    registries:
+      - { name: npm, type: npm, upstreams: ["https://registry.npmjs.org"] }
+```
+
+The defaults follow BatleHub's own Helm chart (image, probes, security
+contexts, resources, cache volume), so a `values.yaml` translates field by
+field: `replicaCount` → `managed.replicas`, `image.*`, `service.*`,
+`ingress.*` (present = enabled), `persistence.*`, `worker.*`,
+`podDisruptionBudget.*`, `networkPolicy.*`, `env`, `envFrom`, scheduling
+fields under the same names; `credentials.existingSecret/key` →
+`managed.credentials`. The mode can't change afterwards: create another
+instance.
+
+## What the operator creates
+
+All of them in the instance's namespace, owned by it (deleting the
+instance deletes them):
+
+| Object | Name | When |
+| --- | --- | --- |
+| `Secret` (the rendered `config.toml`) | `<name>-config` | always |
+| `Secret` (the operator's token) | `<name>-operator-token` | `operatorAccess.generateToken` (default) |
+| `ServiceAccount` | `<name>` | `serviceAccount.create` (default) |
+| `PersistentVolumeClaim` (the cache) | `<name>-cache` | filesystem storage, `persistence.enabled`, no `existingClaim` |
+| `Service`, proxy `Deployment` | `<name>` | always |
+| worker `Deployment` (`--roles worker`), its HPA | `<name>-worker` | `worker`, `worker.autoscaling` |
+| `Ingress`, `PodDisruptionBudget`, `NetworkPolicy` | `<name>` | `ingress`; `podDisruptionBudget` from 2 replicas; `networkPolicy` |
+| `ClusterRoleBinding` to TokenReview | `weebo-batlehub-tokenreview-<hash>` | a `kubernetes` auth provider, `serviceAccount.autoTokenReview` |
+
+**Nothing is taken over.** An object of one of these names that exists
+without an owner reference to the instance nor the label
+`app.kubernetes.io/managed-by: weebo-batlehub` is left alone:
+`OwnedObjectConflict` names it. Label it to hand it over.
+
+## The operator's token
+
+The operator generates its admin token once, in `<name>-operator-token`,
+and adds its Argon2id hash to the configuration's `[[auth]] type =
+"token"` provider (the tokens you declare stay). The raw token never
+reaches the pods. Delete the Secret to rotate it: `auth` is read at
+startup, so the pods restart.
+
+A credentials layer (`managed.credentials`, a Secret labelled
+`batlehub.weebo.io/credential: "true"`, mounted as BatleHub's second
+`--config`) that declares its own token provider would replace the list,
+the operator's entry included: `OperatorTokenShadowed`, nothing applied.
+Add the operator's entry (in `<name>-config`) to that layer.
+
+## Configuration changes: reload or restart
+
+Every change of the configuration (and every rotation of the credentials
+layer, whose hash is a comment of the file) is rendered into
+`<name>-config`. Then:
+
+- **Keys BatleHub applies at runtime** (registries, rules, grants…): once
+  every proxy pod serves the new file (the kubelet syncs Secrets within
+  about a minute: `ConfigPropagating`), one dry run, then each pod is told
+  to reload (`ConfigReloaded`). No pod restarts.
+- **Keys BatleHub reads at startup** (the database, the server's port,
+  `auth`…, as BatleHub's `reload_keys` says): the pods roll
+  (`ConfigRolledOut`). `reload.restart: Never` keeps them and raises
+  `RestartRequired` with the keys, until a
+  [`restart` maintenance](/docs/guides/maintenance) restarts them.
+- `managed.hotReload: false` (`BATLEHUB_DISABLE_HOT_RELOAD=1`): every
+  change restarts the pods.
+- `reload.strategy: Manual` keeps the file in place until the annotation
+  `batlehub.weebo.io/approved-config-hash` carries the new hash
+  (`ConfigHeld`).
+
+**Restart strategy**: a filesystem cache on a `ReadWriteOnce` volume has
+one writer, so the proxy pods are replaced with `Recreate` — the instance
+is down meanwhile, announced by a `RestartInterrupts` Warning Event.
+Everything else rolls with `RollingUpdate` and `maxUnavailable: 0`. Force
+one with `managed.updateStrategy`; `status.updateStrategy` shows the one
+in effect. A worker sharing a single-writer cache is scheduled on a node
+running a proxy pod.
+
+`kubectl get bhli` shows `Ready`; `status.availableReplicas`,
+`status.configHash` / `appliedConfigHash` and `status.pods` (the pods
+behind) tell where a change stands.
+
+## RBAC
+
+The operator's ClusterRole grants the kinds it deploys (Deployments,
+Services, ServiceAccounts, claims, Ingresses, NetworkPolicies, PDBs,
+HPAs) and `bind` on the chart's `<release>-tokenreview` ClusterRole only.
+Limited to one namespace (`watch.namespace`), it binds no ClusterRole: a
+`kubernetes` auth provider then raises `TokenReviewUnavailable`, bind
+TokenReview to the instance's ServiceAccount yourself.

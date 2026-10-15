@@ -15,10 +15,10 @@ use k8s_openapi::ByteString;
 use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::api::core::v1::Secret;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ObjectMeta, OwnerReference};
-use kube::Client;
 use kube::api::{
     Api, ApiResource, DeleteParams, DynamicObject, GroupVersionKind, Patch, PatchParams, PostParams,
 };
+use kube::{Client, ResourceExt};
 use serde_json::json;
 
 /// The field manager of every apply.
@@ -80,8 +80,90 @@ fn conflict(kind: &str, name: &str, namespace: &str) -> WorkloadError {
     ))
 }
 
+/// The TokenReview binding of `owner`: unique and short, a digest of its
+/// namespace and name.
+pub fn token_review_binding(owner: &Owner) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(format!("{}/{}", owner.namespace, owner.name));
+    let hex: String = digest.iter().take(6).map(|b| format!("{b:02x}")).collect();
+    format!("weebo-batlehub-tokenreview-{hex}")
+}
+
+/// The labels of a TokenReview binding: whose it is, as no owner
+/// reference can say.
+fn binding_labels(owner: &Owner) -> BTreeMap<String, String> {
+    BTreeMap::from([
+        ("app.kubernetes.io/managed-by".into(), MANAGED_BY.into()),
+        (
+            format!("{}/instance-namespace", api::GROUP),
+            owner.namespace.clone(),
+        ),
+        (format!("{}/instance-name", api::GROUP), owner.name.clone()),
+    ])
+}
+
 #[async_trait::async_trait]
 impl Workloads for KubeWorkloads {
+    async fn bind_token_review(
+        &self,
+        owner: &Owner,
+        service_account: &str,
+        cluster_role: &str,
+    ) -> Result<(), WorkloadError> {
+        use k8s_openapi::api::rbac::v1::{ClusterRoleBinding, RoleRef, Subject};
+        let api: Api<ClusterRoleBinding> = Api::all(self.client.clone());
+        let name = token_review_binding(owner);
+        let what = format!("ClusterRoleBinding {name}");
+        if let Some(existing) = api.get_opt(&name).await.map_err(|e| kube_error(&what, e))?
+            && existing.labels() != &binding_labels(owner)
+        {
+            return Err(WorkloadError::Conflict(format!(
+                "{what} exists and isn't the operator's for this instance: never taken over"
+            )));
+        }
+        let binding = ClusterRoleBinding {
+            metadata: ObjectMeta {
+                name: Some(name.clone()),
+                labels: Some(binding_labels(owner)),
+                ..Default::default()
+            },
+            role_ref: RoleRef {
+                api_group: Some("rbac.authorization.k8s.io".into()),
+                kind: "ClusterRole".into(),
+                name: cluster_role.into(),
+            },
+            subjects: Some(vec![Subject {
+                kind: "ServiceAccount".into(),
+                name: service_account.into(),
+                namespace: Some(owner.namespace.clone()),
+                ..Default::default()
+            }]),
+        };
+        api.patch(
+            &name,
+            &PatchParams::apply(FIELD_MANAGER).force(),
+            &Patch::Apply(serde_json::to_value(&binding).expect("a binding serializes")),
+        )
+        .await
+        .map(|_| ())
+        .map_err(|e| kube_error(&what, e))
+    }
+
+    async fn unbind_token_review(&self, owner: &Owner) -> Result<(), WorkloadError> {
+        use k8s_openapi::api::rbac::v1::ClusterRoleBinding;
+        let api: Api<ClusterRoleBinding> = Api::all(self.client.clone());
+        let name = token_review_binding(owner);
+        let what = format!("ClusterRoleBinding {name}");
+        match api.get_opt(&name).await.map_err(|e| kube_error(&what, e))? {
+            Some(existing) if existing.labels() == &binding_labels(owner) => api
+                .delete(&name, &DeleteParams::default())
+                .await
+                .map(|_| ())
+                .map_err(|e| kube_error(&what, e)),
+            _ => Ok(()),
+        }
+    }
+
     async fn apply(&self, owner: &Owner, objects: &[OwnedObject]) -> Result<(), WorkloadError> {
         let params = PatchParams::apply(FIELD_MANAGER).force();
         for object in objects {
@@ -219,6 +301,45 @@ impl Workloads for KubeWorkloads {
             .as_ref()
             .and_then(|d| d.get(key))
             .and_then(|b| String::from_utf8(b.0.clone()).ok()))
+    }
+
+    async fn restart(
+        &self,
+        owner: &Owner,
+        name: &str,
+        config_hash: Option<&str>,
+    ) -> Result<bool, WorkloadError> {
+        let api: Api<Deployment> = Api::namespaced(self.client.clone(), &owner.namespace);
+        let what = format!("Deployment {name}");
+        let Some(existing) = api.get_opt(name).await.map_err(|e| kube_error(&what, e))? else {
+            return Ok(false);
+        };
+        if !is_ours(&existing.metadata, owner) {
+            return Err(conflict("Deployment", name, &owner.namespace));
+        }
+        let mut annotations = serde_json::Map::new();
+        annotations.insert(
+            "kubectl.kubernetes.io/restartedAt".into(),
+            json!(k8s_openapi::jiff::Timestamp::now().to_string()),
+        );
+        if let Some(hash) = config_hash {
+            annotations.insert(api::managed::CONFIG_HASH_ANNOTATION.into(), json!(hash));
+        }
+        // A merge patch under its own manager: the operator's next apply
+        // leaves `restartedAt` alone, and agrees on the hash.
+        api.patch(
+            name,
+            &PatchParams {
+                field_manager: Some(format!("{FIELD_MANAGER}-restart")),
+                ..Default::default()
+            },
+            &Patch::Merge(json!({
+                "spec": {"template": {"metadata": {"annotations": annotations}}}
+            })),
+        )
+        .await
+        .map_err(|e| kube_error(&what, e))?;
+        Ok(true)
     }
 
     async fn rollout(&self, owner: &Owner, name: &str) -> Result<Option<Rollout>, WorkloadError> {
