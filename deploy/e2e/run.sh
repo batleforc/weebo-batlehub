@@ -381,14 +381,18 @@ reason_is managed Reconciled
 token="$(kubectl -n team-a get secret managed-operator-token -o jsonpath='{.data.token}' | base64 -d)"
 ip="$(kubectl -n team-a get pod "$first_pod" -o jsonpath='{.status.podIP}')"
 # `kubectl run -i` may lose a short output: read again a few times.
+# The status code and curl's own errors are kept: a failure says why.
 for _ in $(seq 1 12); do
   health="$(kubectl -n team-a run "health-$RANDOM" --rm -i --restart=Never --quiet \
     --image=docker.io/curlimages/curl:8.17.0 -- \
-    -fsS -H "Authorization: Bearer $token" "http://$ip:8080/api/v1/admin/health" || true)"
+    -sS -w '\nHTTP %{http_code}' -H "Authorization: Bearer $token" \
+    "http://$ip:8080/api/v1/admin/health" 2>&1 || true)"
   printf '%s' "$health" | grep -q '"registry":"npm-managed"' && break
+  echo "managed: /api/v1/admin/health on $ip: ${health:-<no output>}" >&2
   sleep 5
 done
-printf '%s' "$health" | grep -q '"registry":"npm-managed"' || fail "managed: the registry isn't served: $health"
+printf '%s' "$health" | grep -q '"registry":"npm-managed"' \
+  || fail "managed: the registry isn't served on $ip: ${health:-<no output>}"
 # A key read at startup: the pods roll.
 kubectl -n team-a patch batlehublocalinstance managed --type merge -p \
   '{"spec":{"config":{"database":{"max_connections":6}}}}'
