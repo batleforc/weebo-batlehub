@@ -4,6 +4,7 @@
 
 pub mod reconcile_instance;
 pub mod reconcile_maintenance;
+pub mod reconcile_managed;
 pub mod reconcile_namespace_claim;
 pub mod reconcile_package_grant;
 pub mod reconcile_package_policy;

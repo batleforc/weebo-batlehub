@@ -25,6 +25,18 @@ batlehub, D8 révisée) et sur laquelle tout est épinglé depuis le M2 ; kit
 
 ### Historique
 
+- **v2.5 — M4, 2026-10-15** : mode managed livré (Constats du M4).
+  Écarts : le bloc `[[auth]]` de l'opérateur n'a pas de Secret
+  `<name>-operator-auth` — il est ajouté au provider `token` du fichier
+  rendu (une couche séparée remplacerait la liste des tokens de
+  l'utilisateur, la fusion de batlehub se faisant sur `type`) ;
+  `credentials` est sous `managed` (rien à monter en external) ; le hash
+  de redémarrage n'est pas une projection des clés à redémarrage mais le
+  hash de la dernière config qui en a changé une (`classify` de batlehub
+  contre le fichier en place) ; le webhook ne refuse pas `restart` sur une
+  instance external (le run le refuse) ; les `secretKeyRef` de
+  `managed.env` ne servent pas encore à la validation (valeur factice,
+  comme en external).
 - **v2.4 — M3, 2026-10-15** : `BatleHubPackageGrant`,
   `BatleHubPackagePolicy` et `BatleHubMaintenance` livrés (Constats du
   M3). Écarts : `status.warnings` d'un grant est par sujet
@@ -1938,6 +1950,60 @@ endpoints, étape e2e (grant, policy, maintenance, refus CEL et webhook).
   absente (elle peut encore être rattachée) ni de `configApplyPending` sur
   une instance `manageConfig` (il faudrait lire l'instance) : le run les
   refuse (`InvalidSpec`).
+
+### Constats du M4 (2026-10-15)
+
+e2e kind vert avec une instance managed réelle (BatleHub 1.6.0, Postgres
+de l'e2e, URL de base par `env` depuis un Secret) : `Ready`, hot reload
+d'une registry sans redémarrage du pod, rollout sur une clé de démarrage
+(`database.max_connections`) avec `ConfigRolledOut`. envtest : objets
+possédés (owner reference, token injecté, PVC), `OwnedObjectConflict` sur
+un Service étranger, attente du rollout puis des pods, CEL « un seul
+mode ». Use case et constructeurs en tests unitaires.
+
+- **`POST /admin/config/reload`** (lu dans batlehub 1.6.0) : relit les
+  fichiers (`load_pending`) puis applique. Des octets déjà tentés ne
+  stagent rien : 400 « no pending reload » = le pod a déjà ces octets
+  (il les tourne, ou les a refusés : la validation à blanc passe avant),
+  traité comme un succès ; « pending reload expired » → nonce. Un pod qui
+  vient de démarrer n'a pas de dernière tentative : le premier reload
+  charge toujours. Le volume du Secret n'a pas à être inscriptible (pas
+  de `from-content` en managed).
+- **Token opérateur** : la fusion de batlehub identifie `[[auth]]` par
+  `type` pour le provider `token` (sans `name`) et remplace sa liste
+  `tokens` (sans identité) : une couche séparée effacerait les tokens de
+  l'utilisateur. Le hash est donc ajouté à la liste du document rendu
+  (ou un provider créé), par une couche `auth` complète fusionnée par
+  `merge_layers`. Sel dérivé du token (16 octets de SHA-256 étiqueté) :
+  fichier stable. `merge_layers` écrit le `$` du PHC en `\u0024` (un
+  littéral, jamais un placeholder).
+- **Chart batlehub** : image worker séparée
+  (`ghcr.io/batlehub/batlehub-worker`), métrique d'autoscaling
+  `batlehub_scan_jobs_queued` (cible 20), scratch `emptyDir` en mémoire ;
+  ressources par défaut du proxy reprises. Le proxy du chart ne passe pas
+  `--roles` ; l'opérateur passe `--roles proxy` quand un worker existe.
+- **Restart** : l'action de maintenance pose
+  `kubectl.kubernetes.io/restartedAt` et remet `config-hash` sur la config
+  rendue, par un merge patch sous un autre field manager (le SSA de
+  l'opérateur la laisse) ; la passe suivante voit le template sur la
+  config et vide `restartKeys`.
+- **TokenReview** : ClusterRole `<release>-tokenreview` du chart, l'opérateur
+  n'a que `bind` dessus (`resourceNames`) et crée un ClusterRoleBinding
+  étiqueté (namespace, nom de l'instance), supprimé par le finalizer.
+- **RBAC** : trivy signale KSV-0056 (écrire Services, Ingresses,
+  NetworkPolicies) : accepté dans `.trivyignore.yaml`, justifié (objets
+  du namespace de l'instance, jamais repris s'ils sont étrangers).
+- **Course du M2 révélée** : avec `external.podSelector`, un pod prêt
+  après la passe attendait la resynchronisation (5 min). L'opérateur
+  revient à 15 s tant qu'un pod sélectionné n'est pas prêt
+  (`GatewayFactory::waiting_pods`) ; le managed suit son Deployment
+  (`owns`).
+- **Test d'upgrade** : il était sauté dès que la version publiée égalait
+  celle du chart — donc toujours entre deux releases. Il n'est plus sauté
+  que sur le tag de cette version.
+- **Poste local** : `fs.inotify.max_user_instances` à 128 fait échouer le
+  watcher de config de batlehub (« Too many open files ») dans kind ;
+  sans effet sur l'approbation par l'opérateur.
 
 ## 11. Évolutions proposées
 

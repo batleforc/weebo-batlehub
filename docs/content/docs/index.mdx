@@ -9,10 +9,9 @@ configuration and registries, the team namespaces of its registries, the
 grants and policies of its packages, and its maintenance tasks.
 
 <Callout type="warn">
-  Alpha: a `BatleHubLocalInstance` connects an existing BatleHub and, with
-  `external.manageConfig`, pushes its configuration and its
-  `BatleHubRegistry`s. The mode where the operator deploys BatleHub comes
-  later.
+  Alpha: a `BatleHubLocalInstance` either connects an existing BatleHub
+  (`external`, which with `manageConfig` pushes its configuration and its
+  `BatleHubRegistry`s), or is deployed by the operator (`managed`).
 </Callout>
 
 ## Get started
@@ -20,6 +19,7 @@ grants and policies of its packages, and its maintenance tasks.
 <Cards>
   <Card title="Install via Helm" description="Bring up the operator." href="/docs/guides/install" />
   <Card title="Connect a BatleHub instance" description="Point the operator at your BatleHub." href="/docs/guides/connect-instance" />
+  <Card title="Deploy a managed instance" description="Let the operator deploy BatleHub and roll its configuration." href="/docs/guides/managed-instance" />
   <Card title="Manage the configuration" description="Push the configuration and its registries." href="/docs/guides/manage-config" />
   <Card title="Team namespaces" description="Reserve a package prefix to a group." href="/docs/guides/team-namespaces" />
   <Card title="Package grants and policies" description="Who may do what on a package, its policy, a version's exemptions." href="/docs/guides/package-governance" />

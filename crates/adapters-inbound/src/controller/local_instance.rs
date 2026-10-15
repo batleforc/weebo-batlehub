@@ -21,13 +21,18 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use api::config::ConfigSource;
 use api::local_instance::NamespacesFrom;
+use api::managed::ManagedInstance;
 use api::{LocalInstance, Registry};
-use application::ports::{BoundInstance, InstanceAccess};
+use application::ports::{AdminGateway, BoundInstance, InstanceAccess, Owner, PodGateway};
 use application::use_cases::Outcome;
 use application::use_cases::reconcile_instance::{
-    ConfigState, ConfigStatus, InstanceReport, ManagedConfig, Targets, reconcile_instance,
-    release_instance,
+    ConfigState, ConfigStatus, InstanceReport, ManagedConfig, PROPAGATION_RETRY_SECS, Targets,
+    reconcile_instance, release_instance,
+};
+use application::use_cases::reconcile_managed::{
+    ManagedPass, ManagedReport, Reach, reconcile_managed,
 };
 use application::use_cases::reconcile_registry::rendered_outcome;
 use application::use_cases::render_config::{
@@ -36,6 +41,7 @@ use application::use_cases::render_config::{
 };
 use domain::Failure;
 use domain::error::ReasonCode;
+use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::api::core::v1::{ConfigMap, Namespace};
 use k8s_openapi::jiff::Timestamp;
 use kube::api::{Api, PartialObjectMeta};
@@ -54,6 +60,22 @@ const KIND: &str = "BatleHubLocalInstance";
 pub async fn run(client: Client, ctx: Arc<Ctx>) {
     let health = ctx.health.clone();
     let controller = super::controller(ctx.scope.api::<LocalInstance>(client.clone()), &ctx.scope);
+    // A managed instance's Deployments: a rollout progressing is a pass.
+    let deployments: Api<Deployment> = match ctx.scope.watched_namespace() {
+        Some(namespace) => Api::namespaced(client.clone(), namespace),
+        None => Api::all(client.clone()),
+    };
+    let controller = if ctx.scope.cluster_kinds() {
+        controller.owns(
+            deployments,
+            watcher::Config::default().labels(&format!(
+                "app.kubernetes.io/managed-by={}",
+                api::managed::MANAGED_BY
+            )),
+        )
+    } else {
+        controller
+    };
     let instances = controller.store();
     let all = {
         let instances = instances.clone();
@@ -295,37 +317,31 @@ async fn apply(
 ) -> Result<Action, Error> {
     let started = Instant::now();
     let bound = bound(&obj);
-    let (rendered, decisions) = match obj.spec.external.manage_config {
+    let (rendered, decisions) = match obj.spec.manages_config() {
         true => {
             let (rendered, decisions) = render(&obj, &bound, ctx).await?;
             (Some(rendered), decisions)
         }
         false => (None, Vec::new()),
     };
-    let report = match (ctx.gateways.gateway_for(&bound).await, rendered) {
-        // A configuration that can't be rendered outranks a token that
-        // can't be read.
-        (Err(_), Some(Err(failure))) => InstanceReport {
-            outcome: Outcome::failed(failure),
-            observed: None,
-            config: Some(config_status_kept(&obj)),
-            due_in: None,
-            reloaded: false,
-        },
-        (Err(e), _) => InstanceReport {
-            outcome: Outcome::failed(e),
-            observed: None,
-            config: None,
-            due_in: None,
-            reloaded: false,
-        },
-        (Ok(access), rendered) => {
-            let managed = match rendered {
-                Some(rendered) => Some(managed_config(&obj, &bound, &access, rendered, ctx).await),
-                None => None,
-            };
-            reconcile_instance(access.gateway.as_ref(), managed).await
+    let mut workload = None;
+    let mut rolled_out = None;
+    let report = if let (Some(managed), Some(rendered)) = (&obj.spec.managed, rendered.clone()) {
+        let report = managed_pass(&obj, managed, &bound, rendered, ctx).await;
+        workload = Some(report.workload);
+        rolled_out = report.rolled_out;
+        report.instance
+    } else {
+        let mut report = external_pass(&obj, &bound, rendered, ctx).await;
+        // A pod of `podSelector` not ready yet: approved once it is, not
+        // at the next resync.
+        if report.due_in.is_none()
+            && obj.spec.manages_config()
+            && matches!(ctx.gateways.waiting_pods(&bound).await, Ok(n) if n > 0)
+        {
+            report.due_in = Some(PROPAGATION_RETRY_SECS);
         }
+        report
     };
     let mut outcome = report.outcome.clone();
     let from = obj.spec.registry_selector.namespaces.from;
@@ -337,14 +353,41 @@ async fn apply(
         );
     }
     super::record_reconcile(KIND, started, &outcome);
-    super::publish(
-        api,
-        &ctx.recorder,
-        obj.as_ref(),
-        &outcome,
-        fields(&obj, &report),
-    )
-    .await?;
+    let mut status = fields(&obj, &report);
+    if let Some(workload) = &workload {
+        status.insert("credentialsHash".into(), json!(workload.credentials_hash));
+        status.insert("updateStrategy".into(), json!(workload.update_strategy));
+        status.insert(
+            "availableReplicas".into(),
+            json!(workload.available_replicas),
+        );
+    }
+    super::publish(api, &ctx.recorder, obj.as_ref(), &outcome, status).await?;
+    if let Some(rolled) = &rolled_out {
+        let object = kube::Resource::object_ref(obj.as_ref(), &());
+        events::announce_change(
+            &ctx.recorder,
+            &object,
+            ReasonCode::ConfigRolledOut,
+            events::RECONCILE,
+            &format!(
+                "keys read at startup changed ({}): the proxy pods restart",
+                rolled.keys.join(", ")
+            ),
+        )
+        .await;
+        if rolled.interrupts {
+            events::announce_error(
+                &ctx.recorder,
+                &object,
+                ReasonCode::RestartInterrupts,
+                events::RECONCILE,
+                "the proxy pods are replaced all at once (Recreate: a filesystem cache on a \
+                 ReadWriteOnce volume): the instance is down until the new pod is ready",
+            )
+            .await;
+        }
+    }
     if report.reloaded {
         let hash = report
             .config
@@ -380,12 +423,113 @@ async fn apply(
     ))
 }
 
+/// External mode: the instance at `url`, with `manageConfig` the
+/// configuration pushed to it.
+async fn external_pass(
+    obj: &LocalInstance,
+    bound: &BoundInstance,
+    rendered: Option<Result<Rendered, Failure>>,
+    ctx: &Ctx,
+) -> InstanceReport {
+    match (ctx.gateways.gateway_for(bound).await, rendered) {
+        // A configuration that can't be rendered outranks a token that
+        // can't be read.
+        (Err(_), Some(Err(failure))) => InstanceReport {
+            outcome: Outcome::failed(failure),
+            observed: None,
+            config: Some(config_status_kept(obj)),
+            due_in: None,
+            reloaded: false,
+        },
+        (Err(e), _) => InstanceReport {
+            outcome: Outcome::failed(e),
+            observed: None,
+            config: None,
+            due_in: None,
+            reloaded: false,
+        },
+        (Ok(access), rendered) => {
+            let managed = match rendered {
+                Some(rendered) => Some(managed_config(obj, bound, &access, rendered, ctx).await),
+                None => None,
+            };
+            reconcile_instance(access.gateway.as_ref(), managed).await
+        }
+    }
+}
+
+/// Where a managed pass reaches the instance: its `Service` and its proxy
+/// pods, through the gateway factory.
+struct FactoryReach<'a> {
+    ctx: &'a Ctx,
+    bound: &'a BoundInstance,
+}
+
+#[async_trait::async_trait]
+impl Reach for FactoryReach<'_> {
+    async fn gateway(&self) -> Result<(Arc<dyn AdminGateway>, String), Failure> {
+        let access = self.ctx.gateways.gateway_for(self.bound).await?;
+        Ok((access.gateway, access.token))
+    }
+
+    async fn pods(&self) -> Result<Vec<PodGateway>, Failure> {
+        Ok(self
+            .ctx
+            .gateways
+            .pod_gateways(self.bound)
+            .await?
+            .unwrap_or_default())
+    }
+}
+
+/// Managed mode: the objects deployed, every pod brought to the
+/// configuration.
+async fn managed_pass(
+    obj: &LocalInstance,
+    managed: &ManagedInstance,
+    bound: &BoundInstance,
+    rendered: Result<Rendered, Failure>,
+    ctx: &Ctx,
+) -> ManagedReport {
+    let namespace = obj.namespace().unwrap_or_default();
+    let credentials = match &managed.credentials {
+        Some(secret) => Some(
+            ctx.sources
+                .read(&namespace, &ConfigSource::secret(&secret.name, &secret.key))
+                .await
+                .map_err(|e| Failure::new(e.reason(), format!("managed.credentials: {e}"))),
+        ),
+        None => None,
+    };
+    let pass = ManagedPass {
+        owner: Owner {
+            namespace,
+            name: obj.name_any(),
+            uid: obj.uid().unwrap_or_default(),
+        },
+        spec: managed,
+        reload: &obj.spec.reload,
+        rendered,
+        credentials,
+        state: config_state(obj),
+        restart_keys: obj
+            .status
+            .as_ref()
+            .map(|s| s.restart_keys.clone())
+            .unwrap_or_default(),
+        operator_namespace: ctx.operator_namespace.clone(),
+        token_review_role: ctx.token_review_role.clone(),
+    };
+    let reach = FactoryReach { ctx, bound };
+    reconcile_managed(pass, ctx.config.as_ref(), ctx.workloads.as_ref(), &reach).await
+}
+
 /// `endpoint` always; `version` and `warnings` as last read — kept while
 /// the instance doesn't answer; the configuration's fields with
 /// `manageConfig` (all cleared without it).
 fn fields(obj: &LocalInstance, report: &InstanceReport) -> Map<String, Value> {
     let mut fields = Map::new();
-    fields.insert("endpoint".into(), json!(obj.spec.external.url));
+    fields.insert("endpoint".into(), json!(api::local_instance::endpoint(obj)));
     if let Some(observed) = &report.observed {
         fields.insert("version".into(), json!(observed.version));
         fields.insert(
@@ -393,7 +537,7 @@ fn fields(obj: &LocalInstance, report: &InstanceReport) -> Map<String, Value> {
             serde_json::to_value(&observed.warnings).expect("warnings serialize"),
         );
     }
-    let config = match (&report.config, obj.spec.external.manage_config) {
+    let config = match (&report.config, obj.spec.manages_config()) {
         (Some(config), true) => {
             let mut config = config.clone();
             // A pass that loaded nothing keeps the last load's time.
@@ -487,6 +631,18 @@ async fn cleanup(
         .await
         .map_err(|e| Error::Cleanup(Failure::new(ReasonCode::KubernetesApiError, e)))?;
     let Err(in_use) = release_instance(&bound.to_string(), &dependents) else {
+        // Its namespaced objects go with it (owner references); the
+        // cluster-scoped TokenReview binding is the operator's to remove.
+        if instance.spec.managed.is_some() {
+            ctx.workloads
+                .unbind_token_review(&Owner {
+                    namespace: bound.namespace.clone().unwrap_or_default(),
+                    name: bound.name.clone(),
+                    uid: instance.uid().unwrap_or_default(),
+                })
+                .await
+                .map_err(|e| Error::Cleanup(Failure::new(e.reason(), e.to_string())))?;
+        }
         return Ok(());
     };
     // `InstanceInUse` replaces whatever `Ready` said while the deletion

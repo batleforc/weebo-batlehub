@@ -51,6 +51,7 @@ dump() {
   kubectl -n team-a get batlehublocalinstances,batlehubregistries,batlehubnamespaceclaims,batlehubpackagegrants,batlehubpackagepolicies,batlehubmaintenances -o yaml
   kubectl -n team-a get pods -o wide
   kubectl -n team-a logs deploy/batlehub --tail=50
+  kubectl -n team-a logs deploy/managed --tail=50
   kubectl get events -A --sort-by=.lastTimestamp | tail -n 50
 }
 # dump turns errexit off: leave right after it.
@@ -119,8 +120,11 @@ if [ "$UPGRADE_FROM" != none ]; then
   fi
   if [ -z "$previous" ]; then
     echo "no published chart at $CHART_OCI: upgrade test skipped"
-  elif [ "$previous" = "$head_version" ]; then
-    echo "latest published chart is this version ($head_version): upgrade test skipped"
+  elif [ "$previous" = "$head_version" ] \
+    && [ "$(git -C "$HERE" describe --exact-match --tags HEAD 2>/dev/null || true)" = "v$previous" ]; then
+    # This checkout is that release: nothing to upgrade from. Between two
+    # releases the version is the same but the code isn't: tested.
+    echo "this checkout is the published release $previous: upgrade test skipped"
     previous=""
   fi
 fi
@@ -186,10 +190,16 @@ applied="$(kubectl -n team-a get batlehublocalinstance hub -o jsonpath='{.status
 # throwaway curl pod reads them by IP, with the admin token of
 # batlehub.yaml).
 admin_token="$(kubectl -n team-a get secret batlehub-admin -o jsonpath='{.data.token}' | base64 -d)"
+# A pod ready after the push is approved within 15 s: retried a while.
+kubectl -n team-a wait pods -l app=batlehub --for=condition=Ready --timeout="$WAIT"
 for ip in $(kubectl -n team-a get pods -l app=batlehub -o jsonpath='{.items[*].status.podIP}'); do
-  content="$(kubectl -n team-a run "read-$RANDOM" --rm -i --restart=Never --quiet \
-    --image=docker.io/curlimages/curl:8.17.0 -- \
-    -fsS -H "Authorization: Bearer $admin_token" "http://$ip:8080/api/v1/admin/config/content")"
+  for _ in $(seq 1 12); do
+    content="$(kubectl -n team-a run "read-$RANDOM" --rm -i --restart=Never --quiet \
+      --image=docker.io/curlimages/curl:8.17.0 -- \
+      -fsS -H "Authorization: Bearer $admin_token" "http://$ip:8080/api/v1/admin/config/content")"
+    printf '%s' "$content" | grep -q 'name = \\"npm\\"' && break
+    sleep 5
+  done
   printf '%s' "$content" | grep -q 'name = \\"npm\\"' || fail "pod $ip doesn't serve the registry: $content"
 done
 # A key read at startup only is held back: the operator can't restart it.
@@ -314,6 +324,84 @@ spec: $bad
 YAML
   then fail "maintenance $bad was admitted"; fi
 done
+
+step "a managed instance: deployed, hot-reloaded, rolled out on a startup key"
+kubectl apply -f - <<'YAML'
+apiVersion: v1
+kind: Secret
+metadata:
+  name: managed-db
+  namespace: team-a
+stringData:
+  url: postgresql://batlehub:batlehub@postgres:5432/batlehub
+---
+apiVersion: batlehub.weebo.io/v1alpha1
+kind: BatleHubLocalInstance
+metadata:
+  name: managed
+  namespace: team-a
+spec:
+  managed:
+    persistence: { enabled: false }
+    env:
+      - name: DATABASE_URL
+        valueFrom: { secretKeyRef: { name: managed-db, key: url } }
+  config:
+    server: { host: 0.0.0.0, port: 8080 }
+    database: { type: postgresql, url: "${DATABASE_URL}", max_connections: 5 }
+    storage: { type: filesystem, path: /var/cache/batlehub }
+YAML
+reason_is managed Reconciled
+proxy_pods() {
+  kubectl -n team-a get pods -l app.kubernetes.io/instance=managed,app.kubernetes.io/component=proxy \
+    --field-selector=status.phase=Running -o jsonpath='{.items[*].metadata.name}'
+}
+first_pod="$(proxy_pods)"
+[ -n "$first_pod" ] || fail "managed: no proxy pod"
+template_hash() {
+  kubectl -n team-a get deploy managed \
+    -o jsonpath='{.spec.template.metadata.annotations.batlehub\.weebo\.io/config-hash}'
+}
+first_template="$(template_hash)"
+# A registry: hot-reloaded, the pod kept.
+before="$(kubectl -n team-a get batlehublocalinstance managed -o jsonpath='{.status.configHash}')"
+kubectl -n team-a patch batlehublocalinstance managed --type merge -p \
+  '{"spec":{"config":{"registries":[{"name":"npm-managed","type":"npm","upstreams":["https://registry.npmjs.org"]}]}}}'
+for _ in $(seq 1 90); do
+  hash="$(kubectl -n team-a get batlehublocalinstance managed -o jsonpath='{.status.configHash}')"
+  applied="$(kubectl -n team-a get batlehublocalinstance managed -o jsonpath='{.status.appliedConfigHash}')"
+  [ -n "$hash" ] && [ "$hash" != "$before" ] && [ "$hash" = "$applied" ] && break
+  sleep 2
+done
+[ "$hash" != "$before" ] && [ "$hash" = "$applied" ] \
+  || fail "managed: configuration $hash never applied (applied: $applied)"
+reason_is managed Reconciled
+[ "$(template_hash)" = "$first_template" ] || fail "managed: a hot key rolled the pods"
+[ "$(proxy_pods)" = "$first_pod" ] || fail "managed: the pod changed on a hot reload"
+token="$(kubectl -n team-a get secret managed-operator-token -o jsonpath='{.data.token}' | base64 -d)"
+ip="$(kubectl -n team-a get pod "$first_pod" -o jsonpath='{.status.podIP}')"
+# `kubectl run -i` may lose a short output: read again a few times.
+for _ in $(seq 1 12); do
+  health="$(kubectl -n team-a run "health-$RANDOM" --rm -i --restart=Never --quiet \
+    --image=docker.io/curlimages/curl:8.17.0 -- \
+    -fsS -H "Authorization: Bearer $token" "http://$ip:8080/api/v1/admin/health" || true)"
+  printf '%s' "$health" | grep -q '"registry":"npm-managed"' && break
+  sleep 5
+done
+printf '%s' "$health" | grep -q '"registry":"npm-managed"' || fail "managed: the registry isn't served: $health"
+# A key read at startup: the pods roll.
+kubectl -n team-a patch batlehublocalinstance managed --type merge -p \
+  '{"spec":{"config":{"database":{"max_connections":6}}}}'
+for _ in $(seq 1 90); do
+  [ "$(template_hash)" != "$first_template" ] && break
+  sleep 2
+done
+[ "$(template_hash)" != "$first_template" ] || fail "managed: a startup key didn't roll the pods"
+kubectl -n team-a rollout status deploy/managed --timeout="$WAIT"
+reason_is managed Reconciled
+[ "$(proxy_pods)" != "$first_pod" ] || fail "managed: the pod wasn't replaced"
+kubectl -n team-a get events --field-selector reason=ConfigRolledOut -o name | grep -q . \
+  || fail "managed: no ConfigRolledOut event"
 
 step "leader election"
 holder="$(kubectl -n "$OPERATOR_NS" get lease "$LEASE" -o jsonpath='{.spec.holderIdentity}')"

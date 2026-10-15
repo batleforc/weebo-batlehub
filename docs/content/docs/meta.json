@@ -5,6 +5,7 @@
     "---Getting started---",
     "guides/install",
     "guides/connect-instance",
+    "guides/managed-instance",
     "guides/manage-config",
     "guides/team-namespaces",
     "guides/package-governance",

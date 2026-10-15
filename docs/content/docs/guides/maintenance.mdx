@@ -94,12 +94,11 @@ action without the params it needs.
 | `packageUnblock` | `POST packages/unblock` | `registry`, `package`, `version`; `artifact` |
 | `quotaReset` | `DELETE quota/{registry}/{user}` | `registry`, `user` |
 | `bannerSet` / `bannerClear` | `PUT` / `DELETE banner` | `message`, `level` (`info`, `warning`, `error`) |
+| `restart` | A managed instance's Deployments restarted (proxy and worker), the proxy onto the rendered configuration: what applies the keys read at startup under `reload.restart: Never`. Refused on an external instance | |
 | `healthCheck` | `GET /healthz` and `GET health`, both in the result | |
 
 Grants, policies and exemptions aren't actions: they are state, kept by
 [`BatleHubPackageGrant` and `BatleHubPackagePolicy`](/docs/guides/package-governance).
-Restarting the instance comes with the mode where the operator deploys
-BatleHub.
 
 A maintenance holds its instance's deletion (`InstanceInUse`) like the
 other kinds bound to it; it has no finalizer of its own, having nothing to

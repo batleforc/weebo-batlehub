@@ -11,6 +11,8 @@ api = { workspace = true }
 application = { workspace = true }
 batlehub-client = { workspace = true }
 argon2 = { workspace = true }
+sha2 = { workspace = true }
+uuid = { workspace = true }
 async-trait = { workspace = true }
 batlehub-config = { workspace = true }
 k8s-openapi = { workspace = true }

@@ -11,6 +11,7 @@ pub mod common;
 pub mod config;
 pub mod local_instance;
 pub mod maintenance;
+pub mod managed;
 pub mod namespace_claim;
 pub mod package_grant;
 pub mod package_policy;

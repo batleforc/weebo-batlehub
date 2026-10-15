@@ -76,7 +76,7 @@ async fn instance_with(
     let instance = LocalInstance::new(
         name,
         LocalInstanceSpec {
-            external: ExternalInstance {
+            external: Some(ExternalInstance {
                 url: env("BATLEHUB_URL"),
                 admin_token_secret_ref: LocalSecretKeyRef {
                     name: name.into(),
@@ -85,7 +85,8 @@ async fn instance_with(
                 tls: Default::default(),
                 manage_config,
                 pod_selector: None,
-            },
+            }),
+            managed: None,
             config,
             config_layers: vec![],
             reload: Default::default(),
@@ -103,6 +104,9 @@ fn ctx(client: &Client) -> Arc<Ctx> {
         instances: instances.clone(),
         registries: instances.clone(),
         dependents: Arc::new(ClusterDependents::new(client.clone(), None)),
+        workloads: Arc::new(application::test_support::FakeWorkloads::default()),
+        operator_namespace: None,
+        token_review_role: None,
         config: Arc::new(BatleHubConfigParser::default()),
         sources: Arc::new(KubeConfigSources::new(client.clone(), instances)),
         recorder: Recorder::new(

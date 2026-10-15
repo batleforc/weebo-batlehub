@@ -410,7 +410,7 @@ mod tests {
         let mut instance = LocalInstance::new(
             "hub",
             LocalInstanceSpec {
-                external: ExternalInstance {
+                external: Some(ExternalInstance {
                     url: "http://hub".into(),
                     admin_token_secret_ref: LocalSecretKeyRef {
                         name: "t".into(),
@@ -419,7 +419,8 @@ mod tests {
                     tls: Default::default(),
                     manage_config: true,
                     pod_selector: None,
-                },
+                }),
+                managed: None,
                 config,
                 config_layers: vec![],
                 reload: Default::default(),

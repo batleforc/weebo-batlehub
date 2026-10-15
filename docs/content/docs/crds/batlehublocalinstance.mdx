@@ -43,9 +43,10 @@ spec:
 
 | Field | Type | Required | Default | Description |
 | --- | --- | --- | --- | --- |
-| `config` | `object` | no |  | BatleHub's configuration file (`config.toml`) written in YAML, key for key: a TOML table is an object, an array of tables a list of objects. Never typed here: BatleHub's own parser validates it. `${VAR}` placeholders are kept and resolved by the instance from its own environment. Rendered only with `external.manageConfig`. |
+| `config` | `object` | no |  | BatleHub's configuration file (`config.toml`) written in YAML, key for key: a TOML table is an object, an array of tables a list of objects. Never typed here: BatleHub's own parser validates it. `${VAR}` placeholders are kept and resolved by the instance from its own environment (`managed.env`). Rendered with `managed`, or `external.manageConfig`. |
 | `configLayers` | `object[]` | no |  | TOML documents merged in order over `config`, the way BatleHub merges its `--config` layers (the later wins; tables merge; arrays of tables merge entry by entry on a unique `name`, else `type`). |
-| `external` | `object` | yes |  | A BatleHub the operator doesn't deploy: it reaches it at `url` with an admin token, observes it and, with `manageConfig`, pushes its configuration. (The mode where the operator deploys BatleHub itself comes in a later version.) |
+| `external` | `object` | no |  | A BatleHub the operator doesn't deploy: it reaches it at `url` with an admin token, observes it and, with `manageConfig`, pushes its configuration. |
+| `managed` | `object` | no |  | A BatleHub the operator deploys, in this namespace, and whose configuration it always manages. |
 | `registrySelector` | `object` | no |  | Which `BatleHubRegistry`s this instance serves, rendered as `[[registries]]` entries after `configLayers`. |
 | `reload` | `object` | no |  | How a new configuration reaches the instance. |
 

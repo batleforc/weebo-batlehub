@@ -10,7 +10,7 @@ use api::status::Condition;
 use application::ports::{
     BoundInstance, ConfigParser, ConfigSources, GatewayFactory, GatewayFactoryError,
     InstanceAccess, InstanceDependents, InstanceDirectory, InstanceError, InstanceRef, Ledger,
-    RegistryResolver, ResolveError,
+    RegistryResolver, ResolveError, Workloads,
 };
 use application::use_cases::{Outcome, instance_failure};
 use domain::Failure;
@@ -63,6 +63,16 @@ pub struct Ctx {
     pub registries: Arc<dyn RegistryResolver>,
     /// The CRs bound to an instance, holding its deletion.
     pub dependents: Arc<dyn InstanceDependents>,
+    /// The Kubernetes objects of managed instances.
+    pub workloads: Arc<dyn Workloads>,
+    /// The operator's own namespace (`POD_NAMESPACE`), let in by a managed
+    /// instance's `NetworkPolicy`.
+    pub operator_namespace: Option<String>,
+    /// The chart's TokenReview `ClusterRole`
+    /// (`WEEBO_BATLEHUB_TOKENREVIEW_CLUSTERROLE`), bound for a managed
+    /// instance with a `kubernetes` auth provider; unset when limited to
+    /// one namespace.
+    pub token_review_role: Option<String>,
     /// BatleHub's own configuration parser (`batlehub-config`).
     pub config: Arc<dyn ConfigParser>,
     /// What an instance's configuration is rendered from, besides its

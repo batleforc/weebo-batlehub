@@ -39,17 +39,26 @@ pub use self::BatleHubLocalInstanceStatus as LocalInstanceStatus;
     printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#
 )]
 #[serde(rename_all = "camelCase")]
+#[schemars(extend("x-kubernetes-validations" = [
+    {"rule": "has(self.external) != has(self.managed)", "message": "set exactly one of external and managed"},
+    {"rule": "has(self.external) == has(oldSelf.external)", "message": "the mode (external or managed) is immutable"}
+]))]
 pub struct BatleHubLocalInstanceSpec {
     /// A BatleHub the operator doesn't deploy: it reaches it at `url`
     /// with an admin token, observes it and, with `manageConfig`, pushes
-    /// its configuration. (The mode where the operator deploys BatleHub
-    /// itself comes in a later version.)
-    pub external: ExternalInstance,
+    /// its configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external: Option<ExternalInstance>,
+    /// A BatleHub the operator deploys, in this namespace, and whose
+    /// configuration it always manages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed: Option<crate::managed::ManagedInstance>,
     /// BatleHub's configuration file (`config.toml`) written in YAML, key
     /// for key: a TOML table is an object, an array of tables a list of
     /// objects. Never typed here: BatleHub's own parser validates it.
     /// `${VAR}` placeholders are kept and resolved by the instance from
-    /// its own environment. Rendered only with `external.manageConfig`.
+    /// its own environment (`managed.env`). Rendered with `managed`, or
+    /// `external.manageConfig`.
     #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
     #[schemars(schema_with = "open_object")]
     pub config: serde_json::Value,
@@ -122,6 +131,18 @@ pub struct Reload {
     /// validates it with its real environment before loading it.
     #[serde(default)]
     pub validation: Validation,
+    /// `managed`: `Rollout` restarts the pods when a key BatleHub reads at
+    /// startup changes; `Never` raises `RestartRequired` instead, naming
+    /// the keys, until the pods restart otherwise.
+    #[serde(default)]
+    pub restart: RestartPolicy,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq, JsonSchema)]
+pub enum RestartPolicy {
+    #[default]
+    Rollout,
+    Never,
 }
 
 impl Reload {
@@ -193,6 +214,28 @@ pub enum NamespacesFrom {
     Selector,
 }
 
+impl BatleHubLocalInstanceSpec {
+    /// Whether the operator renders and applies the configuration.
+    pub fn manages_config(&self) -> bool {
+        self.managed.is_some() || self.external.as_ref().is_some_and(|e| e.manage_config)
+    }
+}
+
+/// The URL the operator calls: external, `url`; managed, its `Service`.
+pub fn endpoint(instance: &BatleHubLocalInstance) -> String {
+    use kube::ResourceExt;
+    match (&instance.spec.external, &instance.spec.managed) {
+        (Some(external), _) => external.url.clone(),
+        (None, Some(managed)) => format!(
+            "http://{}.{}.svc:{}",
+            crate::managed::Names::new(instance.name_any()).proxy(),
+            instance.namespace().unwrap_or_default(),
+            managed.service.port
+        ),
+        (None, None) => String::new(),
+    }
+}
+
 /// What the operator observed of the instance.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -255,6 +298,17 @@ pub struct BatleHubLocalInstanceStatus {
     /// When the operator last made the instance load a configuration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_reload_time: Option<String>,
+    /// `managed`: SHA-256 of the credentials layer, a comment of the
+    /// rendered file (a rotation is a reload).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credentials_hash: Option<String>,
+    /// `managed`: how the proxy pods are replaced (`Recreate`,
+    /// `RollingUpdate`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update_strategy: Option<String>,
+    /// `managed`: the proxy pods ready.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub available_replicas: Option<i32>,
 }
 
 fn is_zero(n: &u64) -> bool {

@@ -230,6 +230,15 @@ pub struct Target<'a> {
     /// configuration rendered for it.
     pub rendered: Option<Result<String, Failure>>,
     pub approver: &'a dyn Approver,
+    /// Restarts a managed instance's pods; `None` on an external one.
+    pub restarter: Option<&'a dyn Restarter>,
+}
+
+/// Restarts the pods of a managed instance.
+#[async_trait::async_trait]
+pub trait Restarter: Send + Sync {
+    /// The `Deployment`s restarted.
+    async fn restart(&self) -> Result<Vec<String>, Failure>;
 }
 
 /// What a run ended on.
@@ -431,9 +440,8 @@ pub fn request(
         }))
     };
     match action {
-        ConfigReload | ConfigValidate | ConfigApplyPending | ConfigDiscardPending | HealthCheck => {
-            Ok(None)
-        }
+        ConfigReload | ConfigValidate | ConfigApplyPending | ConfigDiscardPending | HealthCheck
+        | Restart => Ok(None),
         CacheWarm => {
             let r = registry()?;
             call(
@@ -757,6 +765,17 @@ async fn execute(plan: &Plan<'_>, target: &Target<'_>, now: Timestamp) -> Result
             })
             .await
         }
+        Restart => {
+            let Some(restarter) = target.restarter else {
+                return Err(Failure::new(
+                    ReasonCode::InvalidSpec,
+                    "restart needs a managed instance: the operator can't restart an instance \
+                     it doesn't deploy",
+                ));
+            };
+            let restarted = restarter.restart().await?;
+            Ok(json!({ "restarted": restarted }))
+        }
         HealthCheck => {
             let healthz = target
                 .gateway
@@ -867,6 +886,7 @@ mod tests {
             held: None,
             rendered: None,
             approver,
+            restarter: None,
         }
     }
 
@@ -1086,6 +1106,49 @@ mod tests {
         assert_eq!(report.outcome.reason(), ReasonCode::InvalidSpec);
     }
 
+    struct Pods;
+
+    #[async_trait::async_trait]
+    impl Restarter for Pods {
+        async fn restart(&self) -> Result<Vec<String>, Failure> {
+            Ok(vec!["hub".into(), "hub-worker".into()])
+        }
+    }
+
+    #[tokio::test]
+    async fn restart_needs_a_managed_instance() {
+        let gateway = FakeGateway::default();
+        let approvals = Approvals::default();
+        let params = MaintenanceParams::default();
+        let p = plan(MaintenanceAction::Restart, &params, None);
+        let now = at("2026-10-15T01:00:00Z");
+        let external = target(&gateway, &approvals);
+        let report = run_maintenance(
+            &p,
+            MaintenanceStatus::default(),
+            now,
+            &external,
+            &Guard::default(),
+        )
+        .await;
+        assert_eq!(report.outcome.reason(), ReasonCode::InvalidSpec);
+        let mut managed = target(&gateway, &approvals);
+        managed.restarter = Some(&Pods);
+        let report = run_maintenance(
+            &p,
+            MaintenanceStatus::default(),
+            now,
+            &managed,
+            &Guard::default(),
+        )
+        .await;
+        assert_eq!(report.outcome.reason(), ReasonCode::Reconciled);
+        assert_eq!(
+            report.status.last_run.unwrap().result.unwrap(),
+            json!({"restarted": ["hub", "hub-worker"]})
+        );
+    }
+
     #[test]
     fn every_plain_action_builds_its_call() {
         let now = at("2026-10-15T00:00:00Z");
@@ -1110,6 +1173,7 @@ mod tests {
                     | MaintenanceAction::ConfigApplyPending
                     | MaintenanceAction::ConfigDiscardPending
                     | MaintenanceAction::HealthCheck
+                    | MaintenanceAction::Restart
             );
             assert_eq!(built.is_none(), configured, "{}", rule.action.as_str());
             // A missing required param is refused at run too.
