@@ -153,3 +153,48 @@ registry), nor complete an entry of the instance's own `spec.config`.
 
 On an instance without `manageConfig`, a registry is
 `InstanceConfigUnmanaged`: the operator renders nothing there.
+
+### Namespaces of a registry
+
+BatleHub's namespace blocks (`[[registries.namespaces]]`: a package prefix
+carrying its grants, visibility, versioning, quota and rules) are keys of
+the registry like any other, under `config.namespaces`:
+
+```yaml
+apiVersion: batlehub.weebo.io/v1alpha1
+kind: BatleHubRegistry
+metadata:
+  name: npm
+  namespace: infra
+spec:
+  type: npm
+  config:
+    mode: local
+    grants:
+      "*": [releases:read, releases:list]
+    namespaces:
+      - match: "@acme/billing"
+        visibility: team
+        grants:
+          "group:oidc1:platform": ["releases:*", "owners:write"]
+      - match: "@acme/ci"
+        rules:
+          - { kind: release_age_gate, min_age_secs: 0 }
+```
+
+They reload without a restart. Three things to know:
+
+- **A list replaces a list.** A namespace has no `name` nor `type` for
+  BatleHub's layer merge to match on: a `configFrom` fragment declaring
+  `[[namespaces]]` replaces every namespace of `config`, and a
+  `BatleHubRegistry` completing a registry of the instance's own
+  `spec.config` replaces that registry's namespaces. Keep a registry's
+  namespaces in one place.
+- **No namespace spans registries.** BatleHub has no namespace block above
+  the registry: a policy several registries share is written in each. The
+  tier above every registry is the instance's `[grants]`, in its
+  `spec.config`; a registry of another namespace never reaches it.
+- **Team namespace claims are not managed.** The prefixes a team claims
+  through the admin API (`batlehub admin namespace`, the console) live in
+  BatleHub's database, not in its configuration: the operator neither
+  creates nor removes them.

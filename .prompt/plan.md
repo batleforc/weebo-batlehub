@@ -1790,6 +1790,15 @@ chaque pod relu.
   dépôt sans tag final `vX.Y.Z` (il cherche le plus haut pour décider de
   `latest`) et publie la release GitHub sans `--prerelease` : corrigé
   dans le kit (release suivante), dont `publish.yml` est épinglé ici.
+- **Namespaces de BatleHub** (RFC 0015) : les blocs
+  `[[registries.namespaces]]` passent par `config.namespaces` d'une
+  `BatleHubRegistry` sans rien de propre à l'opérateur (rechargés à chaud :
+  `registries[*]`, Partial). Sans `name` ni `type`, la fusion des couches
+  de BatleHub **remplace** la liste : un `configFrom` ou une registry qui
+  complète celle de l'instance remplace ses namespaces (testé contre le
+  vrai parser, documenté dans le guide). BatleHub n'a pas de namespace
+  au-dessus de la registry ; les claims d'équipe (API admin, en base)
+  restent hors opérateur (« Plus tard »).
 - **Reste du M2** : la release **0.1.0-alpha.1** (D7) et le test
   d'upgrade, qui ne tourne vraiment que sur un tag.
 

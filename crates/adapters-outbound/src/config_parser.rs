@@ -343,6 +343,39 @@ path = "/var/cache/batlehub"
         assert!(err.to_string().contains("missing field"), "{err}");
     }
 
+    #[test]
+    fn registry_namespaces_validate_and_a_later_list_replaces_the_earlier() {
+        let namespaces = |prefix: &str| {
+            json!({"registries": [{
+                "name": "npm",
+                "type": "npm",
+                "mode": "local",
+                "namespaces": [{
+                    "match": prefix,
+                    "visibility": "team",
+                    "grants": {"group:oidc1:platform": ["releases:publish"]},
+                }],
+            }]})
+        };
+        let instance = parser().layer(&namespaces("@acme/billing")).unwrap();
+        let registry = parser().layer(&namespaces("@acme/ci")).unwrap();
+        let env = |name: &str| (name == "DATABASE_URL").then(|| "postgresql://x/y".to_string());
+        let merged = parser().merge(&[BASE, &instance]).unwrap();
+        assert!(merged.contains("[[registries.namespaces]]"), "{merged}");
+        assert!(parser().validate(&[&merged], &env).is_ok());
+        // `[[registries.namespaces]]` has no `name` nor `type` to merge on:
+        // BatleHub replaces the whole list, it doesn't add to it.
+        let merged = parser().merge(&[BASE, &instance, &registry]).unwrap();
+        let back = parser().fragment(&merged).unwrap();
+        let matches: Vec<&Json> = back["registries"][0]["namespaces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| &n["match"])
+            .collect();
+        assert_eq!(matches, [&json!("@acme/ci")]);
+    }
+
     fn with_admin(value: &str) -> String {
         format!(
             "{BASE}\n[[auth]]\ntype = \"token\"\n[[auth.tokens]]\nvalue = \"other\"\nrole = \"user\"\n\

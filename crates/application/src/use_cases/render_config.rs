@@ -687,6 +687,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_fragment_s_namespaces_replace_the_config_s() {
+        let sources = FakeSources::default();
+        let parser = FakeConfigParser;
+        sources.put("ns", "ci", r#"{"namespaces": [{"match": "@acme/ci"}]}"#);
+        let hub = instance(json!({}));
+        let bound = BoundInstance::local("ns", "hub");
+        let mut npm = registry(
+            "ns",
+            "npm",
+            "1",
+            json!({"namespaces": [{"match": "@acme/billing", "visibility": "team"}]}),
+        );
+        npm.spec.config_from = vec![ConfigSource::config_map("ci", "config.toml")];
+        let (_, entries) = render_registries(&hub, &bound, vec![npm], &[], &sources, &parser).await;
+        // As BatleHub merges its layers: a list of tables keyed by `match`
+        // has no identity to merge on.
+        assert_eq!(
+            entries,
+            [json!({"namespaces": [{"match": "@acme/ci"}], "type": "npm", "name": "npm"})]
+        );
+    }
+
+    #[tokio::test]
     async fn the_registry_selector_filters_by_label() {
         let sources = FakeSources::default();
         let parser = FakeConfigParser;
