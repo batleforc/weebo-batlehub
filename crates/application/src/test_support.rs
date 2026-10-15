@@ -10,7 +10,7 @@ use serde_json::Value;
 use crate::ports::{
     AdminGateway, BoundInstance, ConfigError, ConfigParser, ConfigSource, ConfigSources,
     ConfigVerdict, ConfigWarning, GatewayError, InstanceDependents, InstanceInfo, PendingSource,
-    RegistryView, ReloadCheck, SourceError, TokenCheck,
+    RegistryView, ReloadCheck, SourceError, TeamNamespace, TokenCheck,
 };
 
 /// A BatleHub that answers, as version 1.6.0 with no configuration
@@ -33,8 +33,12 @@ pub struct FakeGateway {
     refuse: Mutex<Option<String>>,
     read_only: Mutex<bool>,
     hot_reload_disabled: Mutex<bool>,
-    /// The configuration calls made, in order.
+    /// The configuration and claim calls made, in order.
     calls: Mutex<Vec<String>>,
+    /// The registries the instance serves.
+    registries: Mutex<Vec<String>>,
+    /// The team namespaces, by `(registry, prefix)`.
+    claims: Mutex<BTreeMap<(String, String), TeamNamespace>>,
 }
 
 impl FakeGateway {
@@ -100,6 +104,34 @@ impl FakeGateway {
 
     pub fn calls(&self) -> Vec<String> {
         self.calls.lock().unwrap().clone()
+    }
+
+    /// The registries the instance serves from now on.
+    pub fn serve(&self, registries: &[&str]) {
+        *self.registries.lock().unwrap() = registries.iter().map(|r| r.to_string()).collect();
+    }
+
+    /// A claim in place, as if made by someone else.
+    pub fn put_claim(&self, registry: &str, namespace: TeamNamespace) {
+        self.claims
+            .lock()
+            .unwrap()
+            .insert((registry.into(), namespace.prefix.clone()), namespace);
+    }
+
+    /// The claim of `prefix` on `registry`, if any.
+    pub fn claim(&self, registry: &str, prefix: &str) -> Option<TeamNamespace> {
+        self.claims
+            .lock()
+            .unwrap()
+            .get(&(registry.into(), prefix.into()))
+            .cloned()
+    }
+
+    /// A claim call: recorded, failing with `failure` when set.
+    fn claim_call(&self, name: &str) -> Result<(), GatewayError> {
+        self.calls.lock().unwrap().push(name.to_string());
+        self.check()
     }
 
     fn check(&self) -> Result<(), GatewayError> {
@@ -194,6 +226,50 @@ impl AdminGateway for FakeGateway {
     async fn discard_pending(&self) -> Result<(), GatewayError> {
         self.call("discard")?;
         *self.pending.lock().unwrap() = None;
+        Ok(())
+    }
+
+    async fn registry_names(&self) -> Result<Vec<String>, GatewayError> {
+        self.claim_call("registries")?;
+        Ok(self.registries.lock().unwrap().clone())
+    }
+
+    async fn team_namespaces(&self, registry: &str) -> Result<Vec<TeamNamespace>, GatewayError> {
+        self.claim_call("namespaces")?;
+        Ok(self
+            .claims
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|((r, _), _)| r == registry)
+            .map(|(_, n)| n.clone())
+            .collect())
+    }
+
+    async fn claim_namespace(
+        &self,
+        registry: &str,
+        namespace: &TeamNamespace,
+    ) -> Result<(), GatewayError> {
+        self.claim_call("claim")?;
+        let mut claims = self.claims.lock().unwrap();
+        let key = (registry.to_string(), namespace.prefix.clone());
+        if claims.contains_key(&key) {
+            return Err(GatewayError::AlreadyClaimed(format!(
+                "namespace '{}' in registry '{registry}' is already claimed",
+                namespace.prefix
+            )));
+        }
+        claims.insert(key, namespace.clone());
+        Ok(())
+    }
+
+    async fn release_namespace(&self, registry: &str, prefix: &str) -> Result<(), GatewayError> {
+        self.claim_call("release")?;
+        self.claims
+            .lock()
+            .unwrap()
+            .remove(&(registry.to_string(), prefix.to_string()));
         Ok(())
     }
 }

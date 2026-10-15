@@ -194,7 +194,7 @@ They reload without a restart. Three things to know:
   the registry: a policy several registries share is written in each. The
   tier above every registry is the instance's `[grants]`, in its
   `spec.config`; a registry of another namespace never reaches it.
-- **Team namespace claims are not managed.** The prefixes a team claims
-  through the admin API (`batlehub admin namespace`, the console) live in
-  BatleHub's database, not in its configuration: the operator neither
-  creates nor removes them.
+- **Team namespace claims are another object.** The prefixes a team
+  claims (`batlehub admin namespace`, the console) live in BatleHub's
+  database, not in its configuration: a `BatleHubNamespaceClaim` manages
+  one ([Team namespaces](/docs/guides/team-namespaces)).

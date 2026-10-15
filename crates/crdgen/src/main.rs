@@ -22,6 +22,7 @@ fn main() -> anyhow::Result<()> {
     // here as they are built.
     write_crd(&args.out, &api::LocalInstance::crd())?;
     write_crd(&args.out, &api::Registry::crd())?;
+    write_crd(&args.out, &api::NamespaceClaim::crd())?;
     println!("wrote CRDs to {}", args.out.display());
     Ok(())
 }

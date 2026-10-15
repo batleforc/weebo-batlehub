@@ -16,12 +16,14 @@ versions: [v1alpha1]
 kinds:
   - batlehublocalinstances
   - batlehubregistries
+  - batlehubnamespaceclaims
 # The namespaced kinds — all of them, BatleHub has no cluster-scoped kind:
 # what a team may manage (rbac.namespacedExample), and the watch Role's
 # (watch.namespace).
 namespacedKinds:
   - batlehublocalinstances
   - batlehubregistries
+  - batlehubnamespaceclaims
 # The operator reads and writes Secrets in every namespace that has an
 # instance, also limited to one namespace: said explicitly.
 clusterSecrets: true

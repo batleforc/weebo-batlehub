@@ -13,7 +13,7 @@ use adapters_outbound::{
     BatleHubConfigParser, ClusterDependents, HttpGatewayFactory, KubeConfigSources,
     LocalInstanceDirectory,
 };
-use api::{LocalInstance, Registry};
+use api::{LocalInstance, NamespaceClaim, Registry};
 use futures::StreamExt;
 use kube::api::Api;
 use kube::runtime::events::{Recorder, Reporter};
@@ -101,6 +101,7 @@ async fn run(telemetry: &telemetry::Telemetry) -> anyhow::Result<()> {
     let scope = WatchScope::from_env()?;
     scope.ensure::<LocalInstance>()?;
     scope.ensure::<Registry>()?;
+    scope.ensure::<NamespaceClaim>()?;
     tracing::info!(
         namespace = ?scope.watched_namespace(),
         selector = ?scope.selector(),
@@ -191,6 +192,7 @@ async fn run(telemetry: &telemetry::Telemetry) -> anyhow::Result<()> {
     tokio::join!(
         controller::local_instance::run(client.clone(), ctx.clone()),
         controller::registry::run(client.clone(), ctx.clone()),
+        controller::namespace_claim::run(client.clone(), ctx.clone()),
     );
     // Every controller returns once the shutdown signal arrived and its
     // in-flight reconciles finished: hand the lease over right away

@@ -48,7 +48,7 @@ dump() {
   step "diagnostics"
   kubectl -n "$OPERATOR_NS" get pods -o wide
   kubectl -n "$OPERATOR_NS" logs -l app.kubernetes.io/name=weebo-batlehub --tail=200 --prefix --all-containers
-  kubectl -n team-a get batlehublocalinstances,batlehubregistries -o yaml
+  kubectl -n team-a get batlehublocalinstances,batlehubregistries,batlehubnamespaceclaims -o yaml
   kubectl -n team-a get pods -o wide
   kubectl -n team-a logs deploy/batlehub --tail=50
   kubectl get events -A --sort-by=.lastTimestamp | tail -n 50
@@ -199,6 +199,30 @@ reason_is hub RestartForbidden
 kubectl -n team-a patch batlehublocalinstance hub --type merge \
   -p '{"spec":{"config":{"database":{"max_connections":5}}}}'
 reason_is hub Reconciled
+
+step "a team namespace claimed on the registry, released on deletion"
+kubectl apply -f - <<'YAML'
+apiVersion: batlehub.weebo.io/v1alpha1
+kind: BatleHubNamespaceClaim
+metadata:
+  name: web
+  namespace: team-a
+spec:
+  instanceRef: { name: hub }
+  registry: npm
+  prefix: "@acme/web"
+  group: oidc:web-team
+YAML
+for _ in $(seq 1 90); do
+  got="$(kubectl -n team-a get batlehubnamespaceclaim web \
+    -o jsonpath='{.status.conditions[?(@.type=="Ready")].reason}' 2>/dev/null || true)"
+  [ "$got" = Reconciled ] && break
+  sleep 2
+done
+[ "$got" = Reconciled ] || fail "claim web: Ready reason is ${got:-<none>}, expected Reconciled"
+claimed="$(kubectl -n team-a get batlehubnamespaceclaim web -o jsonpath='{.status.claimedGroup}')"
+[ "$claimed" = oidc:web-team ] || fail "claim web: claimedGroup is ${claimed:-<none>}"
+kubectl -n team-a delete batlehubnamespaceclaim web --timeout=60s
 
 step "leader election"
 holder="$(kubectl -n "$OPERATOR_NS" get lease "$LEASE" -o jsonpath='{.spec.holderIdentity}')"

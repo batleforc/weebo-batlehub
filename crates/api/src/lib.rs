@@ -9,6 +9,7 @@
 
 pub mod config;
 pub mod local_instance;
+pub mod namespace_claim;
 pub mod registry;
 pub mod status;
 
@@ -30,5 +31,6 @@ pub const CREDENTIAL_LABEL: &str = "batlehub.weebo.io/credential";
 pub const APPROVED_CONFIG_HASH: &str = "batlehub.weebo.io/approved-config-hash";
 
 pub use local_instance::{LocalInstance, LocalInstanceStatus};
+pub use namespace_claim::{NamespaceClaim, NamespaceClaimStatus};
 pub use registry::{Registry, RegistryStatus};
 pub use status::Status;

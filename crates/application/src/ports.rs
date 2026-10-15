@@ -44,6 +44,9 @@ pub enum GatewayError {
     /// expired (409).
     #[error("no pending reload to apply: {0}")]
     NoPending(String),
+    /// A namespace claim answered 409: the prefix is already claimed.
+    #[error("{0}")]
+    AlreadyClaimed(String),
 }
 
 impl GatewayError {
@@ -54,6 +57,7 @@ impl GatewayError {
             GatewayError::Remote(_) | GatewayError::NoPending(_) => ReasonCode::RemoteError,
             GatewayError::HotReloadDisabled(_) => ReasonCode::HotReloadDisabled,
             GatewayError::Rejected(_) => ReasonCode::ConfigRejected,
+            GatewayError::AlreadyClaimed(_) => ReasonCode::ClaimConflict,
         }
     }
 }
@@ -92,6 +96,32 @@ pub trait AdminGateway: Send + Sync {
     async fn pending(&self) -> Result<Option<PendingSource>, GatewayError>;
     /// Drops the reload staged on the instance (none is fine).
     async fn discard_pending(&self) -> Result<(), GatewayError>;
+    /// The names of the registries the instance serves.
+    async fn registry_names(&self) -> Result<Vec<String>, GatewayError>;
+    /// The team namespaces claimed on `registry`.
+    async fn team_namespaces(&self, registry: &str) -> Result<Vec<TeamNamespace>, GatewayError>;
+    /// Claims `namespace.prefix` on `registry` for `namespace.group`
+    /// ([`GatewayError::AlreadyClaimed`] when the prefix is taken).
+    async fn claim_namespace(
+        &self,
+        registry: &str,
+        namespace: &TeamNamespace,
+    ) -> Result<(), GatewayError>;
+    /// Releases `prefix` on `registry` (none claimed is fine).
+    async fn release_namespace(&self, registry: &str, prefix: &str) -> Result<(), GatewayError>;
+}
+
+/// A team namespace of a registry: a package name prefix reserved to a
+/// group.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TeamNamespace {
+    pub prefix: String,
+    /// The group, as the instance's auth providers name it.
+    pub group: String,
+    /// Who claimed it (free text): the operator writes its marker there.
+    pub claimed_by: Option<String>,
+    /// How many packages it holds (`0` when written).
+    pub package_count: i64,
 }
 
 /// What a dry run of a configuration says.

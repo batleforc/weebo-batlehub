@@ -30,6 +30,10 @@
 
    Guide: https://batleforc.github.io/weebo-batlehub/docs/guides/manage-config
 
+   A BatleHubNamespaceClaim (`kubectl get bhnc`) reserves a package prefix
+   of a registry to a group:
+   https://batleforc.github.io/weebo-batlehub/docs/guides/team-namespaces
+
 3. Creating a BatleHubLocalInstance sends a Secret of its namespace to the
    URL it names: grant the kind like you grant pods.
 

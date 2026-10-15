@@ -59,6 +59,7 @@ kubectl get events -A --field-selector reason=InvalidSpec
 | `PolicyConflict` | blocking | `Ready: False`, Event (`Warning`) | A policy in place on that node was not written by this CR, or another CR targets the same coordinate. |
 | `GrantHeldByOwnership` | blocking | `Ready: False`, Event (`Warning`) | 409: the subject already holds these actions through package ownership. |
 | `ExemptionNotPermitted` | blocking | `Ready: False`, Event (`Warning`) | 403 on an exemption: `gates:exempt` is granted to no role, the operator's identity needs a grant on the version or its package (the message gives it). |
+| `ClaimConflict` | blocking | `Ready: False`, Event (`Warning`) | A `BatleHubNamespaceClaim`'s prefix is already claimed on that registry by something else (the console, the CLI, another CR): never taken over. The message says for which group and by whom; release that claim, or delete this CR. |
 | `DuplicateRegistryName` | blocking | `Ready: False`, Event (`Warning`) | Another `BatleHubRegistry` rendered first on the same instance has the same `name`, or a registry of another namespace would complete an entry of the instance's own configuration. |
 | `NamespaceNotAllowed` | blocking | `Ready: False`, Event (`Warning`), admission denial | A registry of another namespace contains a `${VAR}` placeholder: placeholders resolve from the instance's environment, so they are refused outside its namespace. |
 | `InstanceRejected` | blocking | `Ready: False`, Event (`Warning`) | The instance refused the configuration containing this registry. |

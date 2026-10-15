@@ -8,5 +8,10 @@
     "kind": "BatleHubRegistry",
     "singular": "batlehubregistry",
     "scope": "Namespaced"
+  },
+  {
+    "kind": "BatleHubNamespaceClaim",
+    "singular": "batlehubnamespaceclaim",
+    "scope": "Namespaced"
   }
 ]

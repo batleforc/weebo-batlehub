@@ -350,3 +350,112 @@ async fn a_proxy_s_503_or_404_is_not_batlehub_s() {
         Err(GatewayError::Remote(_))
     ));
 }
+
+#[tokio::test]
+async fn registries_are_read_from_the_health_list() {
+    let (server, gateway) = setup().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/admin/health"))
+        .and(header("authorization", format!("Bearer {TOKEN}").as_str()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            {"registry": "npm", "registry_type": "npm", "mode": "local", "package_count": 2},
+            {"registry": "pypi", "registry_type": "pypi", "mode": "proxy"},
+        ])))
+        .mount(&server)
+        .await;
+    assert_eq!(gateway.registry_names().await.unwrap(), ["npm", "pypi"]);
+}
+
+#[tokio::test]
+async fn team_namespaces_are_listed_claimed_and_released() {
+    use application::ports::TeamNamespace;
+    use wiremock::matchers::body_json;
+
+    let (server, gateway) = setup().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/admin/registries/npm/namespaces"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([{
+            "registry": "npm",
+            "prefix": "@acme/web",
+            "group_id": "oidc:web",
+            "claimed_by": "weebo-batlehub:team/web",
+            "package_count": 4,
+        }, {
+            "registry": "npm",
+            "prefix": "legacy",
+            "group_id": "oidc:old",
+            "claimed_by": null,
+            "package_count": 0,
+        }])))
+        .mount(&server)
+        .await;
+    let listed = gateway.team_namespaces("npm").await.unwrap();
+    assert_eq!(
+        listed[0],
+        TeamNamespace {
+            prefix: "@acme/web".into(),
+            group: "oidc:web".into(),
+            claimed_by: Some("weebo-batlehub:team/web".into()),
+            package_count: 4,
+        }
+    );
+    assert_eq!(listed[1].claimed_by, None);
+
+    let claim = TeamNamespace {
+        prefix: "frontend/libs".into(),
+        group: "oidc:web".into(),
+        claimed_by: Some("weebo-batlehub:team/libs".into()),
+        package_count: 0,
+    };
+    Mock::given(method("POST"))
+        .and(path("/api/v1/admin/registries/npm/namespaces"))
+        .and(body_json(json!({
+            "prefix": "frontend/libs",
+            "group_id": "oidc:web",
+            "claimed_by": "weebo-batlehub:team/libs",
+        })))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+    gateway.claim_namespace("npm", &claim).await.unwrap();
+
+    // The prefix's slash stays a path separator.
+    Mock::given(method("DELETE"))
+        .and(path(
+            "/api/v1/admin/registries/npm/namespaces/frontend/libs",
+        ))
+        .and(header("authorization", format!("Bearer {TOKEN}").as_str()))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+    gateway
+        .release_namespace("npm", "frontend/libs")
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_claimed_prefix_is_a_conflict() {
+    use application::ports::TeamNamespace;
+
+    let (server, gateway) = setup().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/admin/registries/npm/namespaces"))
+        .respond_with(ResponseTemplate::new(409).set_body_json(json!({
+            "error": "conflict",
+            "message": "namespace 'x' in registry 'npm' is already claimed",
+        })))
+        .mount(&server)
+        .await;
+    let claim = TeamNamespace {
+        prefix: "x".into(),
+        group: "g".into(),
+        ..Default::default()
+    };
+    match gateway.claim_namespace("npm", &claim).await {
+        Err(GatewayError::AlreadyClaimed(why)) => assert!(why.contains("already claimed"), "{why}"),
+        other => panic!("{other:?}"),
+    }
+}

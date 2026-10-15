@@ -12,12 +12,13 @@ use adapters_outbound::{
     LocalInstanceDirectory,
 };
 use api::local_instance::{ExternalInstance, LocalInstanceSpec, LocalSecretKeyRef};
+use api::namespace_claim::{DeletionPolicy, NamespaceClaimSpec};
 use api::registry::RegistrySpec;
-use api::{LocalInstance, Registry};
+use api::{LocalInstance, NamespaceClaim, Registry};
 use application::ports::AdminGateway;
 use k8s_openapi::api::core::v1::{Namespace, Secret};
 use kube::Client;
-use kube::api::{Api, ObjectMeta, Patch, PatchParams, PostParams};
+use kube::api::{Api, DeleteParams, ObjectMeta, Patch, PatchParams, PostParams};
 use kube::runtime::events::{Recorder, Reporter};
 use serde_json::json;
 use weebo_kit_runtime::{Health, WatchScope};
@@ -229,7 +230,8 @@ async fn a_real_instance_runs_the_configuration_and_registries_pushed() {
     create(&client, &registry).await;
     let ctx = ctx(&client);
     tokio::spawn(controller::local_instance::run(client.clone(), ctx.clone()));
-    tokio::spawn(controller::registry::run(client.clone(), ctx));
+    tokio::spawn(controller::registry::run(client.clone(), ctx.clone()));
+    tokio::spawn(controller::namespace_claim::run(client.clone(), ctx));
 
     let api: Api<LocalInstance> = Api::namespaced(client.clone(), NS);
     let until = |want: &'static str| {
@@ -283,4 +285,51 @@ async fn a_real_instance_runs_the_configuration_and_registries_pushed() {
     .await
     .unwrap();
     until("Reconciled").await;
+
+    // A team namespace of the pushed registry, its prefix holding a slash:
+    // claimed, read back, then released by the finalizer.
+    let claims: Api<NamespaceClaim> = Api::namespaced(client.clone(), NS);
+    let claim = NamespaceClaim::new(
+        "web-libs",
+        NamespaceClaimSpec {
+            instance_ref: None,
+            registry: "live-npm".into(),
+            prefix: "web/libs".into(),
+            group: "oidc:web-team".into(),
+            deletion_policy: DeletionPolicy::Delete,
+        },
+    );
+    claims.create(&PostParams::default(), &claim).await.unwrap();
+    testkit::polling::wait_for(&claims, "web-libs", TIMEOUT, POLL, |c| {
+        let ready = weebo_kit_api::status::ready(&c.status.as_ref()?.conditions)?;
+        (ready.reason == "Reconciled").then_some(())
+    })
+    .await;
+    let held = batlehub.team_namespaces("live-npm").await.unwrap();
+    let held = held.iter().find(|n| n.prefix == "web/libs").unwrap();
+    assert_eq!(held.group, "oidc:web-team");
+    assert_eq!(
+        held.claimed_by.as_deref(),
+        Some("weebo-batlehub:live/web-libs")
+    );
+    claims
+        .delete("web-libs", &DeleteParams::default())
+        .await
+        .unwrap();
+    let deadline = tokio::time::Instant::now() + TIMEOUT;
+    while claims.get_opt("web-libs").await.unwrap().is_some() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "web-libs not released"
+        );
+        tokio::time::sleep(POLL).await;
+    }
+    assert!(
+        batlehub
+            .team_namespaces("live-npm")
+            .await
+            .unwrap()
+            .iter()
+            .all(|n| n.prefix != "web/libs")
+    );
 }

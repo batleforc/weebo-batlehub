@@ -3,6 +3,7 @@
   "pages": [
     "index",
     "batlehublocalinstance",
-    "batlehubregistry"
+    "batlehubregistry",
+    "batlehubnamespaceclaim"
   ]
 }

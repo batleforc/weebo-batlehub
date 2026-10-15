@@ -25,6 +25,9 @@ batlehub, D8 révisée) et sur laquelle tout est épinglé depuis le M2 ; kit
 
 ### Historique
 
+- **v2.3 — 2026-10-15** : nouveau kind `BatleHubNamespaceClaim` (4.7), les
+  team namespaces de batlehub (claims en base, API admin), avancé de
+  « Plus tard » au M2 ; code `ClaimConflict`.
 - **v2.2 — M2, 2026-10-15** : batlehub **v1.6.0** publie D4 sous la forme
   de son RFC 0037, qui diffère de la première esquisse de ce document :
   `merge_layers` rend un **document TOML canonique** (`String`, clés
@@ -931,6 +934,62 @@ les exemptions expirées).
   absente (supprimée avec `force-orphan`) : le finalizer est libéré, Event
   `Warning` qui dit que rien n'a été révoqué.
 
+### 4.7 BatleHubNamespaceClaim (`bhnc`)
+
+Un team namespace d'une registry : un préfixe de nom de paquet réservé à
+un groupe des fournisseurs d'auth. Seuls ses membres (et les admins)
+publient le préfixe ou un paquet dessous, et il est l'audience de la
+visibilité `team`. batlehub les garde en base, pas dans sa config
+(`/admin/registries/{r}/namespaces`, console, `batlehub admin namespace`) :
+ce n'est pas un bloc `[[registries.namespaces]]` (RFC 0015), qui reste de
+la config d'une `BatleHubRegistry`.
+
+**spec**
+
+| Champ | Défaut | Rôle |
+| --- | --- | --- |
+| `instanceRef` | seule instance du namespace | `InstanceRef` du kit, même namespace (CEL), immuable. |
+| `registry` | requis | Nom de registry sur l'instance, ≤ 253, immuable. |
+| `prefix` | requis | Préfixe dans l'orthographe de l'écosystème, ≤ 1024, ni blanc ni `.`/`..`, immuable. |
+| `group` | requis | Groupe tel que le fournisseur d'auth le nomme (`oidc:web-team`), sans espace (batlehub les retire). Modifiable. |
+| `deletionPolicy` | `Delete` | `Delete` libère le préfixe à la suppression ; `Orphan` le laisse. |
+
+**batlehub 1.6.0** : `POST` crée (409 si le préfixe est pris, pas de mise
+à jour), `DELETE …/namespaces/{prefix:.*}` est idempotent et prend le
+reste du chemin (les `/` du préfixe restent des séparateurs : l'opérateur
+construit l'URL lui-même, le client généré les encoderait), `GET` liste par
+registry avec `claimed_by` (texte libre) et `package_count`. Le séparateur
+est figé sur le claim d'après le type de la registry ; une registry
+inconnue donne `/`.
+
+**Règles** (celles de 4.6, appliquées à une seule ligne) :
+
+- **Marqueur** : l'opérateur écrit `claimed_by = "weebo-batlehub:<ns>/<nom>"`.
+  Un claim est à ce CR s'il porte ce marqueur, status perdu ou pas (un
+  claim fait puis un status non patché n'est pas pris pour un étranger).
+  Un CR recréé sous le même nom après un `Orphan` reprend donc son claim :
+  c'est le même objet pour l'utilisateur.
+- **Collision → rejet** : un préfixe pris par autre chose (console, CLI,
+  autre CR) donne `ClaimConflict` (le message dit le groupe et
+  `claimed_by`), jamais repris ni libéré. Pas de refus au webhook : deux
+  CR sur la même coordonnée, le second est en conflit.
+- **Registry inconnue** de l'instance (`GET /admin/health`, lu champ
+  `registry` seulement) : `RemoteNotFound`, rien n'est écrit (le claim
+  garderait `/` sur un écosystème à `.` ou `:`). Vérifié avant chaque
+  claim seulement, pas à chaque passe.
+- **Changement de groupe** : release puis claim (pas d'update) ; le
+  préfixe est libre entre les deux appels, un échec entre les deux est
+  repris à la passe suivante.
+- **Dérive** : chaque passe relit la liste ; un claim libéré ailleurs est
+  refait. `status.claimedGroup`, `status.packageCount`, `lastSyncTime`.
+- **Suppression** : finalizer, release si le claim est à ce CR, Event
+  `Revoked`. Instance déjà absente : rien à libérer, finalizer libéré.
+  Les claims comptent dans `InstanceInUse`.
+
+Raisons de `Ready` : `Reconciled`, `ClaimConflict`, `RemoteNotFound`,
+`RemoteRejected` (400), `RemoteError`, `InstanceUnreachable`,
+`OperatorUnauthorized`, les codes de token et d'instance (2.8).
+
 ## 5. Codes de raison
 
 Un seul `domain::error::ReasonCode` (`reason_codes!` du kit), PascalCase,
@@ -973,6 +1032,7 @@ lève (`needs_a_change`, reprise à 300 s, 2.10).
 | `RemoteError` | bloquant | | 500 ou réponse non prévue de l'API admin |
 | `GrantStorageUnavailable` | bloquant | | stockage des grants non configuré (503) |
 | `GrantConflict`, `PolicyConflict` | bloquant | oui | grant/policy en place qui n'est pas de ce CR, ou autre CR sur la même coordonnée (4.6) |
+| `ClaimConflict` | bloquant | oui | préfixe déjà réservé sur la registry par autre chose que ce CR (4.7) |
 | `GrantHeldByOwnership` | bloquant | oui | 409 : le sujet détient ces verbes par l'ownership |
 | `ExemptionNotPermitted` | bloquant | oui | 403 de l'exemption : `gates:exempt` non accordé à l'opérateur (4.5) |
 | `DuplicateRegistryName` | bloquant | oui | même `name` qu'une registry rendue avant, ou qu'une entrée de la config d'une instance d'un autre namespace (4.2) |
@@ -1555,7 +1615,7 @@ avec ce document) sont ajoutés ici, sous « Constats du Mx ».
 | --- | --- | --- |
 | M0 | Repo généré par le gabarit du kit **v0.14.2** (rendu hors workspace, `task template:render` du kit comme modèle), renommages (§3), kind cluster du gabarit supprimé (D5), `LocalInstanceDirectory` (2.8), client généré, port `ConfigParser` (adaptateur vide jusqu'au M2), `ReasonCode` (§5, complet), `ci.yml`/`e2e.yml`/`publish.yml` branchés (9.3), doc vide publiée | `task test:all` et `task audit` verts ; CI verte sur `main` |
 | M1 | `BatleHubLocalInstance` **external** sans `manageConfig` : `/livez`, `GET /api/v1/me` (rôle), warnings, version, `Ready` ; label `instance-token` (2.11) ; finalizer et `InstanceInUse` ; résolution d'instance des autres kinds (2.8) | envtest : `Ready`, `TokenSecretNotAllowed` sur un Secret non labellisé, `OperatorUnauthorized` sur un rôle non admin, `InstanceInUse` ; live : instance réelle `Ready`, token refusé → `OperatorUnauthorized` |
-| M2 | **Prérequis : batlehub v1.6.0 publiée** (D4, D8 révisée) et `batlehub-config` épinglé dessus. external + `manageConfig` (push, validate, nonce, backoff, `Manual`, `RestartForbidden`, contrôle du token 6.3) + `podSelector` ; webhook `BatleHubLocalInstance` ; `BatleHubRegistry` (rattachement, doublons, `InstanceConfigUnmanaged`, label `credential`) ; **release 0.1.0-alpha.1** (D7) | live : cas limites du reload sur 2 réplicas du chart batlehub ; envtest : registries en doublon, Secret non labellisé ; alpha publiée par `publish.yml` du kit, porte e2e verte |
+| M2 | **Prérequis : batlehub v1.6.0 publiée** (D4, D8 révisée) et `batlehub-config` épinglé dessus. external + `manageConfig` (push, validate, nonce, backoff, `Manual`, `RestartForbidden`, contrôle du token 6.3) + `podSelector` ; webhook `BatleHubLocalInstance` ; `BatleHubRegistry` (rattachement, doublons, `InstanceConfigUnmanaged`, label `credential`) ; `BatleHubNamespaceClaim` (4.7) ; **release 0.1.0-alpha.1** (D7) | live : cas limites du reload sur 2 réplicas du chart batlehub ; envtest : registries en doublon, Secret non labellisé ; alpha publiée par `publish.yml` du kit, porte e2e verte |
 | M3 | `BatleHubPackageGrant`, `BatleHubPackagePolicy`, `BatleHubMaintenance` (catalogue **sans `restart`**, qui demande le managed) | live : dérive, conflit, `GrantHeldByOwnership`, échec partiel (status patché par sujet), révocation, exemptions et `ExemptionNotPermitted` ; maintenance au plus une fois (kill pendant un run, patch conditionnel) ; envtest : `InstanceInUse` avec des grants liés |
 | M4 | `managed` : objets possédés (sans adoption implicite, `OwnedObjectConflict`), deux hashs, `Recreate`/`RollingUpdate`, token opérateur, credentials, worker, TokenReview ; action `restart` | e2e kind complet vert, test d'upgrade depuis l'alpha compris |
 | M5 | `weebo-batlehub-importer` (release Helm → `BatleHubLocalInstance`, grants/policies → CR en pause) ; budget mesuré ; release 0.1.0 | release publiée de bout en bout |
@@ -1797,8 +1857,10 @@ chaque pod relu.
   de BatleHub **remplace** la liste : un `configFrom` ou une registry qui
   complète celle de l'instance remplace ses namespaces (testé contre le
   vrai parser, documenté dans le guide). BatleHub n'a pas de namespace
-  au-dessus de la registry ; les claims d'équipe (API admin, en base)
-  restent hors opérateur (« Plus tard »).
+  au-dessus de la registry. Les claims d'équipe (API admin, en base)
+  deviennent le kind `BatleHubNamespaceClaim` (4.7) : envtest (claim,
+  changement de groupe, CEL, conflit, `Orphan`, `InstanceInUse`), live
+  contre 1.6.0 (claim, relecture, release d'un préfixe à `/`), étape e2e.
 - **Reste du M2** : la release **0.1.0-alpha.1** (D7) et le test
   d'upgrade, qui ne tourne vraiment que sur un tag.
 
@@ -1856,9 +1918,9 @@ retire du code subtil de l'opérateur.
 **Plus tard** (après la 0.1.0) :
 
 - Actions bulk (`/admin/registries/{r}/bulk/*` : yank, deprecate, unlist,
-  owners, visibility) et namespace claims, en actions de maintenance avec
+  owners, visibility), en actions de maintenance avec
   un sélecteur `packages[]` + plage de versions.
-- Nouveaux kinds : `BatleHubAuthProvider`, namespace claims, clés de
+- Nouveaux kinds : `BatleHubAuthProvider`, clés de
   signature.
 - `v1beta1` et webhook de conversion.
 - Miroir Forgejo/Harbor de l'image (porte de scan propre), en plus de

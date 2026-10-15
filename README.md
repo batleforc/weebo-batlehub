@@ -16,6 +16,7 @@ Kubernetes operator driving [BatleHub](https://github.com/batlehub/batlehub)
 | ----------------------- | ---------- | --------------------------------------------------------------- |
 | `BatleHubLocalInstance` | Namespaced | A BatleHub instance: its URL and admin token (`external.adminTokenSecretRef`), and its configuration (`config`, `configLayers`, `external.manageConfig`) |
 | `BatleHubRegistry`      | Namespaced | One `[[registries]]` entry of an instance, as its own object (possibly from another namespace the instance accepts) |
+| `BatleHubNamespaceClaim` | Namespaced | A team namespace of a registry: a package name prefix reserved to a group, claimed through the admin API |
 
 Planned (see the plan): `BatleHubMaintenance`, `BatleHubPackageGrant`,
 `BatleHubPackagePolicy`, and the managed mode (the operator deploys
