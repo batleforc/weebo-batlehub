@@ -10,7 +10,7 @@ use adapters_inbound::admission::{BatleHubAdmission, KubeSiblings};
 use adapters_inbound::controller::{self, Ctx, Shutdown};
 use adapters_inbound::webhook;
 use adapters_outbound::{
-    BatleHubConfigParser, ClusterDependents, HttpGatewayFactory, KubeConfigSources,
+    BatleHubConfigParser, ClusterDependents, HttpGatewayFactory, KubeConfigSources, KubeWorkloads,
     LocalInstanceDirectory,
 };
 use api::{LocalInstance, Maintenance, NamespaceClaim, PackageGrant, PackagePolicy, Registry};
@@ -151,6 +151,8 @@ async fn run(telemetry: &telemetry::Telemetry) -> anyhow::Result<()> {
             ClusterDependents::new(client.clone(), scope.watched_namespace().map(String::from))
                 .with_selector(scope.selector().cloned()),
         ),
+        workloads: Arc::new(KubeWorkloads::new(client.clone())),
+        operator_namespace: std::env::var("POD_NAMESPACE").ok(),
         config: parser.clone(),
         sources: sources.clone(),
         recorder: Recorder::new(

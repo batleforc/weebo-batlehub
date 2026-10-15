@@ -30,6 +30,8 @@ pub struct BatleHubConfigParser {
     /// back on every reconcile — verified once. Keyed by the token's own
     /// text: the map never leaves the process. Emptied when full.
     verified: Mutex<HashMap<(String, String), bool>>,
+    /// `token → its hash`, computed once per token for the same reason.
+    hashed: Mutex<HashMap<String, String>>,
 }
 
 impl BatleHubConfigParser {
@@ -85,6 +87,39 @@ impl BatleHubConfigParser {
 }
 
 impl ConfigParser for BatleHubConfigParser {
+    fn restart_keys(&self, before: &str, after: &str) -> Result<Vec<String>, ConfigError> {
+        batlehub_config::reload_keys::classify(before, after)
+            .map(|verdict| verdict.restart)
+            .map_err(|e| ConfigError::Invalid(without_source(&format!("{e:#}"))))
+    }
+
+    fn hash_token(&self, token: &str) -> String {
+        use argon2::PasswordHasher;
+        if let Some(hash) = self.hashed.lock().expect("cache lock").get(token) {
+            return hash.clone();
+        }
+        use sha2::{Digest, Sha256};
+        // 16 bytes of a digest of the token, under a label of ours: a salt
+        // nobody else derives the same way.
+        let salt = Sha256::digest(format!("weebo-batlehub operator token:{token}"));
+        let hash = Argon2::default()
+            .hash_password_with_salt(token.as_bytes(), &salt[..16])
+            .expect("Argon2 hashes any token with a 16-byte salt")
+            .to_string();
+        // Verified once already: it is the operator's own.
+        let mut verified = self.verified.lock().expect("cache lock");
+        if verified.len() >= VERIFIED_CAPACITY {
+            verified.clear();
+        }
+        verified.insert((hash.clone(), token.to_string()), true);
+        let mut hashed = self.hashed.lock().expect("cache lock");
+        if hashed.len() >= VERIFIED_CAPACITY {
+            hashed.clear();
+        }
+        hashed.insert(token.to_string(), hash.clone());
+        hash
+    }
+
     fn layer(&self, object: &Json) -> Result<String, ConfigError> {
         let Json::Object(map) = object else {
             return Err(ConfigError::Invalid(
@@ -258,6 +293,43 @@ path = "/var/cache/batlehub"
 
     fn parser() -> BatleHubConfigParser {
         BatleHubConfigParser::default()
+    }
+
+    #[test]
+    fn the_operator_token_hashes_the_same_and_verifies() {
+        let parser = parser();
+        let hash = parser.hash_token("s3cr3t");
+        assert!(
+            hash.starts_with("$argon2id$v=19$m=19456,t=2,p=1$"),
+            "{hash}"
+        );
+        assert_eq!(BatleHubConfigParser::default().hash_token("s3cr3t"), hash);
+        assert_ne!(parser.hash_token("other"), hash);
+        let parsed = PasswordHash::new(&hash).unwrap();
+        assert!(
+            Argon2::default()
+                .verify_password(b"s3cr3t", &parsed)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn restart_keys_are_batlehub_s() {
+        let parser = parser();
+        let before = parser.merge(&[BASE]).unwrap();
+        let after = parser
+            .merge(&[
+                BASE,
+                "[server]\nport = 9090\n[[registries]]\nname = \"npm\"\ntype = \"npm\"\n",
+            ])
+            .unwrap();
+        let keys = parser.restart_keys(&before, &after).unwrap();
+        assert!(keys.contains(&"server.port".to_string()), "{keys:?}");
+        assert!(
+            keys.iter()
+                .all(|k| !k.starts_with("registries[npm]") || k.contains('.')),
+            "{keys:?}"
+        );
     }
 
     #[test]

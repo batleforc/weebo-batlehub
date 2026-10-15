@@ -255,7 +255,6 @@ async fn run_once(
             None,
         )));
     };
-    let external = &instance.spec.external;
     let pods = ctx
         .gateways
         .pod_gateways(&bound)
@@ -264,12 +263,13 @@ async fn run_once(
     let held = (instance.spec.reload.strategy == ReloadStrategy::Manual)
         .then(|| instance.status.as_ref()?.pending_config_hash.clone())
         .flatten();
-    let rendered = if plan.action == MaintenanceAction::ConfigValidate && external.manage_config {
-        let (rendered, _) = super::local_instance::render(&instance, &bound, ctx).await?;
-        Some(rendered.map(|r| r.document))
-    } else {
-        None
-    };
+    let rendered =
+        if plan.action == MaintenanceAction::ConfigValidate && instance.spec.manages_config() {
+            let (rendered, _) = super::local_instance::render(&instance, &bound, ctx).await?;
+            Some(rendered.map(|r| r.document))
+        } else {
+            None
+        };
     let approver = AnnotateInstance {
         api: Api::namespaced(ctx.client.clone(), bound.namespace.as_deref().unwrap_or("")),
         name: bound.name.clone(),
@@ -277,7 +277,7 @@ async fn run_once(
     let target = Target {
         gateway: access.gateway.as_ref(),
         pods,
-        manage_config: external.manage_config,
+        manage_config: instance.spec.manages_config(),
         held,
         rendered,
         approver: &approver,

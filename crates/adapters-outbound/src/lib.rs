@@ -12,6 +12,7 @@ pub mod gateway_factory;
 pub mod instances;
 mod redact;
 pub mod sources;
+pub mod workloads;
 
 pub use admin_gateway::HttpAdminGateway;
 pub use config_parser::BatleHubConfigParser;
@@ -19,3 +20,4 @@ pub use dependents::ClusterDependents;
 pub use gateway_factory::HttpGatewayFactory;
 pub use instances::LocalInstanceDirectory;
 pub use sources::KubeConfigSources;
+pub use workloads::KubeWorkloads;

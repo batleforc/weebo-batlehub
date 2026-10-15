@@ -184,7 +184,7 @@ fn local_instance(name: &str) -> LocalInstance {
     LocalInstance::new(
         name,
         LocalInstanceSpec {
-            external: ExternalInstance {
+            external: Some(ExternalInstance {
                 url: "https://batlehub.example".into(),
                 admin_token_secret_ref: LocalSecretKeyRef {
                     name: "token".into(),
@@ -193,7 +193,8 @@ fn local_instance(name: &str) -> LocalInstance {
                 tls: Default::default(),
                 manage_config: false,
                 pod_selector: None,
-            },
+            }),
+            managed: None,
             config: Default::default(),
             config_layers: vec![],
             reload: Default::default(),
@@ -216,6 +217,8 @@ fn ctx(operator: &Client, scope: WatchScope) -> (Arc<Ctx>, Arc<Health>) {
         instances: instances.clone(),
         registries: instances,
         dependents: Arc::new(FakeDependents::default()),
+        workloads: Arc::new(application::test_support::FakeWorkloads::default()),
+        operator_namespace: None,
         config: Arc::new(FakeConfigParser),
         sources: Arc::new(FakeSources::default()),
         recorder: Recorder::new(

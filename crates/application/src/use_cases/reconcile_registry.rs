@@ -30,7 +30,7 @@ pub fn unrendered_outcome(
             .on(bound),
         );
     };
-    if !instance.spec.external.manage_config {
+    if !instance.spec.manages_config() {
         return Some(
             Outcome::failed(domain::Failure::new(
                 ReasonCode::InstanceConfigUnmanaged,
@@ -104,7 +104,7 @@ mod tests {
         LocalInstance::new(
             "hub",
             LocalInstanceSpec {
-                external: ExternalInstance {
+                external: Some(ExternalInstance {
                     url: "http://hub".into(),
                     admin_token_secret_ref: LocalSecretKeyRef {
                         name: "t".into(),
@@ -113,7 +113,8 @@ mod tests {
                     tls: Default::default(),
                     manage_config,
                     pod_selector: None,
-                },
+                }),
+                managed: None,
                 config: Default::default(),
                 config_layers: vec![],
                 reload: Default::default(),

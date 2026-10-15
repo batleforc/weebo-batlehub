@@ -10,3 +10,16 @@ misconfigurations:
       Secrets are read by name, never listed or watched, and only replaced
       or deleted when the operator owns them (the kit's managed-by label
       and owner annotation).
+  - id: KSV-0056
+    paths:
+      - deploy/charts/weebo-batlehub/templates/operator.yaml
+    statement: >-
+      A managed BatleHubLocalInstance is deployed by the operator: its
+      Service, Ingress and NetworkPolicy are among the objects it writes,
+      in the instance's namespace only, each with an owner reference to
+      the instance. An existing object of the same name the operator
+      doesn't own (no owner reference, no app.kubernetes.io/managed-by
+      label) is never written (OwnedObjectConflict), so the verbs can't
+      redirect anyone else's traffic or loosen anyone else's policy;
+      who may create a managed instance in a namespace is the namespaced
+      RBAC on the CR.

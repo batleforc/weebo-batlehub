@@ -16,6 +16,7 @@ CR is deleted.
 | `Ready` turns `True`, or stays `True` with another reason | `Normal` | `Reconciled` | `Reconcile` | the condition's message |
 | An advisory condition appears or changes | `Normal` | `RestartRequired`, `ConfigHeld`, `ConfigWarnings`, `UnresolvedPlaceholders`, `ConfigInvalidLenient`, `RegistrySelectorIgnored`, `TokenReviewUnavailable`, `RegistrySuspended`, `MaintenanceRunning`, `MaintenanceSuspended`, `SuspiciousGrant`, `ExemptionExpired` | `Reconcile` | its message |
 | An advisory condition goes away | `Normal` | its code | `Reconcile` | `<type> no longer applies: <message>` |
+| A new configuration was rolled out by restarting the pods. | `Normal` | `ConfigRolledOut` | `Reconcile` | what happened, with the remote object's id |
 | The instance reloaded a new configuration. | `Normal` | `ConfigReloaded` | `Reconcile` | what happened, with the remote object's id |
 | A maintenance run started. | `Normal` | `MaintenanceStarted` | `Reconcile` | what happened, with the remote object's id |
 | The finalizer revoked what the CR wrote in BatleHub. | `Normal` | `Revoked` | `Cleanup` | what happened, with the remote object's id |

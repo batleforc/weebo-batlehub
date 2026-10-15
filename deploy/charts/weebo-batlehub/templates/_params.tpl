@@ -56,6 +56,25 @@ clusterRules:
   - apiGroups: [""]
     resources: [pods]
     verbs: [list]
+  # Managed instances: the objects the operator deploys (server-side apply,
+  # each read first to never take over someone else's), and their
+  # Deployments watched (labelled app.kubernetes.io/managed-by) to follow
+  # a rollout.
+  - apiGroups: [apps]
+    resources: [deployments]
+    verbs: [get, list, watch, create, patch, delete]
+  - apiGroups: [""]
+    resources: [services, serviceaccounts, persistentvolumeclaims]
+    verbs: [get, create, patch, delete]
+  - apiGroups: [policy]
+    resources: [poddisruptionbudgets]
+    verbs: [get, create, patch, delete]
+  - apiGroups: [networking.k8s.io]
+    resources: [ingresses, networkpolicies]
+    verbs: [get, create, patch, delete]
+  - apiGroups: [autoscaling]
+    resources: [horizontalpodautoscalers]
+    verbs: [get, create, patch, delete]
   # A single maintenance run is deleted ttlSecondsAfterFinished after it
   # finished (the kit grants its kinds no delete).
   - apiGroups: [batlehub.weebo.io]

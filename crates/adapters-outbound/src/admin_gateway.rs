@@ -421,6 +421,46 @@ impl AdminGateway for HttpAdminGateway {
         }
     }
 
+    /// `POST /api/v1/admin/config/reload` (`config:write`): BatleHub reads
+    /// its files and applies them — or the pending its watcher staged from
+    /// them. Bytes it has already tried leave nothing to apply: 400 "no
+    /// pending reload".
+    async fn reload(&self) -> Result<bool, GatewayError> {
+        const ENDPOINT: &str = "/api/v1/admin/config/reload";
+        let (status, body) = self
+            .raw(
+                reqwest::Method::POST,
+                &["api", "v1", "admin", "config", "reload"],
+                &[],
+                None,
+            )
+            .await?;
+        if status.is_success() {
+            return Ok(true);
+        }
+        let message = serde_json::from_str::<Value>(&body)
+            .ok()
+            .and_then(|v| v.get("message")?.as_str().map(String::from))
+            .unwrap_or_default();
+        match status {
+            StatusCode::BAD_REQUEST if message == "no pending reload" => Ok(false),
+            StatusCode::BAD_REQUEST if message.contains("expired") => {
+                Err(GatewayError::NoPending(format!("{ENDPOINT}: {message}")))
+            }
+            StatusCode::BAD_REQUEST => Err(GatewayError::Rejected(format!(
+                "{ENDPOINT}: {}",
+                without_source(&message)
+                    .chars()
+                    .take(BODY_EXCERPT * 4)
+                    .collect::<String>()
+            ))),
+            StatusCode::SERVICE_UNAVAILABLE if body.to_lowercase().contains("hot reload") => Err(
+                GatewayError::HotReloadDisabled(format!("{ENDPOINT}: {message}")),
+            ),
+            status => Err(unexpected_status(status, &body)),
+        }
+    }
+
     /// `GET /api/v1/admin/health` (`system:read`): one entry per registry.
     /// Only `registry` is read: the generated model decodes every
     /// statistic, which this has no use for.

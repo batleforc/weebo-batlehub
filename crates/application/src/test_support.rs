@@ -336,6 +336,22 @@ impl AdminGateway for FakeGateway {
         Ok(())
     }
 
+    /// Reads the file: loads it when its bytes differ from the last
+    /// attempt (refused like a stage), else nothing to apply.
+    async fn reload(&self) -> Result<bool, GatewayError> {
+        self.call("reload")?;
+        let file = self.file();
+        let mut last = self.last_attempt.lock().unwrap();
+        if last.as_deref() == Some(file.as_str()) {
+            return Ok(false);
+        }
+        *last = Some(file.clone());
+        drop(last);
+        self.judge(&file)?;
+        *self.loaded.lock().unwrap() = Some(file);
+        Ok(true)
+    }
+
     async fn registry_names(&self) -> Result<Vec<String>, GatewayError> {
         self.claim_call("registries")?;
         Ok(self.registries.lock().unwrap().clone())
@@ -682,6 +698,25 @@ impl ConfigParser for FakeConfigParser {
         }
     }
 
+    /// A changed `restart` key (`"restart": …` at the top level) is the
+    /// one restart key.
+    fn restart_keys(&self, before: &str, after: &str) -> Result<Vec<String>, ConfigError> {
+        let read = |doc: &str| {
+            serde_json::from_str::<Value>(doc)
+                .ok()
+                .and_then(|v| v.get("restart").cloned())
+        };
+        Ok(if read(before) != read(after) {
+            vec!["restart".into()]
+        } else {
+            Vec::new()
+        })
+    }
+
+    fn hash_token(&self, token: &str) -> String {
+        format!("hashed:{token}")
+    }
+
     fn token_check(&self, document: &str, token: &str) -> TokenCheck {
         if document.contains(token) {
             TokenCheck::Accepted
@@ -744,5 +779,160 @@ impl ConfigSources for FakeSources {
 
     async fn registries(&self) -> Result<Vec<RegistryView>, String> {
         Ok(self.registries.lock().unwrap().clone())
+    }
+}
+
+/// The Kubernetes objects of managed instances, in memory: applied by
+/// name, a conflict for the names set foreign, a `Deployment` whose
+/// rollout completes when told (or at once).
+#[derive(Default)]
+pub struct FakeWorkloads {
+    objects: Mutex<BTreeMap<(String, String), crate::ports::OwnedObject>>,
+    foreign: Mutex<Vec<(String, String)>>,
+    tokens: Mutex<BTreeMap<String, String>>,
+    /// Rollouts complete as soon as applied unless held.
+    hold_rollout: Mutex<bool>,
+    removed: Mutex<Vec<String>>,
+}
+
+impl FakeWorkloads {
+    /// `kind/name` exists and isn't the operator's.
+    pub fn foreign(&self, kind: &str, name: &str) {
+        self.foreign
+            .lock()
+            .unwrap()
+            .push((kind.into(), name.into()));
+    }
+
+    pub fn object(&self, kind: &str, name: &str) -> Option<crate::ports::OwnedObject> {
+        self.objects
+            .lock()
+            .unwrap()
+            .get(&(kind.into(), name.into()))
+            .cloned()
+    }
+
+    pub fn hold_rollout(&self, hold: bool) {
+        *self.hold_rollout.lock().unwrap() = hold;
+    }
+
+    pub fn removed(&self) -> Vec<String> {
+        self.removed.lock().unwrap().clone()
+    }
+
+    /// The configuration file in `<name>-config`.
+    pub fn config_file(&self, name: &str) -> Option<String> {
+        let secret = self.object("Secret", &format!("{name}-config"))?;
+        let encoded = secret.manifest["data"][api::managed::CONFIG_KEY]
+            .as_str()?
+            .to_string();
+        let bytes: k8s_openapi::ByteString = serde_json::from_value(Value::String(encoded)).ok()?;
+        String::from_utf8(bytes.0).ok()
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::ports::Workloads for FakeWorkloads {
+    async fn apply(
+        &self,
+        _owner: &crate::ports::Owner,
+        objects: &[crate::ports::OwnedObject],
+    ) -> Result<(), crate::ports::WorkloadError> {
+        for object in objects {
+            let key = (object.kind.clone(), object.name.clone());
+            if self.foreign.lock().unwrap().contains(&key) {
+                return Err(crate::ports::WorkloadError::Conflict(format!(
+                    "{} {} exists and isn't the operator's",
+                    object.kind, object.name
+                )));
+            }
+            let mut objects = self.objects.lock().unwrap();
+            if object.create_only && objects.contains_key(&key) {
+                continue;
+            }
+            objects.insert(key, object.clone());
+        }
+        Ok(())
+    }
+
+    async fn remove(
+        &self,
+        _owner: &crate::ports::Owner,
+        _api_version: &str,
+        kind: &str,
+        name: &str,
+    ) -> Result<(), crate::ports::WorkloadError> {
+        if self
+            .objects
+            .lock()
+            .unwrap()
+            .remove(&(kind.into(), name.into()))
+            .is_some()
+        {
+            self.removed.lock().unwrap().push(format!("{kind}/{name}"));
+        }
+        Ok(())
+    }
+
+    async fn operator_token(
+        &self,
+        _owner: &crate::ports::Owner,
+        name: &str,
+    ) -> Result<String, crate::ports::WorkloadError> {
+        if self
+            .foreign
+            .lock()
+            .unwrap()
+            .contains(&("Secret".into(), name.into()))
+        {
+            return Err(crate::ports::WorkloadError::Conflict(format!(
+                "Secret {name} exists and isn't the operator's"
+            )));
+        }
+        Ok(self
+            .tokens
+            .lock()
+            .unwrap()
+            .entry(name.into())
+            .or_insert_with(|| format!("token-of-{name}"))
+            .clone())
+    }
+
+    async fn secret_text(
+        &self,
+        _owner: &crate::ports::Owner,
+        name: &str,
+        _key: &str,
+    ) -> Result<Option<String>, crate::ports::WorkloadError> {
+        Ok(name
+            .strip_suffix("-config")
+            .and_then(|instance| self.config_file(instance)))
+    }
+
+    async fn rollout(
+        &self,
+        _owner: &crate::ports::Owner,
+        name: &str,
+    ) -> Result<Option<crate::ports::Rollout>, crate::ports::WorkloadError> {
+        let Some(deployment) = self.object("Deployment", name) else {
+            return Ok(None);
+        };
+        let spec = &deployment.manifest["spec"];
+        let replicas = spec["replicas"].as_i64().unwrap_or(1) as i32;
+        let ready = if *self.hold_rollout.lock().unwrap() {
+            0
+        } else {
+            replicas
+        };
+        Ok(Some(crate::ports::Rollout {
+            replicas,
+            updated: ready,
+            available: ready,
+            observed: true,
+            config_hash: spec["template"]["metadata"]["annotations"]
+                [api::managed::CONFIG_HASH_ANNOTATION]
+                .as_str()
+                .map(String::from),
+        }))
     }
 }

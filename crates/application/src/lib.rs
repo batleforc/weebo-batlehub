@@ -5,6 +5,7 @@
 pub mod cron;
 pub mod ports;
 pub mod use_cases;
+pub mod workload;
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;

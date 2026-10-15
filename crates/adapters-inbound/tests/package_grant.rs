@@ -30,7 +30,7 @@ fn instance() -> LocalInstance {
     LocalInstance::new(
         "hub",
         LocalInstanceSpec {
-            external: ExternalInstance {
+            external: Some(ExternalInstance {
                 url: "http://batlehub.invalid".into(),
                 admin_token_secret_ref: LocalSecretKeyRef {
                     name: "token".into(),
@@ -39,7 +39,8 @@ fn instance() -> LocalInstance {
                 tls: Default::default(),
                 manage_config: false,
                 pod_selector: None,
-            },
+            }),
+            managed: None,
             config: Value::Null,
             config_layers: vec![],
             reload: Default::default(),
@@ -84,6 +85,8 @@ fn ctx(client: &Client, gateway: Arc<FakeGateway>) -> Arc<Ctx> {
         instances: instances.clone(),
         registries: instances.clone(),
         dependents: Arc::new(ClusterDependents::new(client.clone(), None)),
+        workloads: Arc::new(application::test_support::FakeWorkloads::default()),
+        operator_namespace: None,
         config: Arc::new(BatleHubConfigParser::default()),
         sources: Arc::new(KubeConfigSources::new(client.clone(), instances)),
         recorder: Recorder::new(
