@@ -30,7 +30,7 @@ use kube::Client;
 use kube::api::{Api, ObjectMeta, PostParams};
 use kube::runtime::events::{Recorder, Reporter};
 use testkit::envtest::EnvTestCluster;
-use testkit::{FakeConfigParser, FakeDependents, FakeGateway, StaticGatewayFactory};
+use testkit::{FakeConfigParser, FakeDependents, FakeGateway, FakeSources, StaticGatewayFactory};
 use weebo_kit_runtime::{Health, WatchScope};
 
 const TIMEOUT: Duration = Duration::from_secs(15);
@@ -38,7 +38,7 @@ const POLL: Duration = Duration::from_millis(200);
 const GROUP: &str = "batlehub.weebo.io";
 const OPERATOR_NS: &str = "operator";
 const OPERATOR_SA: &str = "operator";
-const NAMESPACED_KINDS: &[&str] = &["batlehublocalinstances"];
+const NAMESPACED_KINDS: &[&str] = &["batlehublocalinstances", "batlehubregistries"];
 
 fn kind_rules(kinds: &[&str]) -> Vec<PolicyRule> {
     let rule = |suffix: &str, verbs: &[&str]| PolicyRule {
@@ -54,8 +54,20 @@ fn kind_rules(kinds: &[&str]) -> Vec<PolicyRule> {
     ]
 }
 
+/// The kit's ClusterRole (Secrets, Events) and the chart's
+/// `params.clusterRules`, which stay cluster-wide with `watch.namespace`.
 fn secrets_and_events() -> Vec<PolicyRule> {
     vec![
+        PolicyRule {
+            api_groups: Some(vec!["".into()]),
+            resources: Some(vec![
+                "configmaps".into(),
+                "pods".into(),
+                "namespaces".into(),
+            ]),
+            verbs: ["get", "list", "watch"].map(String::from).to_vec(),
+            ..Default::default()
+        },
         PolicyRule {
             api_groups: Some(vec!["".into()]),
             resources: Some(vec!["secrets".into()]),
@@ -179,7 +191,13 @@ fn local_instance(name: &str) -> LocalInstance {
                     key: "token".into(),
                 },
                 tls: Default::default(),
+                manage_config: false,
+                pod_selector: None,
             },
+            config: Default::default(),
+            config_layers: vec![],
+            reload: Default::default(),
+            registry_selector: Default::default(),
         },
     )
 }
@@ -195,9 +213,11 @@ fn ctx(operator: &Client, scope: WatchScope) -> (Arc<Ctx>, Arc<Health>) {
     let ctx = Arc::new(Ctx {
         client: operator.clone(),
         gateways: Arc::new(StaticGatewayFactory::new(Arc::new(FakeGateway::default()))),
-        instances,
+        instances: instances.clone(),
+        registries: instances,
         dependents: Arc::new(FakeDependents::default()),
         config: Arc::new(FakeConfigParser),
+        sources: Arc::new(FakeSources::default()),
         recorder: Recorder::new(
             operator.clone(),
             Reporter {
@@ -248,7 +268,11 @@ async fn a_namespaced_scope_runs_on_namespaced_rbac_and_sees_only_its_instances(
         })
         .unwrap();
     let (ctx, health) = ctx(&operator, scope);
-    tokio::spawn(controller::local_instance::run(operator.clone(), ctx));
+    tokio::spawn(controller::local_instance::run(
+        operator.clone(),
+        ctx.clone(),
+    ));
+    tokio::spawn(controller::registry::run(operator.clone(), ctx));
 
     let pp = PostParams::default();
     let shard_a = [("shard", "a")];

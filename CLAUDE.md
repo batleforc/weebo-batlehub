@@ -28,8 +28,9 @@ non-trivial change; this file is only an index.
 - `crates/batlehub-client` is generated (`task gen:client` from
   `spec/batlehub-v*.json` + `spec/patches/*.jq`): never edit it by hand.
 - BatleHub's configuration is validated by BatleHub's own parser
-  (`batlehub-config`), never a copy: M2 waits for batlehub v1.5.0
-  (`merge_layers`, `validate_layers`, `RESTART_KEYS`, plan D4/D8).
+  (`batlehub-config`, pinned on the BatleHub tag the operator targets,
+  moved by `task gen:bump`), never a copy: `merge_layers`,
+  `validate_layers`, `reload_keys` (BatleHub's RFC 0037, plan D4/D8).
 - `kube`/`k8s-openapi` versions are the kit's; the kit is pinned by tag
   everywhere (`task kit:sync TAG=…` moves them all).
 - Generated artifacts (`task recu`): the client, `deploy/crd/`, the chart's

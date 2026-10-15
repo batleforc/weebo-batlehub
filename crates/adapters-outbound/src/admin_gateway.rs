@@ -8,11 +8,15 @@
 
 use std::time::Duration;
 
-use application::ports::{AdminGateway, ConfigWarning, GatewayError, InstanceInfo};
+use application::ports::{
+    AdminGateway, ConfigWarning, GatewayError, InstanceInfo, PendingSource, ReloadCheck,
+};
 use batlehub_client::apis::configuration::Configuration;
 use batlehub_client::apis::{Error as ClientError, back_office_api, front_office_api};
-use batlehub_client::models::Role;
+use batlehub_client::models::{ConfigFromContentRequest, ReloadSource, Role};
 use reqwest::{Client, StatusCode, Url};
+
+use crate::redact::without_source;
 use serde::Deserialize;
 
 /// Per-request timeout: a hung instance must not hold a reconcile forever.
@@ -137,6 +141,46 @@ fn unexpected_status(status: StatusCode, body: &str) -> GatewayError {
     }
 }
 
+/// A configuration endpoint's answer, by what BatleHub says rather than
+/// the status alone — a proxy in front of it answers 503 or 404 too: 400
+/// is the instance refusing the configuration, a 503 saying hot reload is
+/// disabled is that, a 404/409 about the pending reload is nothing (or
+/// nothing live) staged; anything else as [`client_error`]. A refusal may
+/// quote a configuration line (from a Secret layer): that line goes.
+fn config_error<T>(endpoint: &str, err: ClientError<T>) -> GatewayError {
+    match err {
+        ClientError::ResponseError(response) => {
+            let body = response.content.to_lowercase();
+            // BatleHub's `{"error", "message"}`: the message decoded (a
+            // quoted line hides behind `\n` escapes otherwise).
+            let message = serde_json::from_str::<serde_json::Value>(&response.content)
+                .ok()
+                .and_then(|v| v.get("message")?.as_str().map(String::from))
+                .unwrap_or_else(|| response.content.clone());
+            let why = || {
+                format!(
+                    "{endpoint}: {}",
+                    without_source(&message)
+                        .chars()
+                        .take(BODY_EXCERPT * 4)
+                        .collect::<String>()
+                )
+            };
+            match response.status {
+                StatusCode::BAD_REQUEST => GatewayError::Rejected(why()),
+                StatusCode::SERVICE_UNAVAILABLE if body.contains("hot reload is disabled") => {
+                    GatewayError::HotReloadDisabled(why())
+                }
+                StatusCode::NOT_FOUND | StatusCode::CONFLICT if body.contains("pending reload") => {
+                    GatewayError::NoPending(why())
+                }
+                status => unexpected_status(status, &response.content),
+            }
+        }
+        other => client_error(endpoint, other),
+    }
+}
+
 fn client_error<T>(endpoint: &str, err: ClientError<T>) -> GatewayError {
     match err {
         ClientError::ResponseError(response) => {
@@ -176,6 +220,81 @@ impl AdminGateway for HttpAdminGateway {
                 message: w.message,
             })
             .collect())
+    }
+
+    /// `GET /api/v1/admin/config/content` (`config:read`). A read-only
+    /// file (hot reload disabled) can't take a push.
+    async fn config_content(&self) -> Result<String, GatewayError> {
+        const ENDPOINT: &str = "/api/v1/admin/config/content";
+        let response = back_office_api::get_config_content(&self.config)
+            .await
+            .map_err(|e| client_error(ENDPOINT, e))?;
+        if response.is_readonly {
+            return Err(GatewayError::HotReloadDisabled(format!(
+                "{ENDPOINT}: the configuration is read-only (BATLEHUB_DISABLE_HOT_RELOAD)"
+            )));
+        }
+        Ok(response.content)
+    }
+
+    /// `POST /api/v1/admin/config/validate` (`config:read`): a dry run.
+    async fn validate_config(&self, content: &str) -> Result<ReloadCheck, GatewayError> {
+        const ENDPOINT: &str = "/api/v1/admin/config/validate";
+        let params = back_office_api::ValidateConfigContentParams {
+            config_from_content_request: ConfigFromContentRequest::new(content.to_string()),
+        };
+        let response = back_office_api::validate_config_content(&self.config, params)
+            .await
+            .map_err(|e| config_error(ENDPOINT, e))?;
+        Ok(ReloadCheck {
+            restart_required: response.diff.restart_required.unwrap_or_default(),
+        })
+    }
+
+    /// `POST /api/v1/admin/config/from-content` (`config:write`).
+    async fn stage_config(&self, content: &str) -> Result<bool, GatewayError> {
+        const ENDPOINT: &str = "/api/v1/admin/config/from-content";
+        let params = back_office_api::LoadConfigFromContentParams {
+            config_from_content_request: ConfigFromContentRequest::new(content.to_string()),
+        };
+        let response = back_office_api::load_config_from_content(&self.config, params)
+            .await
+            .map_err(|e| config_error(ENDPOINT, e))?;
+        Ok(response.pending_created)
+    }
+
+    /// `POST /api/v1/admin/config/pending/apply` (`config:write`).
+    async fn apply_pending(&self) -> Result<(), GatewayError> {
+        back_office_api::apply_pending_reload(&self.config)
+            .await
+            .map(|_| ())
+            .map_err(|e| config_error("/api/v1/admin/config/pending/apply", e))
+    }
+
+    /// `GET /api/v1/admin/config/pending` (`config:read`): 404 is none.
+    async fn pending(&self) -> Result<Option<PendingSource>, GatewayError> {
+        match back_office_api::get_pending_reload(&self.config).await {
+            Ok(snapshot) => Ok(Some(match snapshot.source {
+                ReloadSource::FileWatcher => PendingSource::FileWatcher,
+                ReloadSource::AdminRequest => PendingSource::AdminRequest,
+            })),
+            Err(e) => match config_error("/api/v1/admin/config/pending", e) {
+                GatewayError::NoPending(_) => Ok(None),
+                other => Err(other),
+            },
+        }
+    }
+
+    /// `DELETE /api/v1/admin/config/pending` (`config:write`): none is
+    /// fine.
+    async fn discard_pending(&self) -> Result<(), GatewayError> {
+        match back_office_api::discard_pending_reload(&self.config).await {
+            Ok(()) => Ok(()),
+            Err(e) => match config_error("/api/v1/admin/config/pending", e) {
+                GatewayError::NoPending(_) => Ok(()),
+                other => Err(other),
+            },
+        }
     }
 }
 

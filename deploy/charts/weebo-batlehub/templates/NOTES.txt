@@ -21,7 +21,16 @@
 
    `kubectl get bhli` shows whether it answers (Ready, Reason).
 
-2. Creating a BatleHubLocalInstance sends a Secret of its namespace to the
+2. With `spec.external.manageConfig: true` the operator pushes the
+   configuration rendered from `spec.config`, `spec.configLayers` and the
+   BatleHubRegistry objects it accepts (`kubectl get bhr`). A Secret whose
+   content is sent to BatleHub must be labelled for it:
+
+     kubectl -n <namespace> label secret <name> batlehub.weebo.io/credential=true
+
+   Guide: https://batleforc.github.io/weebo-batlehub/docs/guides/manage-config
+
+3. Creating a BatleHubLocalInstance sends a Secret of its namespace to the
    URL it names: grant the kind like you grant pods.
 
 Argo CD: paste the health check of the

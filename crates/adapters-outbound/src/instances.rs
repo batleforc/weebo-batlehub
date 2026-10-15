@@ -10,12 +10,14 @@
 //! label selector and the namespace it is limited to.
 
 use api::LocalInstance;
-use application::ports::{BoundInstance, InstanceDirectory, InstanceError};
+use api::local_instance::NamespacesFrom;
+use application::ports::{BoundInstance, InstanceDirectory, InstanceError, RegistryResolver};
+use k8s_openapi::api::core::v1::Namespace;
 use kube::api::{Api, ListParams};
 use kube::core::{Selector, SelectorExt};
 use kube::runtime::reflector::Store;
 use kube::{Client, ResourceExt};
-use weebo_kit_api::{InstanceKind, InstanceRef};
+use weebo_kit_api::{InstanceKind, InstanceRef, SharedWith};
 use weebo_kit_application::instances::{Candidate, Candidates, Request, resolve_bound};
 
 /// How long a reconcile waits for the reflector to finish its first list
@@ -129,6 +131,86 @@ impl LocalInstanceDirectory {
     }
 }
 
+/// What an instance shares with the registries of other namespaces: its
+/// `registrySelector.namespaces` (`Same`: none, `All`: an empty selector,
+/// `Selector`: that one).
+pub fn registry_sharing(instance: &LocalInstance) -> Option<SharedWith> {
+    let namespaces = &instance.spec.registry_selector.namespaces;
+    let selector = match namespaces.from {
+        NamespacesFrom::Same => return None,
+        NamespacesFrom::All => Default::default(),
+        NamespacesFrom::Selector => namespaces.selector.clone()?,
+    };
+    Some(SharedWith {
+        namespace_selector: Some(selector),
+        ..Default::default()
+    })
+}
+
+impl LocalInstanceDirectory {
+    async fn resolve_with(
+        &self,
+        cr_namespace: Option<&str>,
+        instance_ref: Option<&InstanceRef>,
+        recorded: Option<&BoundInstance>,
+        sharing: fn(&LocalInstance) -> Option<SharedWith>,
+    ) -> Result<BoundInstance, InstanceError> {
+        let request = Request {
+            cr_namespace,
+            instance_ref,
+        };
+        let mut candidates = Candidates {
+            watched_namespace: self.watched_namespace.as_deref(),
+            ..Default::default()
+        };
+        let namespaces = [cr_namespace, request.foreign_namespace()];
+        let mut needs_labels = false;
+        for namespace in namespaces.into_iter().flatten() {
+            for instance in self
+                .instances(namespace)
+                .await
+                .map_err(InstanceError::Kubernetes)?
+            {
+                let shared = sharing(&instance);
+                needs_labels |= Some(namespace) != cr_namespace
+                    && shared
+                        .as_ref()
+                        .is_some_and(|s| s.namespace_selector.is_some());
+                candidates
+                    .local
+                    .push(Candidate::local(namespace, instance.name_any(), shared));
+            }
+        }
+        if needs_labels && let Some(namespace) = cr_namespace {
+            candidates.cr_namespace_labels = Api::<Namespace>::all(self.client.clone())
+                .get_opt(namespace)
+                .await
+                .map_err(|e| {
+                    InstanceError::Kubernetes(format!("reading namespace {namespace}: {e}"))
+                })?
+                .map(|ns| ns.metadata.labels.unwrap_or_default());
+        }
+        Ok(resolve_bound(request, &candidates, recorded)?)
+    }
+}
+
+#[async_trait::async_trait]
+impl RegistryResolver for LocalInstanceDirectory {
+    async fn resolve_registry(
+        &self,
+        namespace: &str,
+        instance_ref: Option<&InstanceRef>,
+        recorded: Option<&BoundInstance>,
+    ) -> Result<BoundInstance, InstanceError> {
+        self.resolve_with(Some(namespace), instance_ref, recorded, registry_sharing)
+            .await
+    }
+
+    async fn instance(&self, bound: &BoundInstance) -> Result<Option<LocalInstance>, String> {
+        self.get(bound).await
+    }
+}
+
 #[async_trait::async_trait]
 impl InstanceDirectory for LocalInstanceDirectory {
     async fn resolve(
@@ -137,28 +219,71 @@ impl InstanceDirectory for LocalInstanceDirectory {
         instance_ref: Option<&InstanceRef>,
         recorded: Option<&BoundInstance>,
     ) -> Result<BoundInstance, InstanceError> {
-        let request = Request {
-            cr_namespace,
-            instance_ref,
-        };
         // A BatleHubLocalInstance shares itself with no other namespace in
-        // v1alpha1: only the CR's own namespace has candidates, and an
-        // instanceRef naming another namespace resolves to nothing it may
-        // use.
-        let mut candidates = Candidates {
-            watched_namespace: self.watched_namespace.as_deref(),
+        // v1alpha1 (but with registries, `resolve_registry`): only the CR's
+        // own namespace has candidates, and an instanceRef naming another
+        // namespace resolves to nothing it may use.
+        self.resolve_with(cr_namespace, instance_ref, recorded, |_| None)
+            .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use api::local_instance::{
+        ExternalInstance, LocalInstanceSpec, LocalSecretKeyRef, RegistryNamespaces,
+        RegistrySelector,
+    };
+
+    use super::*;
+
+    fn instance(
+        from: NamespacesFrom,
+        selector: Option<api::config::LabelSelector>,
+    ) -> LocalInstance {
+        LocalInstance::new(
+            "hub",
+            LocalInstanceSpec {
+                external: ExternalInstance {
+                    url: "http://hub".into(),
+                    admin_token_secret_ref: LocalSecretKeyRef {
+                        name: "t".into(),
+                        key: "token".into(),
+                    },
+                    tls: Default::default(),
+                    manage_config: true,
+                    pod_selector: None,
+                },
+                config: Default::default(),
+                config_layers: vec![],
+                reload: Default::default(),
+                registry_selector: RegistrySelector {
+                    selector: None,
+                    namespaces: RegistryNamespaces { from, selector },
+                },
+            },
+        )
+    }
+
+    #[test]
+    fn registries_of_other_namespaces_need_the_instance_s_consent() {
+        assert_eq!(
+            registry_sharing(&instance(NamespacesFrom::Same, None)),
+            None
+        );
+        let all = registry_sharing(&instance(NamespacesFrom::All, None)).unwrap();
+        assert_eq!(all.namespace_selector, Some(Default::default()));
+        let sel = api::config::LabelSelector {
+            match_labels: Some([("team".to_string(), "a".to_string())].into()),
             ..Default::default()
         };
-        let namespaces = [cr_namespace, request.foreign_namespace()];
-        for namespace in namespaces.into_iter().flatten() {
-            candidates.local.extend(
-                self.instances(namespace)
-                    .await
-                    .map_err(InstanceError::Kubernetes)?
-                    .iter()
-                    .map(|i| Candidate::local(namespace, i.name_any(), None)),
-            );
-        }
-        Ok(resolve_bound(request, &candidates, recorded)?)
+        let chosen =
+            registry_sharing(&instance(NamespacesFrom::Selector, Some(sel.clone()))).unwrap();
+        assert_eq!(chosen.namespace_selector, Some(sel));
+        // CEL requires the selector; without it, nothing is shared.
+        assert_eq!(
+            registry_sharing(&instance(NamespacesFrom::Selector, None)),
+            None
+        );
     }
 }

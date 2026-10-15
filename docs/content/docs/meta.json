@@ -5,6 +5,7 @@
     "---Getting started---",
     "guides/install",
     "guides/connect-instance",
+    "guides/manage-config",
     "---Reference---",
     "...crds",
     "reference"

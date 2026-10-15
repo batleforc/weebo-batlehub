@@ -6,9 +6,13 @@ version: "3"
 
 vars:
   CLUSTER: weebo-batlehub-e2e
-  IMAGE: weebo-batlehub-operator:e2e
-  # docker or podman (kind picks podman with KIND_EXPERIMENTAL_PROVIDER).
+  # docker or podman (kind then uses podman: KIND_EXPERIMENTAL_PROVIDER).
   ENGINE: '{{.ENGINE | default "docker"}}'
+  # podman names a local image localhost/<name>: so does the cluster.
+  IMAGE: '{{if eq .ENGINE "podman"}}localhost/{{end}}weebo-batlehub-operator:e2e'
+
+env:
+  KIND_EXPERIMENTAL_PROVIDER: '{{if eq .ENGINE "podman"}}podman{{end}}'
 
 tasks:
   default:
@@ -30,7 +34,13 @@ tasks:
     desc: "Build the operator image and load it into the kind cluster"
     cmds:
       - "{{.ENGINE}} build -t {{.IMAGE}} -f {{.CONTAINERFILE | default \"Containerfile\"}} ."
-      - mise exec -- kind load docker-image {{.IMAGE}} --name {{.CLUSTER}}
+      # `kind load docker-image` only finds docker's images: an archive
+      # works with both engines.
+      - |
+        archive="$(mktemp --suffix=.tar)"
+        trap 'rm -f "$archive"' EXIT
+        {{.ENGINE}} save -o "$archive" {{.IMAGE}}
+        mise exec -- kind load image-archive "$archive" --name {{.CLUSTER}}
 
   run:
     desc: "Deploy cert-manager and the chart into the kind cluster (upgrading from the last published chart when there is one), then run the smoke (usage: task e2e:run [UPGRADE_FROM=none|X.Y.Z])"

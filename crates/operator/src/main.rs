@@ -6,12 +6,14 @@ use std::fmt::Debug;
 use std::sync::Arc;
 use std::time::Duration;
 
+use adapters_inbound::admission::BatleHubAdmission;
 use adapters_inbound::controller::{self, Ctx, Shutdown};
 use adapters_inbound::webhook;
 use adapters_outbound::{
-    ClusterDependents, HttpGatewayFactory, LocalInstanceDirectory, UnavailableConfigParser,
+    BatleHubConfigParser, ClusterDependents, HttpGatewayFactory, KubeConfigSources,
+    LocalInstanceDirectory,
 };
-use api::LocalInstance;
+use api::{LocalInstance, Registry};
 use futures::StreamExt;
 use kube::api::Api;
 use kube::runtime::events::{Recorder, Reporter};
@@ -98,6 +100,7 @@ async fn run(telemetry: &telemetry::Telemetry) -> anyhow::Result<()> {
     // the scope can't watch.
     let scope = WatchScope::from_env()?;
     scope.ensure::<LocalInstance>()?;
+    scope.ensure::<Registry>()?;
     tracing::info!(
         namespace = ?scope.watched_namespace(),
         selector = ?scope.selector(),
@@ -126,13 +129,26 @@ async fn run(telemetry: &telemetry::Telemetry) -> anyhow::Result<()> {
             .with_store(store),
     );
 
+    let sources = Arc::new(
+        KubeConfigSources::new(client.clone(), instances.clone()).with_scope(
+            scope.watched_namespace().map(String::from),
+            scope.selector().cloned(),
+        ),
+    );
+    let parser = Arc::new(BatleHubConfigParser::default());
+
     let holder_id = std::env::var("HOSTNAME").unwrap_or_else(|_| uuid::Uuid::new_v4().to_string());
     let ctx = Arc::new(Ctx {
         client: client.clone(),
         gateways: Arc::new(HttpGatewayFactory::new(client.clone(), instances.clone())),
-        instances,
-        dependents: Arc::new(ClusterDependents),
-        config: Arc::new(UnavailableConfigParser),
+        instances: instances.clone(),
+        registries: instances,
+        dependents: Arc::new(
+            ClusterDependents::new(client.clone(), scope.watched_namespace().map(String::from))
+                .with_selector(scope.selector().cloned()),
+        ),
+        config: parser.clone(),
+        sources: sources.clone(),
         recorder: Recorder::new(
             client.clone(),
             Reporter {
@@ -145,13 +161,17 @@ async fn run(telemetry: &telemetry::Telemetry) -> anyhow::Result<()> {
         scope: scope.clone(),
     });
 
-    // The HTTPS server (probes, the scope guard, and the admission webhook
-    // once there is one) runs on every replica, before and regardless of leadership: a
+    // The HTTPS server (probes, the scope guard, the admission webhook)
+    // runs on every replica, before and regardless of leadership: a
     // standby must stay ready, and a leader-only webhook would turn every
     // failover into an outage. On shutdown it keeps answering while
     // endpoints drain.
+    let admission = Arc::new(BatleHubAdmission {
+        sources,
+        config: parser,
+    });
     let server = webhook_server::spawn(
-        webhook::router(health.clone(), scope),
+        webhook::router(health.clone(), scope, admission),
         health,
         shutdown.clone(),
     )
@@ -168,7 +188,10 @@ async fn run(telemetry: &telemetry::Telemetry) -> anyhow::Result<()> {
     };
 
     tracing::info!("starting controllers");
-    controller::local_instance::run(client.clone(), ctx.clone()).await;
+    tokio::join!(
+        controller::local_instance::run(client.clone(), ctx.clone()),
+        controller::registry::run(client.clone(), ctx.clone()),
+    );
     // Every controller returns once the shutdown signal arrived and its
     // in-flight reconciles finished: hand the lease over right away
     // instead of making the next leader wait out the TTL.

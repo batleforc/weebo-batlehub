@@ -3,6 +3,8 @@
 //! `ReasonCode`, never a free string.
 
 pub mod reconcile_instance;
+pub mod reconcile_registry;
+pub mod render_config;
 
 use domain::error::ReasonCode;
 use domain::{Advisory, Failure};

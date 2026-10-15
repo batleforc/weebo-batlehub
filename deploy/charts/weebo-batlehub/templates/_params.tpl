@@ -4,26 +4,44 @@ see its README): everything templates/operator.yaml renders that is not a
 value.
 */}}
 {{- define "operator.params" -}}
-{{- /* watch.clusterKinds: false works as long as the operator has no
-rules of its own (clusterRules): the managed mode's (Deployments,
-Services, PVCs…, M4) need the kit to carry rules for the watch Role, or
-this chart to refuse the mode then (spec §7.1, D6). */ -}}
+{{- /* watch.clusterKinds: false renders no ClusterRole, so none of
+clusterRules below: ConfigMap layers, a registry's configFrom ConfigMap
+and external.podSelector then fail (KubernetesApiError), only Secret
+layers and `url` work. This chart can't refuse the mode (the kit renders
+it in its smoke tests): the kit needs rules for the watch Role
+(params.watchRules, spec §7.1, D6, §11.2). */ -}}
 group: batlehub.weebo.io
 versions: [v1alpha1]
 # Every kind the operator watches (ClusterRole).
 kinds:
   - batlehublocalinstances
+  - batlehubregistries
 # The namespaced kinds — all of them, BatleHub has no cluster-scoped kind:
 # what a team may manage (rbac.namespacedExample), and the watch Role's
 # (watch.namespace).
 namespacedKinds:
   - batlehublocalinstances
+  - batlehubregistries
 # The operator reads and writes Secrets in every namespace that has an
 # instance, also limited to one namespace: said explicitly.
 clusterSecrets: true
-# Kinds the admission webhook checks: none until the operator serves
-# `/validate` (a namespace allow-list).
-admitted: []
+# Kinds the admission webhook checks (`/validate`): a configuration
+# BatleHub's parser refuses, a fragment that is not TOML, a placeholder in
+# a registry of another namespace.
+admitted:
+  - batlehublocalinstances
+  - batlehubregistries
+# Reads of the configuration's sources: ConfigMap layers (watched by
+# metadata), the labels of the namespaces registries come from (watched,
+# for registrySelector.namespaces.from: Selector), the proxy pods of
+# `external.podSelector` (listed). No Secret watch (spec D9).
+clusterRules:
+  - apiGroups: [""]
+    resources: [configmaps, namespaces]
+    verbs: [get, list, watch]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [list]
 # The operator's own environment variables.
 env: []
 egress:

@@ -4,19 +4,22 @@ Kubernetes operator driving [BatleHub](https://github.com/batlehub/batlehub)
 (package registry proxy-cache) instances as CRDs, built on
 [weebo-operator-kit](https://github.com/batleforc/weebo-operator-kit).
 
-> **M0 — bootstrap.** The repository, its toolchain, CI and docs are in
-> place; the operator connects a `BatleHubLocalInstance` and checks that
-> it answers and that its token carries the admin role. Nothing is released
-> yet: the first alpha (0.1.0-alpha.1) comes at M2, with configuration
-> management. The design and the milestones are in
-> [`.prompt/plan.md`](.prompt/plan.md).
+> **M2 — configuration management.** The operator connects a
+> `BatleHubLocalInstance`, checks that it answers and that its token
+> carries the admin role, and with `external.manageConfig` pushes the
+> configuration rendered from the CR and its `BatleHubRegistry`s (to each
+> pod with `external.podSelector`), validated by BatleHub's own parser.
+> The first alpha (0.1.0-alpha.1) closes M2. The design and the
+> milestones are in [`.prompt/plan.md`](.prompt/plan.md).
 
 | Kind                    | Scope      | What it does                                                    |
 | ----------------------- | ---------- | --------------------------------------------------------------- |
-| `BatleHubLocalInstance` | Namespaced | A BatleHub instance: its URL and admin token (`external.adminTokenSecretRef`) |
+| `BatleHubLocalInstance` | Namespaced | A BatleHub instance: its URL and admin token (`external.adminTokenSecretRef`), and its configuration (`config`, `configLayers`, `external.manageConfig`) |
+| `BatleHubRegistry`      | Namespaced | One `[[registries]]` entry of an instance, as its own object (possibly from another namespace the instance accepts) |
 
-Planned (see the plan): `BatleHubRegistry`, `BatleHubMaintenance`,
-`BatleHubPackageGrant`, `BatleHubPackagePolicy`.
+Planned (see the plan): `BatleHubMaintenance`, `BatleHubPackageGrant`,
+`BatleHubPackagePolicy`, and the managed mode (the operator deploys
+BatleHub).
 
 The token Secret must be labelled `batlehub.weebo.io/instance-token: "true"`:
 the operator reads Secrets with its own rights and sends the token to the
@@ -33,7 +36,7 @@ Hexagonal, one crate per layer, same rules as every weebo operator:
 | `application`       | ports (`AdminGateway`, `GatewayFactory`, `ConfigParser`) and the `reconcile_*` use cases |
 | `batlehub-client`   | **generated** from BatleHub's OpenAPI (`spec/`, `task gen:client`), never hand-edited  |
 | `adapters-outbound` | `HttpAdminGateway` on the generated client, its factory, `LocalInstanceDirectory`, the configuration parser |
-| `adapters-inbound`  | the controllers and the HTTPS router (health, scope guard)                             |
+| `adapters-inbound`  | the controllers and the HTTPS router (health, scope guard, admission webhook)          |
 | `operator`          | the binary: telemetry, leader election, HTTPS server, controllers                      |
 | `crdgen`            | writes `deploy/crd/` from `api`                                                        |
 | `testkit`           | envtest and fakes for the integration tests                                            |

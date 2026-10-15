@@ -9,6 +9,7 @@ publish.workspace = true
 domain = { workspace = true }
 api = { workspace = true }
 application = { workspace = true }
+async-trait = { workspace = true }
 axum = { workspace = true }
 k8s-openapi = { workspace = true }
 kube = { workspace = true }
@@ -19,6 +20,7 @@ tracing = { workspace = true }
 weebo-kit-runtime = { workspace = true }
 
 [dev-dependencies]
+application = { workspace = true, features = ["test-support"] }
 adapters-outbound = { workspace = true }
 testkit = { workspace = true }
 weebo-kit-api = { workspace = true }

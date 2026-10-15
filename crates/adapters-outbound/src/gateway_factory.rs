@@ -3,11 +3,18 @@
 //! reflector `Store` when `operator::main` wires one in, the API
 //! otherwise), its token (`external.adminTokenSecretRef`) and CA
 //! (`external.tls.caSecretRef`) are read fresh — a rotated token or CA, or
-//! an edited `url`, takes effect on the next reconcile.
+//! an edited `url`, takes effect on the next reconcile. With
+//! `external.podSelector`, one more gateway per ready proxy pod, on its IP.
 
 use std::sync::Arc;
 
-use application::ports::{AdminGateway, BoundInstance, GatewayFactory, GatewayFactoryError};
+use api::LocalInstance;
+use application::ports::{
+    BoundInstance, GatewayFactory, GatewayFactoryError, InstanceAccess, PodGateway,
+};
+use k8s_openapi::api::core::v1::Pod;
+use kube::api::{Api, ListParams};
+use kube::core::Selector;
 use kube::{Client, ResourceExt};
 use weebo_kit_adapters::{TokenSecretError, read_local_instance_token, read_secret_key};
 use weebo_kit_api::SecretKeyRef;
@@ -64,24 +71,108 @@ impl HttpGatewayFactory {
     }
 }
 
-#[async_trait::async_trait]
-impl GatewayFactory for HttpGatewayFactory {
-    async fn gateway_for(
-        &self,
-        bound: &BoundInstance,
-    ) -> Result<Arc<dyn AdminGateway>, GatewayFactoryError> {
-        let instance = self
-            .instances
+impl HttpGatewayFactory {
+    async fn instance(&self, bound: &BoundInstance) -> Result<LocalInstance, GatewayFactoryError> {
+        self.instances
             .get(bound)
             .await
             .map_err(GatewayFactoryError::Kubernetes)?
-            .ok_or_else(|| GatewayFactoryError::InstanceNotFound(bound.clone()))?;
+            .ok_or_else(|| GatewayFactoryError::InstanceNotFound(bound.clone()))
+    }
+
+    async fn admin_token(&self, instance: &LocalInstance) -> Result<String, GatewayFactoryError> {
+        let namespace = instance.namespace().unwrap_or_default();
+        self.token(
+            &instance
+                .spec
+                .external
+                .admin_token_secret_ref
+                .in_namespace(&namespace),
+        )
+        .await
+    }
+}
+
+/// Where a ready pod serves: its IP, and its container port named `http`,
+/// else the first container's first one, else BatleHub's default.
+fn pod_endpoint(pod: &Pod) -> Option<String> {
+    let status = pod.status.as_ref()?;
+    let ready = status
+        .conditions
+        .iter()
+        .flatten()
+        .any(|c| c.type_ == "Ready" && c.status == "True");
+    if !ready || pod.metadata.deletion_timestamp.is_some() {
+        return None;
+    }
+    let ip = status.pod_ip.as_deref().filter(|ip| !ip.is_empty())?;
+    let containers = pod.spec.iter().flat_map(|s| &s.containers);
+    // The port named `http` of any container (BatleHub's chart names it so),
+    // else the first port of the first container — never a sidecar's.
+    let named = containers
+        .clone()
+        .flat_map(|c| c.ports.iter().flatten())
+        .find(|p| p.name.as_deref() == Some("http"));
+    let first = containers
+        .clone()
+        .next()
+        .and_then(|c| c.ports.as_ref()?.first());
+    let port = named.or(first).map_or(8080, |p| p.container_port);
+    let host = if ip.contains(':') {
+        format!("[{ip}]")
+    } else {
+        ip.to_string()
+    };
+    Some(format!("http://{host}:{port}"))
+}
+
+#[async_trait::async_trait]
+impl GatewayFactory for HttpGatewayFactory {
+    async fn pod_gateways(
+        &self,
+        bound: &BoundInstance,
+    ) -> Result<Option<Vec<PodGateway>>, GatewayFactoryError> {
+        let instance = self.instance(bound).await?;
+        let Some(selector) = &instance.spec.external.pod_selector else {
+            return Ok(None);
+        };
+        let selector = Selector::try_from(selector.clone())
+            .map_err(|e| GatewayFactoryError::InvalidSpec(format!("external.podSelector: {e}")))?;
+        let namespace = instance.namespace().unwrap_or_default();
+        let token = self.admin_token(&instance).await?;
+        let mut pods = Api::<Pod>::namespaced(self.client.clone(), &namespace)
+            .list(&ListParams::default().labels_from(&selector))
+            .await
+            .map_err(|e| GatewayFactoryError::Kubernetes(format!("listing pods: {e}")))?
+            .items;
+        pods.sort_by_key(|p| p.name_any());
+        // Pods are reached in the cluster, over plain HTTP: no CA to read.
+        let client =
+            HttpAdminGateway::client(None, false).map_err(GatewayFactoryError::InvalidSpec)?;
+        let mut gateways = Vec::new();
+        for pod in pods {
+            let Some(url) = pod_endpoint(&pod) else {
+                continue;
+            };
+            let gateway = HttpAdminGateway::new(&url, token.clone(), client.clone())
+                .map_err(GatewayFactoryError::InvalidSpec)?;
+            gateways.push(PodGateway {
+                name: pod.name_any(),
+                gateway: Arc::new(gateway),
+            });
+        }
+        Ok(Some(gateways))
+    }
+
+    async fn gateway_for(
+        &self,
+        bound: &BoundInstance,
+    ) -> Result<InstanceAccess, GatewayFactoryError> {
+        let instance = self.instance(bound).await?;
         // The token and the CA live in the instance's own namespace.
         let namespace = instance.namespace().unwrap_or_default();
         let external = &instance.spec.external;
-        let token = self
-            .token(&external.admin_token_secret_ref.in_namespace(&namespace))
-            .await?;
+        let token = self.admin_token(&instance).await?;
         let tls = external.tls.in_namespace(&namespace);
         let ca_pem = match &tls.ca_secret_ref {
             Some(ca_ref) => Some(self.ca(ca_ref).await?),
@@ -89,8 +180,81 @@ impl GatewayFactory for HttpGatewayFactory {
         };
         let client = HttpAdminGateway::client(ca_pem.as_deref(), tls.insecure_skip_verify)
             .map_err(GatewayFactoryError::InvalidSpec)?;
-        let gateway = HttpAdminGateway::new(&external.url, token, client)
+        let gateway = HttpAdminGateway::new(&external.url, token.clone(), client)
             .map_err(GatewayFactoryError::InvalidSpec)?;
-        Ok(Arc::new(gateway))
+        Ok(InstanceAccess {
+            gateway: Arc::new(gateway),
+            token,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use k8s_openapi::api::core::v1::{Container, ContainerPort, PodCondition, PodSpec, PodStatus};
+
+    use super::*;
+
+    fn pod(ip: &str, ready: &str, ports: Vec<(Option<&str>, i32)>) -> Pod {
+        Pod {
+            spec: Some(PodSpec {
+                containers: vec![Container {
+                    name: "batlehub".into(),
+                    ports: Some(
+                        ports
+                            .into_iter()
+                            .map(|(name, port)| ContainerPort {
+                                name: name.map(String::from),
+                                container_port: port,
+                                ..Default::default()
+                            })
+                            .collect(),
+                    ),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            status: Some(PodStatus {
+                pod_ip: Some(ip.into()),
+                conditions: Some(vec![PodCondition {
+                    type_: "Ready".into(),
+                    status: ready.into(),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_ready_pod_is_reached_on_its_http_port() {
+        let named = pod(
+            "10.0.0.1",
+            "True",
+            vec![(Some("metrics"), 9000), (Some("http"), 8081)],
+        );
+        assert_eq!(
+            pod_endpoint(&named).as_deref(),
+            Some("http://10.0.0.1:8081")
+        );
+        let first = pod("10.0.0.1", "True", vec![(None, 9000)]);
+        assert_eq!(
+            pod_endpoint(&first).as_deref(),
+            Some("http://10.0.0.1:9000")
+        );
+        let none = pod("fd00::1", "True", vec![]);
+        assert_eq!(
+            pod_endpoint(&none).as_deref(),
+            Some("http://[fd00::1]:8080")
+        );
+        assert_eq!(pod_endpoint(&pod("10.0.0.1", "False", vec![])), None);
+        assert_eq!(pod_endpoint(&pod("", "True", vec![])), None);
+        let mut leaving = pod("10.0.0.1", "True", vec![]);
+        leaving.metadata.deletion_timestamp =
+            Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+                k8s_openapi::jiff::Timestamp::UNIX_EPOCH,
+            ));
+        assert_eq!(pod_endpoint(&leaving), None);
     }
 }

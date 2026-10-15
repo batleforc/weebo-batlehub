@@ -8,7 +8,8 @@ use std::time::Instant;
 
 use api::status::Condition;
 use application::ports::{
-    BoundInstance, ConfigParser, GatewayFactory, InstanceDependents, InstanceDirectory,
+    BoundInstance, ConfigParser, ConfigSources, GatewayFactory, InstanceDependents,
+    InstanceDirectory, RegistryResolver,
 };
 use application::use_cases::Outcome;
 use domain::Failure;
@@ -35,6 +36,7 @@ pub use weebo_kit_runtime::Shutdown;
 pub use weebo_kit_runtime::controller::{controller, drive};
 
 pub mod local_instance;
+pub mod registry;
 
 /// Field manager of the status patches, meter and Event reporter name.
 pub const FIELD_MANAGER: &str = "weebo-batlehub-operator";
@@ -50,11 +52,16 @@ pub struct Ctx {
     /// Which instance a CR lives on (`LocalInstanceDirectory`, on the
     /// watch scope).
     pub instances: Arc<dyn InstanceDirectory>,
+    /// Which instance a `BatleHubRegistry` attaches to (another
+    /// namespace's, when it consents).
+    pub registries: Arc<dyn RegistryResolver>,
     /// The CRs bound to an instance, holding its deletion.
     pub dependents: Arc<dyn InstanceDependents>,
-    /// BatleHub's configuration parser (unavailable until
-    /// `batlehub-config` v1.5.0).
+    /// BatleHub's own configuration parser (`batlehub-config`).
     pub config: Arc<dyn ConfigParser>,
+    /// What an instance's configuration is rendered from, besides its
+    /// spec: `ConfigMap`s, `Secret`s, registries.
+    pub sources: Arc<dyn ConfigSources>,
     /// One recorder for the whole process: the kit folds repeated Events
     /// into a series only within a recorder.
     pub recorder: Recorder,
@@ -79,9 +86,28 @@ pub enum Error {
     /// stays until it can (or the CR is force-orphaned).
     #[error("{0}")]
     Cleanup(Failure),
+    /// A reconcile stopped before its status (a read through a port).
+    #[error("{0}")]
+    Failed(Failure),
+    /// A deletion waiting for something (`InstanceInUse`), already
+    /// published on `Ready` and announced: retried without another Event.
+    #[error("{0}")]
+    Waiting(Failure),
 }
 
 impl Error {
+    /// A deletion waiting, already announced by its status publish.
+    pub fn is_waiting(&self) -> bool {
+        use kube::runtime::finalizer::Error as Finalizer;
+        match self {
+            Error::Waiting(_) => true,
+            Error::Finalizer(err) => {
+                matches!(err.as_ref(), Finalizer::CleanupFailed(inner) if inner.is_waiting())
+            }
+            _ => false,
+        }
+    }
+
     /// The reason code of the Event announcing this error, and whether it
     /// happened reconciling or cleaning up (the Event's `action`).
     pub fn reason(&self) -> (ReasonCode, &'static str) {
@@ -89,6 +115,8 @@ impl Error {
         match self {
             Error::Kube(_) => (ReasonCode::KubernetesApiError, events::RECONCILE),
             Error::Cleanup(failure) => (failure.reason, events::CLEANUP),
+            Error::Failed(failure) => (failure.reason, events::RECONCILE),
+            Error::Waiting(failure) => (failure.reason, events::CLEANUP),
             Error::Finalizer(err) => match err.as_ref() {
                 Finalizer::ApplyFailed(inner) => inner.reason(),
                 Finalizer::CleanupFailed(inner) => (inner.reason().0, events::CLEANUP),
@@ -104,6 +132,9 @@ pub fn error_policy<K>(obj: Arc<K>, err: &Error, ctx: Arc<Ctx>) -> Action
 where
     K: Resource<DynamicType = ()>,
 {
+    if err.is_waiting() {
+        return weebo_kit_runtime::controller::requeue_after(false, None);
+    }
     let (reason, action) = err.reason();
     weebo_kit_runtime::controller::retry_after_error(
         &ctx.recorder,
@@ -149,6 +180,19 @@ impl HasStatus for api::LocalInstance {
             .as_ref()
             .map(|s| s.conditions.as_slice())
             .unwrap_or_default()
+    }
+}
+
+impl HasStatus for api::Registry {
+    fn conditions(&self) -> &[Condition] {
+        self.status
+            .as_ref()
+            .map(|s| s.conditions.as_slice())
+            .unwrap_or_default()
+    }
+
+    fn bound_instance(&self) -> Option<&BoundInstance> {
+        self.status.as_ref().and_then(|s| s.instance.as_ref())
     }
 }
 
@@ -232,5 +276,8 @@ mod tests {
             Error::Finalizer(Box::new(Finalizer::UnnamedObject)).reason(),
             (ReasonCode::KubernetesApiError, events::RECONCILE)
         );
+        let waiting = || Error::Waiting(Failure::new(ReasonCode::InstanceInUse, "x"));
+        assert!(Error::Finalizer(Box::new(Finalizer::CleanupFailed(waiting()))).is_waiting());
+        assert!(!unreachable().is_waiting());
     }
 }

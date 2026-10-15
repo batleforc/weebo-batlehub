@@ -1,7 +1,8 @@
 # cargo-deny — supply-chain gate run by `task audit` and CI.
 #   advisories — RUSTSEC vulnerabilities, unmaintained and yanked crates
 #   licenses   — flag a copyleft transitive dependency
-#   sources    — only crates.io, plus the shared weebo-operator-kit
+#   sources    — only crates.io, plus the shared weebo-operator-kit and
+#                BatleHub (its configuration parser)
 
 [graph]
 all-features = true
@@ -24,6 +25,29 @@ allow = [
 ]
 confidence-threshold = 0.9
 
+# BatleHub's configuration parser (`batlehub-config`) comes with
+# `batlehub-core`'s dependencies, under licenses BatleHub's own deny.toml
+# allows. Each one is an exception here rather than a global allow: a new
+# crate under them still stops the audit.
+# MPL-2.0 (file-level copyleft, compatible with Apache-2.0 when unmodified):
+# the HTML sanitizer's CSS parser (ammonia → cssparser → dtoa-short).
+[[licenses.exceptions]]
+crate = "cssparser"
+allow = ["MPL-2.0"]
+
+[[licenses.exceptions]]
+crate = "dtoa-short"
+allow = ["MPL-2.0"]
+
+# Permissive (BSD-like) and public domain: the archive reader (zip).
+[[licenses.exceptions]]
+crate = "libbz2-rs-sys"
+allow = ["bzip2-1.0.6"]
+
+[[licenses.exceptions]]
+crate = "ppmd-rust"
+allow = ["CC0-1.0"]
+
 # Weak-copyleft, but only a build tool of the test-only `envtest` harness
 # (rust2go → cbindgen); it never ends up in the operator binary.
 [[licenses.exceptions]]
@@ -40,5 +64,9 @@ allow-wildcard-paths = true
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
-# The shared operator kit, pinned by tag in Cargo.toml.
-allow-git = ["https://github.com/batleforc/weebo-operator-kit"]
+# The shared operator kit and BatleHub's configuration parser, both
+# pinned by tag in Cargo.toml.
+allow-git = [
+    "https://github.com/batleforc/weebo-operator-kit",
+    "https://github.com/batleforc/batlehub",
+]

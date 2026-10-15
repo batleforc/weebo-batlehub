@@ -38,6 +38,12 @@ weebo-kit-adapters = { git = "https://github.com/batleforc/weebo-operator-kit", 
 weebo-kit-runtime = { git = "https://github.com/batleforc/weebo-operator-kit", tag = "v0.15.0" }
 weebo-kit-testkit = { git = "https://github.com/batleforc/weebo-operator-kit", tag = "v0.15.0" }
 
+# BatleHub's own configuration parser (merge, validation, reload tiers —
+# its RFC 0037), never a copy. Moved with the generated client and the
+# default image (`task gen:bump`): its tag is the BatleHub release the
+# operator targets.
+batlehub-config = { git = "https://github.com/batleforc/batlehub", tag = "v1.6.0" }
+
 # Same versions as the kit: a mismatch would link two copies of
 # `kube`/`k8s-openapi` and the types wouldn't line up.
 serde = { version = "1", features = ["derive"] }
@@ -60,6 +66,9 @@ async-trait = "0.1"
 uuid = { version = "1", features = ["v4"] }
 futures = "0.3"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
+sha2 = "0.10"
+toml = "1"
+argon2 = { version = "0.6", features = ["password-hash"] }
 
 # Debug info on test binaries balloons target/ across this many crates
 # (envtest alone links kube-apiserver/etcd); CI runners have run out of

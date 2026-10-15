@@ -39,19 +39,76 @@ spec:
           spec:
             description: |-
               One BatleHub instance, owned by a namespace: its token is that
-              namespace's, and only the objects of that namespace use it. `Ready`
-              tells whether the instance answers and accepts the operator's token
-              with the admin role.
+              namespace's, and only the objects of that namespace use it (plus the
+              `BatleHubRegistry`s of the namespaces it accepts). `Ready` tells
+              whether the instance answers, accepts the operator's token with the
+              admin role and, with `external.manageConfig`, runs the configuration
+              rendered from this object.
 
               While objects are bound to it, its deletion waits (`InstanceInUse`);
               `batlehub.weebo.io/force-orphan: "true"` releases it and leaves them
               orphaned.
             properties:
+              config:
+                description: |-
+                  BatleHub's configuration file (`config.toml`) written in YAML, key
+                  for key: a TOML table is an object, an array of tables a list of
+                  objects. Never typed here: BatleHub's own parser validates it.
+                  `${VAR}` placeholders are kept and resolved by the instance from
+                  its own environment. Rendered only with `external.manageConfig`.
+                type: object
+                x-kubernetes-preserve-unknown-fields: true
+              configLayers:
+                description: |-
+                  TOML documents merged in order over `config`, the way BatleHub
+                  merges its `--config` layers (the later wins; tables merge; arrays
+                  of tables merge entry by entry on a unique `name`, else `type`).
+                items:
+                  description: |-
+                    A TOML document in a `ConfigMap` or a `Secret` of this object's
+                    namespace. A `Secret` must be labelled
+                    `batlehub.weebo.io/credential: "true"`: its content is sent to
+                    BatleHub, so it has to opt in.
+                  properties:
+                    configMapRef:
+                      description: A key of a `ConfigMap`.
+                      nullable: true
+                      properties:
+                        key:
+                          default: config.toml
+                          description: Defaults to `config.toml`.
+                          type: string
+                        name:
+                          minLength: 1
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    secretRef:
+                      description: 'A key of a `Secret` labelled `batlehub.weebo.io/credential: "true"`.'
+                      nullable: true
+                      properties:
+                        key:
+                          default: config.toml
+                          description: Defaults to `config.toml`.
+                          type: string
+                        name:
+                          minLength: 1
+                          type: string
+                      required:
+                      - name
+                      type: object
+                  type: object
+                  x-kubernetes-validations:
+                  - message: set exactly one of configMapRef and secretRef
+                    rule: has(self.configMapRef) != has(self.secretRef)
+                type: array
               external:
                 description: |-
                   A BatleHub the operator doesn't deploy: it reaches it at `url`
-                  with an admin token, and observes it. (The mode where the operator
-                  deploys BatleHub itself comes in a later version.)
+                  with an admin token, observes it and, with `manageConfig`, pushes
+                  its configuration. (The mode where the operator deploys BatleHub
+                  itself comes in a later version.)
                 properties:
                   adminTokenSecretRef:
                     description: |-
@@ -67,6 +124,56 @@ spec:
                     required:
                     - key
                     - name
+                    type: object
+                  manageConfig:
+                    description: |-
+                      Push the configuration rendered from `config`, `configLayers` and
+                      the registries through the admin API, replacing the instance's
+                      first configuration file. The instance needs hot reload enabled.
+                      A change of a key that needs a restart is held back
+                      (`RestartForbidden`): the operator can't restart an instance it
+                      doesn't deploy. Without it, the operator only observes.
+                    type: boolean
+                  podSelector:
+                    description: |-
+                      The instance's proxy pods, when it runs in this namespace (the
+                      BatleHub chart): its replicas don't share a reload, so the operator
+                      pushes and approves the configuration on each selected pod, over
+                      plain HTTP on its IP and container port (the one named `http`,
+                      else the first container's first). Select the proxy pods only: the
+                      chart's worker pods carry the same labels plus
+                      `app.kubernetes.io/component: worker` (exclude it with a
+                      `DoesNotExist` expression). Without it, `url` is the only entry
+                      point, and an instance of several replicas is not supported with
+                      `manageConfig`.
+                    nullable: true
+                    properties:
+                      matchExpressions:
+                        description: matchExpressions is a list of label selector requirements. The requirements are ANDed.
+                        items:
+                          description: A label selector requirement is a selector that contains values, a key, and an operator that relates the key and values.
+                          properties:
+                            key:
+                              description: key is the label key that the selector applies to.
+                              type: string
+                            operator:
+                              description: operator represents a key's relationship to a set of values. Valid operators are In, NotIn, Exists and DoesNotExist.
+                              type: string
+                            values:
+                              description: values is an array of string values. If the operator is In or NotIn, the values array must be non-empty. If the operator is Exists or DoesNotExist, the values array must be empty. This array is replaced during a strategic merge patch.
+                              items:
+                                type: string
+                              type: array
+                          required:
+                          - key
+                          - operator
+                          type: object
+                        type: array
+                      matchLabels:
+                        additionalProperties:
+                          type: string
+                        description: matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels map is equivalent to an element of matchExpressions, whose key field is "key", the operator is "In", and the values array contains only "value". The requirements are ANDed.
+                        type: object
                     type: object
                   tls:
                     default:
@@ -105,6 +212,118 @@ spec:
                 - adminTokenSecretRef
                 - url
                 type: object
+              registrySelector:
+                description: |-
+                  Which `BatleHubRegistry`s this instance serves, rendered as
+                  `[[registries]]` entries after `configLayers`.
+                properties:
+                  namespaces:
+                    description: |-
+                      The namespaces whose registries may attach to this instance (with
+                      an `instanceRef` naming it): its own always.
+                    properties:
+                      from:
+                        default: Same
+                        description: '`Same` (the instance''s namespace), `All`, or `Selector`.'
+                        enum:
+                        - Same
+                        - All
+                        - Selector
+                        type: string
+                      selector:
+                        description: 'The labels of the namespaces accepted, with `from: Selector`.'
+                        nullable: true
+                        properties:
+                          matchExpressions:
+                            description: matchExpressions is a list of label selector requirements. The requirements are ANDed.
+                            items:
+                              description: A label selector requirement is a selector that contains values, a key, and an operator that relates the key and values.
+                              properties:
+                                key:
+                                  description: key is the label key that the selector applies to.
+                                  type: string
+                                operator:
+                                  description: operator represents a key's relationship to a set of values. Valid operators are In, NotIn, Exists and DoesNotExist.
+                                  type: string
+                                values:
+                                  description: values is an array of string values. If the operator is In or NotIn, the values array must be non-empty. If the operator is Exists or DoesNotExist, the values array must be empty. This array is replaced during a strategic merge patch.
+                                  items:
+                                    type: string
+                                  type: array
+                              required:
+                              - key
+                              - operator
+                              type: object
+                            type: array
+                          matchLabels:
+                            additionalProperties:
+                              type: string
+                            description: matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels map is equivalent to an element of matchExpressions, whose key field is "key", the operator is "In", and the values array contains only "value". The requirements are ANDed.
+                            type: object
+                        type: object
+                    type: object
+                    x-kubernetes-validations:
+                    - message: 'namespaces.selector is required with from: Selector'
+                      rule: self.from != 'Selector' || has(self.selector)
+                  selector:
+                    description: Only the registries whose labels match; all of them when unset.
+                    nullable: true
+                    properties:
+                      matchExpressions:
+                        description: matchExpressions is a list of label selector requirements. The requirements are ANDed.
+                        items:
+                          description: A label selector requirement is a selector that contains values, a key, and an operator that relates the key and values.
+                          properties:
+                            key:
+                              description: key is the label key that the selector applies to.
+                              type: string
+                            operator:
+                              description: operator represents a key's relationship to a set of values. Valid operators are In, NotIn, Exists and DoesNotExist.
+                              type: string
+                            values:
+                              description: values is an array of string values. If the operator is In or NotIn, the values array must be non-empty. If the operator is Exists or DoesNotExist, the values array must be empty. This array is replaced during a strategic merge patch.
+                              items:
+                                type: string
+                              type: array
+                          required:
+                          - key
+                          - operator
+                          type: object
+                        type: array
+                      matchLabels:
+                        additionalProperties:
+                          type: string
+                        description: matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels map is equivalent to an element of matchExpressions, whose key field is "key", the operator is "In", and the values array contains only "value". The requirements are ANDed.
+                        type: object
+                    type: object
+                type: object
+              reload:
+                description: How a new configuration reaches the instance.
+                properties:
+                  strategy:
+                    default: Auto
+                    description: |-
+                      `Auto` applies every validated configuration; `Manual` holds it
+                      (`ConfigHeld`, its hash in `status.pendingConfigHash`) until the
+                      annotation `batlehub.weebo.io/approved-config-hash` carries that
+                      exact hash.
+                    enum:
+                    - Auto
+                    - Manual
+                    type: string
+                  validation:
+                    default: Strict
+                    description: |-
+                      `Strict` blocks a configuration BatleHub's parser refuses
+                      (`ConfigInvalid`); `Lenient` pushes it anyway
+                      (`ConfigInvalidLenient`), for when the stand-in value the operator
+                      gives a `${VAR}` it can't read is what fails. The instance still
+                      validates it with its real environment before loading it.
+                    enum:
+                    - Strict
+                    - Lenient
+                    type: string
+                type: object
             required:
             - external
             type: object
@@ -112,11 +331,15 @@ spec:
             description: What the operator observed of the instance.
             nullable: true
             properties:
+              appliedConfigHash:
+                description: SHA-256 of the configuration every pod was last seen running.
+                nullable: true
+                type: string
               conditions:
                 default: []
                 description: |-
                   `Ready`, carrying one of the operator's reason codes, and the
-                  advisories next to it (`ConfigWarnings`).
+                  advisories next to it (`ConfigWarnings`, `ConfigHeld`…).
                 items:
                   properties:
                     lastTransitionTime:
@@ -145,8 +368,21 @@ spec:
                   - type
                   type: object
                 type: array
+              configHash:
+                description: |-
+                  SHA-256 of the configuration rendered from this object (the
+                  desired one), with `manageConfig`.
+                nullable: true
+                type: string
               endpoint:
                 description: The URL the operator calls.
+                nullable: true
+                type: string
+              lastRejectionTime:
+                nullable: true
+                type: string
+              lastReloadTime:
+                description: When the operator last made the instance load a configuration.
                 nullable: true
                 type: string
               observedGeneration:
@@ -154,6 +390,61 @@ spec:
                 format: int64
                 nullable: true
                 type: integer
+              pendingConfigHash:
+                description: |-
+                  SHA-256 of a configuration held by `reload.strategy: Manual`: set
+                  `batlehub.weebo.io/approved-config-hash` to it to apply it.
+                nullable: true
+                type: string
+              pods:
+                description: |-
+                  The pods (with `external.podSelector`) not running the desired
+                  configuration yet; empty once it is applied.
+                items:
+                  description: A pod behind on the configuration.
+                  properties:
+                    configHash:
+                      description: SHA-256 of the configuration file it serves, when it could be read.
+                      nullable: true
+                      type: string
+                    name:
+                      type: string
+                  required:
+                  - name
+                  type: object
+                type: array
+              rejectedConfigHash:
+                description: |-
+                  The last configuration the instance refused (or loaded without
+                  being able to write it, `unpersistedConfigHash`), and when: the same
+                  one is pushed again at most every 10 minutes.
+                nullable: true
+                type: string
+              rejectionMessage:
+                description: What the instance said when it refused `rejectedConfigHash`.
+                nullable: true
+                type: string
+              reloadNonce:
+                description: |-
+                  Bumped to make BatleHub stage bytes it has already seen once (a
+                  load attempt that failed or expired): written as a final comment
+                  of the pushed file, outside `configHash`.
+                format: uint64
+                minimum: 0.0
+                type: integer
+              restartKeys:
+                description: |-
+                  The keys needing a restart the instance doesn't run yet, while the
+                  push is held back.
+                items:
+                  type: string
+                type: array
+              unpersistedConfigHash:
+                description: |-
+                  A configuration the instance loaded but couldn't write to its first
+                  configuration file (`ConfigReadOnly`): lost on its next restart.
+                nullable: true
+                type: string
               version:
                 description: BatleHub's version, as its `/livez` reports it.
                 nullable: true

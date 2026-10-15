@@ -62,13 +62,18 @@ watch:
   # cluster-scoped kind watched, no ClusterRole, no
   # ValidatingWebhookConfiguration; objects use the LocalInstances of
   # `namespace`. Needs `namespace` and `crds.install: false` (a cluster
-  # admin installs the CRDs).
+  # admin installs the CRDs). weebo-batlehub: no ClusterRole means none
+  # of its own read rules either — a ConfigMap of `configLayers` or of a
+  # registry's `configFrom`, and `external.podSelector`, then fail with
+  # KubernetesApiError (only Secret layers and `url` work).
   clusterKinds: true
 
 references:
   # -- A CR may reference a CR of another namespace (env
   # WEEBO_CROSS_NAMESPACE_REFS) — only one that shares itself with it
-  # (its `spec.sharedWith`). Ignored with `watch.namespace`.
+  # (its `spec.sharedWith`). Ignored with `watch.namespace`. weebo-batlehub
+  # ignores it: a BatleHubRegistry attaches to another namespace's
+  # instance by that instance's consent (`registrySelector.namespaces`).
   crossNamespace: false
 
 # -- Reconciles run at once per kind (env WEEBO_RECONCILE_CONCURRENCY).
@@ -300,7 +305,8 @@ networkPolicy:
         - port: 6443
           protocol: TCP
     # -- Egress rules (`to` + `ports`) to every BatleHub a
-    # BatleHubInstance points at.
+    # BatleHubLocalInstance points at: its `external.url`, and with
+    # `external.podSelector` its pods' IPs on their container port.
     batlehub: []
     # -- Egress rules to Vault, when a secretStore uses it.
     vault: []

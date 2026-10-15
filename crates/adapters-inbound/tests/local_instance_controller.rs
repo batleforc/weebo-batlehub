@@ -2,14 +2,17 @@
 //! adapters — `LocalInstanceDirectory`, `HttpGatewayFactory` reading the
 //! token Secret through the kit's opt-in check, `HttpAdminGateway` — against
 //! a scripted BatleHub (`wiremock`) and a real control plane (envtest).
-//! The CRs bound to an instance are a fake: no kind binds to one yet.
+//! The CRs bound to an instance are a fake here (`manage_config.rs` has
+//! the real ones).
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use adapters_inbound::controller::{self, Ctx, FINALIZER, Shutdown};
-use adapters_outbound::{HttpGatewayFactory, LocalInstanceDirectory, UnavailableConfigParser};
+use adapters_outbound::{
+    BatleHubConfigParser, HttpGatewayFactory, KubeConfigSources, LocalInstanceDirectory,
+};
 use api::LocalInstance;
 use api::local_instance::{
     ExternalInstance, LocalInstanceSpec, LocalSecretKeyRef, LocalTlsOptions,
@@ -35,7 +38,7 @@ async fn batlehub(token: &str, role: &str) -> MockServer {
     Mock::given(method("GET"))
         .and(path("/livez"))
         .respond_with(
-            ResponseTemplate::new(200).set_body_json(json!({"ok": true, "version": "1.5.0"})),
+            ResponseTemplate::new(200).set_body_json(json!({"ok": true, "version": "1.6.0"})),
         )
         .mount(&server)
         .await;
@@ -106,7 +109,13 @@ async fn instance_with_tls(
                     key: "token".into(),
                 },
                 tls,
+                manage_config: false,
+                pod_selector: None,
             },
+            config: Default::default(),
+            config_layers: vec![],
+            reload: Default::default(),
+            registry_selector: Default::default(),
         },
     );
     Api::<LocalInstance>::namespaced(client.clone(), NS)
@@ -120,9 +129,11 @@ fn ctx(client: &Client, dependents: Arc<FakeDependents>) -> Arc<Ctx> {
     Arc::new(Ctx {
         client: client.clone(),
         gateways: Arc::new(HttpGatewayFactory::new(client.clone(), instances.clone())),
-        instances,
+        instances: instances.clone(),
+        registries: instances.clone(),
         dependents,
-        config: Arc::new(UnavailableConfigParser),
+        config: Arc::new(BatleHubConfigParser::default()),
+        sources: Arc::new(KubeConfigSources::new(client.clone(), instances)),
         recorder: Recorder::new(
             client.clone(),
             Reporter {
@@ -215,11 +226,11 @@ async fn an_instance_is_ready_only_with_a_labelled_admin_token() {
 
     let (status, reason, message) = wait("ready").await;
     assert_eq!((status.as_str(), reason.as_str()), ("True", "Reconciled"));
-    assert!(message.contains("1.5.0"), "{message}");
+    assert!(message.contains("1.6.0"), "{message}");
     let ready_one = instances.get("ready").await.unwrap();
     let status = ready_one.status.as_ref().unwrap();
     assert_eq!(status.endpoint.as_deref(), Some(admin.uri().as_str()));
-    assert_eq!(status.version.as_deref(), Some("1.5.0"));
+    assert_eq!(status.version.as_deref(), Some("1.6.0"));
     assert_eq!(status.warnings.len(), 1);
     assert_eq!(status.warnings[0].code, "audit.no-retention");
     assert_eq!(

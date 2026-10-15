@@ -1,0 +1,56 @@
+---
+title: BatleHubRegistry
+description: >-
+  One [[registries]] entry of an instance's configuration, as its own object, so
+  each team manages its registries.
+full: true
+---
+
+- **API version:** `batlehub.weebo.io/v1alpha1`
+- **Scope:** Namespaced
+- **Short names:** `bhr`
+- **Guide:** [Manage the configuration](/docs/guides/manage-config)
+
+One `[[registries]]` entry of an instance's configuration, as its own
+object, so each team manages its registries. The instance renders
+every registry it accepts after its `configLayers`, sorted by
+namespace then name, and pushes the result (`external.manageConfig`);
+`Ready` tells whether that configuration was applied.
+
+A registry of another namespace than the instance's attaches only when
+the instance accepts that namespace (`registrySelector.namespaces`),
+may not contain a `${VAR}` placeholder (they resolve from the
+instance's environment), and may not complete an entry of the
+instance's own configuration.
+
+## Example
+
+```yaml
+apiVersion: batlehub.weebo.io/v1alpha1
+kind: BatleHubRegistry
+metadata:
+  name: my-registry
+  namespace: team-a
+spec:
+  type: npm
+  config:
+    upstreams:
+      - https://registry.npmjs.org
+```
+
+## Spec fields
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `config` | `object` | no |  | Every other key of the `[[registries]]` table, written in YAML key for key (`mode`, `upstreams`, `rbac`, `rules`, `cache`, `hosts`…). |
+| `configFrom` | `object[]` | no |  | TOML fragments of the table merged over `config` (`upstream_auth`, `tls`…), from this namespace. A fragment may not set `type` nor `name`. |
+| `instanceRef` | `object` | no |  | The `BatleHubLocalInstance` serving this registry; unset, the only one of this namespace. Another namespace's instance must accept this one (its `registrySelector.namespaces`). |
+| `name` | `string` | no |  | The name BatleHub serves it under; defaults to this object's name. |
+| `suspend` | `boolean` | no |  | Keep the object, leave the registry out of the configuration. |
+| `type` | `string` | yes |  | The registry's type: `npm`, `cargo`, `pypi`… (validated by BatleHub's parser). |
+
+## Build a manifest
+
+Answer the questions and fill in the fields: the YAML preview updates as you type, ready to copy or download and `kubectl apply`.
+
+<CrdForm kind="BatleHubRegistry" />
