@@ -380,9 +380,14 @@ reason_is managed Reconciled
 [ "$(proxy_pods)" = "$first_pod" ] || fail "managed: the pod changed on a hot reload"
 token="$(kubectl -n team-a get secret managed-operator-token -o jsonpath='{.data.token}' | base64 -d)"
 ip="$(kubectl -n team-a get pod "$first_pod" -o jsonpath='{.status.podIP}')"
-health="$(kubectl -n team-a run "health-$RANDOM" --rm -i --restart=Never --quiet \
-  --image=docker.io/curlimages/curl:8.17.0 -- \
-  -fsS -H "Authorization: Bearer $token" "http://$ip:8080/api/v1/admin/health")"
+# `kubectl run -i` may lose a short output: read again a few times.
+for _ in $(seq 1 12); do
+  health="$(kubectl -n team-a run "health-$RANDOM" --rm -i --restart=Never --quiet \
+    --image=docker.io/curlimages/curl:8.17.0 -- \
+    -fsS -H "Authorization: Bearer $token" "http://$ip:8080/api/v1/admin/health" || true)"
+  printf '%s' "$health" | grep -q '"registry":"npm-managed"' && break
+  sleep 5
+done
 printf '%s' "$health" | grep -q '"registry":"npm-managed"' || fail "managed: the registry isn't served: $health"
 # A key read at startup: the pods roll.
 kubectl -n team-a patch batlehublocalinstance managed --type merge -p \
