@@ -267,7 +267,7 @@ fn ctx_with(
         registries: instances,
         dependents: Arc::new(FakeDependents::default()),
         workloads,
-        operator: Default::default(),
+        operator: application::workload::OperatorPod::named(application::workload::OPERATOR_CHART),
         token_review_role: None,
         config: Arc::new(FakeConfigParser),
         sources: Arc::new(FakeSources::default()),

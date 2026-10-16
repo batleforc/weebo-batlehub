@@ -205,35 +205,9 @@ impl RegistrySelector {
     }
 }
 
-/// The namespaces a registry may come from (the Gateway API's
-/// `allowedRoutes.namespaces`): the consent of the instance's owner.
-#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-#[schemars(extend("x-kubernetes-validations" = [
-    {"rule": "self.from != 'Selector' || has(self.selector)", "message": "namespaces.selector is required with from: Selector"}
-]))]
-pub struct RegistryNamespaces {
-    /// `Same` (the instance's namespace), `All`, or `Selector`.
-    #[serde(default)]
-    pub from: NamespacesFrom,
-    /// The labels of the namespaces accepted, with `from: Selector`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub selector: Option<LabelSelector>,
-}
-
-impl RegistryNamespaces {
-    fn is_default(&self) -> bool {
-        *self == Self::default()
-    }
-}
-
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq, JsonSchema)]
-pub enum NamespacesFrom {
-    #[default]
-    Same,
-    All,
-    Selector,
-}
+/// The namespaces a registry may come from: the kit's consent of the
+/// instance's owner.
+pub use weebo_kit_api::{AttachNamespaces as RegistryNamespaces, NamespacesFrom};
 
 impl BatleHubLocalInstanceSpec {
     /// Whether the operator renders and applies the configuration.

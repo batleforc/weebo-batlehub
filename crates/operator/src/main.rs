@@ -248,23 +248,7 @@ impl Settings {
 /// stops). Unset (run outside the chart), the chart's default label —
 /// said once, a `nameOverride` would leave the operator out.
 fn operator_pod() -> anyhow::Result<OperatorPod> {
-    let labels = match pod::own_labels().map_err(anyhow::Error::msg)? {
-        Some(labels) => labels,
-        None => {
-            let labels = OperatorPod::fallback_labels();
-            tracing::warn!(
-                fallback = ?labels,
-                "{} is unset: a managed instance's NetworkPolicy lets in the operator \
-                 pods by this label, which a chart nameOverride would not match",
-                pod::POD_LABELS_ENV
-            );
-            labels
-        }
-    };
-    Ok(OperatorPod {
-        namespace: pod::own_namespace(),
-        labels,
-    })
+    pod::operator_pod(application::workload::OPERATOR_CHART).map_err(anyhow::Error::msg)
 }
 
 #[cfg(test)]

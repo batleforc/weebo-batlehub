@@ -26,7 +26,7 @@
 //!    nonce.
 
 use api::local_instance::{PartialPolicy, Reload, ReloadStrategy, RestartPolicy};
-use api::managed::{CONFIG_KEY, ManagedInstance, Names, UpdateStrategy};
+use api::managed::{CONFIG_HASH_ANNOTATION, CONFIG_KEY, ManagedInstance, Names, UpdateStrategy};
 use domain::error::ReasonCode;
 use domain::{Advisory, Failure};
 use serde_json::{Value, json};
@@ -170,7 +170,7 @@ fn without_credentials(document: &str) -> &str {
 }
 
 fn workload_failure(e: WorkloadError) -> Failure {
-    Failure::new(e.reason(), e.to_string())
+    Failure::new(crate::ports::workload_reason(&e), e.to_string())
 }
 
 fn fail(e: GatewayError) -> Failure {
@@ -401,7 +401,10 @@ async fn run(
         .rollout(&pass.owner, &names.proxy())
         .await
         .map_err(workload_failure)?;
-    let current = rollout.as_ref().and_then(|r| r.config_hash.clone());
+    let current = rollout
+        .as_ref()
+        .and_then(|r| r.annotation(CONFIG_HASH_ANNOTATION))
+        .map(String::from);
     let changes = match previous.as_deref().map(without_nonce) {
         Some(before) if before != target => parser
             .classify(without_credentials(before), without_credentials(&target))
@@ -913,7 +916,6 @@ impl Approval<'_> {
 mod tests {
     use std::sync::Arc;
 
-    use api::managed::CONFIG_HASH_ANNOTATION;
     use serde_json::json;
 
     use super::*;
@@ -1015,7 +1017,7 @@ mod tests {
                 state: self.state.clone(),
                 restart_keys: self.restart_keys.clone(),
                 partial_keys: self.partial_keys.clone(),
-                operator: OperatorPod::default(),
+                operator: OperatorPod::named(crate::workload::OPERATOR_CHART),
                 token_review_role: self.token_review_role.clone(),
             };
             let report =

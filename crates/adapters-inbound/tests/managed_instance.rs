@@ -66,7 +66,7 @@ fn ctx(client: &Client) -> Arc<Ctx> {
         workloads: Arc::new(KubeWorkloads::new(client.clone())),
         operator: application::workload::OperatorPod {
             namespace: Some("weebo-batlehub-system".into()),
-            ..Default::default()
+            ..application::workload::OperatorPod::named(application::workload::OPERATOR_CHART)
         },
         token_review_role: Some("weebo-batlehub-tokenreview".into()),
         config: Arc::new(BatleHubConfigParser::default()),

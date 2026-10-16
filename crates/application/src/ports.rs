@@ -412,105 +412,27 @@ pub trait Ledger<T: Send + Sync>: Send + Sync {
     async fn record(&self, written: &T) -> Result<(), String>;
 }
 
-/// An object the operator owns, as a full manifest (`apiVersion`, `kind`,
-/// `metadata`, …): applied by server-side apply.
-#[derive(Debug, Clone, PartialEq)]
-pub struct OwnedObject {
-    pub api_version: String,
-    pub kind: String,
-    pub name: String,
-    pub manifest: serde_json::Value,
-    /// Created once, never applied again (a claim's spec is immutable).
-    pub create_only: bool,
-}
+pub use weebo_kit_application::workload::{
+    OwnedObject, OwnedObjects, Owner, Rollout, WorkloadError,
+};
 
-/// The owner of the objects of a managed instance.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Owner {
-    pub namespace: String,
-    pub name: String,
-    pub uid: String,
-}
-
-/// Why owned objects couldn't be written.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum WorkloadError {
-    /// An object of that name exists and isn't the operator's (no owner
-    /// reference to the instance, no `managed-by` label): never taken
-    /// over.
-    #[error("{0}")]
-    Conflict(String),
-    #[error("Kubernetes API error: {0}")]
-    Kubernetes(String),
-    /// A pod the operator doesn't run (an image off its allow-list, a
-    /// `hostPath`, a privilege): nothing is applied.
-    #[error("{0}")]
-    Refused(String),
-    /// A pod would read a `Secret` without the
-    /// `batlehub.weebo.io/credential` label: nothing is applied.
-    #[error("{0}")]
-    SecretNotAllowed(String),
-}
-
-impl WorkloadError {
-    pub fn reason(&self) -> ReasonCode {
-        match self {
-            WorkloadError::Conflict(_) => ReasonCode::OwnedObjectConflict,
-            WorkloadError::Kubernetes(_) => ReasonCode::KubernetesApiError,
-            WorkloadError::Refused(_) => ReasonCode::InvalidSpec,
-            WorkloadError::SecretNotAllowed(_) => ReasonCode::SecretNotAllowed,
-        }
+/// The reason code of a [`WorkloadError`].
+pub fn workload_reason(e: &WorkloadError) -> ReasonCode {
+    match e {
+        WorkloadError::Conflict(_) => ReasonCode::OwnedObjectConflict,
+        WorkloadError::Kubernetes(_) => ReasonCode::KubernetesApiError,
+        WorkloadError::Refused(_) => ReasonCode::InvalidSpec,
+        WorkloadError::SecretNotAllowed(_) => ReasonCode::SecretNotAllowed,
     }
 }
 
-/// Where a `Deployment` stands.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Rollout {
-    pub replicas: i32,
-    pub updated: i32,
-    pub available: i32,
-    /// The controller has seen the last change of the spec.
-    pub observed: bool,
-    /// The pod template's `batlehub.weebo.io/config-hash`.
-    pub config_hash: Option<String>,
-}
-
-impl Rollout {
-    /// Every replica updated and available.
-    pub fn complete(&self) -> bool {
-        self.observed && self.updated >= self.replicas && self.available >= self.replicas
-    }
-}
-
-/// The Kubernetes objects of a managed instance.
+/// The Kubernetes objects of a managed instance: the kit's
+/// [`OwnedObjects`], plus the operator's token and the TokenReview binding.
 #[async_trait::async_trait]
-pub trait Workloads: Send + Sync {
-    /// Applies `objects`, owned by `owner`; each is read first, and one the
-    /// operator doesn't own is [`WorkloadError::Conflict`] (nothing after
-    /// it is applied).
-    async fn apply(&self, owner: &Owner, objects: &[OwnedObject]) -> Result<(), WorkloadError>;
-    /// Deletes `kind/name` of the owner's namespace, if it is the
-    /// operator's (none is fine).
-    async fn remove(
-        &self,
-        owner: &Owner,
-        api_version: &str,
-        kind: &str,
-        name: &str,
-    ) -> Result<(), WorkloadError>;
+pub trait Workloads: OwnedObjects {
     /// The operator's token of `owner`: generated once in the `Secret`
     /// `name` (labelled for it, owned by the instance), read back after.
     async fn operator_token(&self, owner: &Owner, name: &str) -> Result<String, WorkloadError>;
-    /// A key of a `Secret` of the owner's namespace the operator wrote
-    /// (`None`: absent).
-    async fn secret_text(
-        &self,
-        owner: &Owner,
-        name: &str,
-        key: &str,
-    ) -> Result<Option<String>, WorkloadError>;
-    /// The `Deployment` `name`, `None` when absent.
-    async fn rollout(&self, owner: &Owner, name: &str) -> Result<Option<Rollout>, WorkloadError>;
     /// Binds the account `service_account` of the owner's namespace to the
     /// `ClusterRole` `cluster_role` (TokenReview): a subject of the one
     /// `ClusterRoleBinding` named after the role, shared by every instance
@@ -538,16 +460,17 @@ pub trait Workloads: Send + Sync {
         owner: &Owner,
         name: &str,
         config_hash: Option<&str>,
-    ) -> Result<bool, WorkloadError>;
-    /// The storage the `PersistentVolumeClaim` `name` of the owner's
-    /// namespace requests (`spec.resources.requests.storage`), `None` when
-    /// absent.
-    async fn claim_size(
-        &self,
-        _owner: &Owner,
-        _name: &str,
-    ) -> Result<Option<String>, WorkloadError> {
-        Ok(None)
+    ) -> Result<bool, WorkloadError> {
+        let annotations = config_hash
+            .map(|hash| {
+                std::collections::BTreeMap::from([(
+                    api::managed::CONFIG_HASH_ANNOTATION.to_string(),
+                    hash.to_string(),
+                )])
+            })
+            .unwrap_or_default();
+        self.annotate_template(owner, name, &annotations, true)
+            .await
     }
 }
 

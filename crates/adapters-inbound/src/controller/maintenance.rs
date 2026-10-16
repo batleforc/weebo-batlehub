@@ -158,7 +158,9 @@ impl Restarter for WorkloadRestart<'_> {
                 .workloads
                 .restart(&self.owner, &name, hash)
                 .await
-                .map_err(|e| domain::Failure::new(e.reason(), e.to_string()))?
+                .map_err(|e| {
+                    domain::Failure::new(application::ports::workload_reason(&e), e.to_string())
+                })?
             {
                 restarted.push(name);
             }

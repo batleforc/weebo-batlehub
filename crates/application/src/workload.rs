@@ -18,17 +18,15 @@ use k8s_openapi::api::autoscaling::v2::{
     HorizontalPodAutoscalerSpec, MetricIdentifier, MetricSpec, MetricTarget,
 };
 use k8s_openapi::api::core::v1::{
-    Affinity, Capabilities, Container, ContainerPort, EmptyDirVolumeSource, EnvVar, HTTPGetAction,
-    KeyToPath, PersistentVolumeClaim, PersistentVolumeClaimSpec, PersistentVolumeClaimVolumeSource,
+    Affinity, Container, ContainerPort, EmptyDirVolumeSource, EnvVar, HTTPGetAction, KeyToPath,
+    PersistentVolumeClaim, PersistentVolumeClaimSpec, PersistentVolumeClaimVolumeSource,
     PodAffinity, PodAffinityTerm, PodSecurityContext, PodSpec, PodTemplateSpec, Probe,
-    ResourceRequirements, SeccompProfile, Secret, SecretVolumeSource, SecurityContext, Service,
-    ServiceAccount, ServicePort, ServiceSpec, Volume, VolumeMount, VolumeResourceRequirements,
+    ResourceRequirements, Secret, SecretVolumeSource, SecurityContext, Service, ServiceAccount,
+    ServicePort, ServiceSpec, Volume, VolumeMount, VolumeResourceRequirements,
 };
 use k8s_openapi::api::networking::v1::{
     HTTPIngressPath, HTTPIngressRuleValue, Ingress, IngressBackend, IngressRule,
-    IngressServiceBackend, IngressSpec, NetworkPolicy, NetworkPolicyEgressRule,
-    NetworkPolicyIngressRule, NetworkPolicyPeer, NetworkPolicyPort, NetworkPolicySpec,
-    ServiceBackendPort,
+    IngressServiceBackend, IngressSpec, NetworkPolicy, ServiceBackendPort,
 };
 use k8s_openapi::api::policy::v1::{PodDisruptionBudget, PodDisruptionBudgetSpec};
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
@@ -36,6 +34,10 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta};
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use k8s_openapi::{Metadata, Resource};
 use serde_json::Value;
+
+use weebo_kit_application::workload::{
+    PolicyRules, restricted_container_security, restricted_pod_security,
+};
 
 use crate::ports::OwnedObject;
 
@@ -109,36 +111,11 @@ pub struct WorkloadInput<'a> {
     pub operator: &'a OperatorPod,
 }
 
-/// The operator's own pods, as the chart describes them: what a managed
-/// instance's `NetworkPolicy` lets in to keep the admin API reachable.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OperatorPod {
-    /// Its namespace (`POD_NAMESPACE`); `None`: the instance's own.
-    pub namespace: Option<String>,
-    /// Its selector labels (the kit's `WEEBO_OPERATOR_POD_LABELS`, the
-    /// chart's `nameOverride` applied).
-    pub labels: BTreeMap<String, String>,
-}
+pub use weebo_kit_application::workload::OperatorPod;
 
-impl OperatorPod {
-    /// The chart's selector label when its `nameOverride` is unset: what
-    /// is let in when the operator runs without `WEEBO_OPERATOR_POD_LABELS`.
-    pub fn fallback_labels() -> BTreeMap<String, String> {
-        BTreeMap::from([(
-            "app.kubernetes.io/name".to_string(),
-            "weebo-batlehub".to_string(),
-        )])
-    }
-}
-
-impl Default for OperatorPod {
-    fn default() -> Self {
-        Self {
-            namespace: None,
-            labels: Self::fallback_labels(),
-        }
-    }
-}
+/// The operator's chart name: its default selector label, what a managed
+/// instance's `NetworkPolicy` lets in without `WEEBO_OPERATOR_POD_LABELS`.
+pub const OPERATOR_CHART: &str = "weebo-batlehub";
 
 /// The update strategy of the proxy `Deployment`, and why.
 pub fn update_strategy(spec: &ManagedInstance, facts: &DocumentFacts) -> UpdateStrategy {
@@ -158,13 +135,7 @@ fn object<K: Resource + Metadata<Ty = ObjectMeta> + serde::Serialize>(
     k: &K,
     create_only: bool,
 ) -> OwnedObject {
-    OwnedObject {
-        api_version: K::API_VERSION.to_string(),
-        kind: K::KIND.to_string(),
-        name: k.metadata().name.clone().unwrap_or_default(),
-        manifest: serde_json::to_value(k).expect("a Kubernetes object serializes"),
-        create_only,
-    }
+    OwnedObject::of(k, create_only)
 }
 
 fn meta(input: &WorkloadInput<'_>, name: String, component: &str) -> ObjectMeta {
@@ -202,29 +173,13 @@ fn default_resources() -> ResourceRequirements {
 fn pod_security(spec: &ManagedInstance) -> PodSecurityContext {
     spec.pod_security_context
         .clone()
-        .unwrap_or(PodSecurityContext {
-            run_as_non_root: Some(true),
-            run_as_user: Some(65532),
-            run_as_group: Some(65532),
-            fs_group: Some(65532),
-            seccomp_profile: Some(SeccompProfile {
-                type_: "RuntimeDefault".into(),
-                ..Default::default()
-            }),
-            ..Default::default()
-        })
+        .unwrap_or_else(|| restricted_pod_security(65532))
 }
 
 fn container_security(spec: &ManagedInstance) -> SecurityContext {
-    spec.security_context.clone().unwrap_or(SecurityContext {
-        allow_privilege_escalation: Some(false),
-        read_only_root_filesystem: Some(true),
-        capabilities: Some(Capabilities {
-            drop: Some(vec!["ALL".into()]),
-            ..Default::default()
-        }),
-        ..Default::default()
-    })
+    spec.security_context
+        .clone()
+        .unwrap_or_else(restricted_container_security)
 }
 
 fn http_probe(path: &str, delay: i32, period: i32) -> Probe {
@@ -736,66 +691,20 @@ fn network_policy(
     policy: &api::managed::NetworkPolicy,
 ) -> NetworkPolicy {
     let names = Names::new(input.name);
-    let mut from = policy.ingress_from.clone();
-    if !from.is_empty() {
-        // The operator keeps its access to the admin API.
-        from.push(NetworkPolicyPeer {
-            namespace_selector: input.operator.namespace.as_ref().map(|ns| LabelSelector {
-                match_labels: Some(BTreeMap::from([(
-                    "kubernetes.io/metadata.name".into(),
-                    ns.clone(),
-                )])),
-                ..Default::default()
-            }),
-            pod_selector: Some(LabelSelector {
-                match_labels: Some(input.operator.labels.clone()),
-                ..Default::default()
-            }),
-            ..Default::default()
-        });
-    }
-    let dns = NetworkPolicyEgressRule {
-        ports: Some(
-            ["UDP", "TCP"]
-                .iter()
-                .map(|protocol| NetworkPolicyPort {
-                    port: Some(IntOrString::Int(53)),
-                    protocol: Some(protocol.to_string()),
-                    ..Default::default()
-                })
-                .collect(),
-        ),
-        ..Default::default()
-    };
-    let mut egress = vec![dns];
-    if !policy.egress_to.is_empty() {
-        egress.push(NetworkPolicyEgressRule {
-            to: Some(policy.egress_to.clone()),
-            ..Default::default()
-        });
-    }
-    NetworkPolicy {
-        metadata: meta(input, names.proxy(), "proxy"),
-        spec: Some(NetworkPolicySpec {
-            pod_selector: Some(LabelSelector {
-                match_labels: Some(BTreeMap::from([
-                    ("app.kubernetes.io/name".into(), "batlehub".into()),
-                    ("app.kubernetes.io/instance".into(), input.name.to_string()),
-                ])),
-                ..Default::default()
-            }),
-            policy_types: Some(vec!["Ingress".into(), "Egress".into()]),
-            ingress: Some(vec![NetworkPolicyIngressRule {
-                from: (!from.is_empty()).then_some(from),
-                ports: Some(vec![NetworkPolicyPort {
-                    port: Some(IntOrString::String("http".into())),
-                    protocol: Some("TCP".into()),
-                    ..Default::default()
-                }]),
-            }]),
-            egress: Some(egress),
-        }),
-    }
+    weebo_kit_application::workload::network_policy(
+        meta(input, names.proxy(), "proxy"),
+        &PolicyRules {
+            pod_labels: BTreeMap::from([
+                ("app.kubernetes.io/name".into(), "batlehub".into()),
+                ("app.kubernetes.io/instance".into(), input.name.to_string()),
+            ]),
+            port: "http",
+            ingress_from: &policy.ingress_from,
+            egress_to: &policy.egress_to,
+            // The operator keeps its access to the admin API.
+            operator: Some(input.operator),
+        },
+    )
 }
 
 /// The objects a spec no longer renders, which the operator removes:

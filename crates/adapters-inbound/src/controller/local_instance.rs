@@ -703,7 +703,12 @@ async fn unbind(instance: &LocalInstance, ctx: &Ctx) -> Result<(), Error> {
                 role,
             )
             .await
-            .map_err(|e| Error::Cleanup(Failure::new(e.reason(), e.to_string())))?;
+            .map_err(|e| {
+                Error::Cleanup(Failure::new(
+                    application::ports::workload_reason(&e),
+                    e.to_string(),
+                ))
+            })?;
     }
     super::metrics::forget_instance(&bound);
     Ok(())
