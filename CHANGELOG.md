@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## [v0.2.1](https://github.com/batleforc/weebo-batlehub/compare/823b08a8cb53fd0feaa8048f55d33453b17694ab..v0.2.1) - 2026-10-16
+#### Refactoring
+- kit v0.17.0 — the managed workload core, local instances and namespace consent from the kit (#10) - ([823b08a](https://github.com/batleforc/weebo-batlehub/commit/823b08a8cb53fd0feaa8048f55d33453b17694ab)) - Maxime, Claude Opus 5.5
+
+- - -
+
 ## [v0.2.0](https://github.com/batleforc/weebo-batlehub/compare/8e2345ffb11da414f0d196beb1530cd91ef74dcc..v0.2.0) - 2026-10-15
 #### Features
 - kit v0.16.0 — namespaced RBAC, force-orphan unbind, status retry (#9) - ([03b87c0](https://github.com/batleforc/weebo-batlehub/commit/03b87c06317c2d0c1cea604b277d391bf122b9f5)) - Maxime, Claude Opus 5.5
