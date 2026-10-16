@@ -1,95 +1,71 @@
-//! [`Workloads`] on the Kubernetes API: the objects of a managed instance,
-//! applied by server-side apply (field manager `weebo-batlehub-operator`,
-//! forced: the operator owns every field it writes), each read first.
-//!
-//! **No implicit adoption**: an object of the same name that carries
-//! neither an owner reference to the instance nor the labels
-//! `app.kubernetes.io/managed-by: weebo-batlehub` and
-//! `app.kubernetes.io/instance: <instance>` is a conflict — server-side
-//! apply would take it over silently. Labelling it hands it over. An
-//! object another instance controls (its controller owner reference) is a
-//! conflict whatever its labels: two instances never take one object from
-//! each other.
-//!
-//! **What the pods may be** (`application::pod_safety`): before anything
-//! is written, the pod templates are checked against the image allow-list
-//! and the privileges the operator refuses, and every `Secret` they read
-//! must carry `batlehub.weebo.io/credential: "true"` — the webhook refuses
-//! the same, this is the check of what is actually applied.
+//! [`Workloads`] on the Kubernetes API: the kit's `KubeOwnedObjects`
+//! (server-side apply under `weebo-batlehub-operator`, no implicit
+//! adoption, the pods checked against the image allow-list and the
+//! `batlehub.weebo.io/credential` label before anything is written) for
+//! `BatleHubLocalInstance`, plus what only BatleHub needs: the operator's
+//! token `Secret` and the shared TokenReview binding.
 
 use std::collections::BTreeMap;
 
 use api::managed::MANAGED_BY;
-use application::ports::{OwnedObject, Owner, Rollout, WorkloadError, Workloads};
+use application::ports::{OwnedObject, OwnedObjects, Owner, Rollout, WorkloadError, Workloads};
 use k8s_openapi::ByteString;
-use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::api::core::v1::Secret;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ObjectMeta, OwnerReference};
-use kube::api::{
-    Api, ApiResource, DeleteParams, DynamicObject, GroupVersionKind, Patch, PatchParams, PostParams,
-};
+use kube::api::{Api, Patch, PatchParams, PostParams};
 use kube::{Client, ResourceExt};
 use serde_json::json;
+use weebo_kit_adapters::{KubeOwnedObjects, WorkloadSettings};
+use weebo_kit_application::workload::{Listed, PodState};
 
 /// The field manager of every apply.
 pub const FIELD_MANAGER: &str = "weebo-batlehub-operator";
 
+/// The kit's [`KubeOwnedObjects`] for BatleHub's instances, plus the
+/// operator's token and the TokenReview binding.
 pub struct KubeWorkloads {
     client: Client,
-    /// The image repositories a pod may run.
-    allowed_images: Vec<String>,
+    objects: KubeOwnedObjects,
+}
+
+fn settings(allowed_images: Vec<String>) -> WorkloadSettings {
+    WorkloadSettings {
+        field_manager: FIELD_MANAGER.into(),
+        managed_by: MANAGED_BY.into(),
+        owner_api_version: format!("{}/v1alpha1", api::GROUP),
+        owner_kind: "BatleHubLocalInstance".into(),
+        credential_label: api::CREDENTIAL_LABEL.into(),
+        allowed_images,
+    }
 }
 
 impl KubeWorkloads {
     pub fn new(client: Client) -> Self {
         Self {
+            objects: KubeOwnedObjects::new(
+                client.clone(),
+                settings(application::pod_safety::default_allowed_images()),
+            ),
             client,
-            allowed_images: application::pod_safety::default_allowed_images(),
         }
     }
 
     /// The image repositories a pod may run (`WEEBO_BATLEHUB_ALLOWED_IMAGES`).
     pub fn with_allowed_images(mut self, allowed: Vec<String>) -> Self {
-        self.allowed_images = allowed;
+        self.objects = KubeOwnedObjects::new(self.client.clone(), settings(allowed));
         self
     }
 
-    /// The pods of `objects` checked, and the `Secret`s they read: nothing
-    /// is written when one is refused.
-    async fn check_pods(
-        &self,
-        owner: &Owner,
-        objects: &[OwnedObject],
-    ) -> Result<(), WorkloadError> {
-        use application::pod_safety;
-        pod_safety::check(objects, &self.allowed_images)
-            .map_err(|f| WorkloadError::Refused(f.message))?;
-        let api: Api<Secret> = Api::namespaced(self.client.clone(), &owner.namespace);
-        for name in pod_safety::secrets_to_check(objects) {
-            let meta = api
-                .get_metadata_opt(&name)
-                .await
-                .map_err(|e| kube_error(&format!("Secret {name}"), e))?;
-            // Absent: the pod waits for it (the kubelet says so); present,
-            // it must consent.
-            if let Some(meta) = meta
-                && meta.labels().get(api::CREDENTIAL_LABEL).map(String::as_str) != Some("true")
-            {
-                return Err(WorkloadError::SecretNotAllowed(
-                    pod_safety::secret_not_allowed(&owner.namespace, &name).message,
-                ));
-            }
-        }
-        Ok(())
+    fn is_ours(&self, meta: &ObjectMeta, owner: &Owner) -> bool {
+        self.objects.is_ours(meta, owner)
     }
 
-    fn dynamic(&self, owner: &Owner, api_version: &str, kind: &str) -> Api<DynamicObject> {
-        let (group, version) = match api_version.split_once('/') {
-            Some((group, version)) => (group, version),
-            None => ("", api_version),
-        };
-        let resource = ApiResource::from_gvk(&GroupVersionKind::gvk(group, version, kind));
-        Api::namespaced_with(self.client.clone(), &owner.namespace, &resource)
+    fn conflict(&self, kind: &str, name: &str, namespace: &str) -> WorkloadError {
+        self.objects.conflict(kind, name, namespace)
+    }
+
+    fn owner_reference(&self, owner: &Owner) -> OwnerReference {
+        self.objects.owner_reference(owner)
     }
 }
 
@@ -215,49 +191,7 @@ impl KubeWorkloads {
     }
 }
 
-fn kube_error(what: &str, e: kube::Error) -> WorkloadError {
-    WorkloadError::Kubernetes(format!("{what}: {e}"))
-}
-
-/// The owner reference every object carries.
-fn owner_reference(owner: &Owner) -> OwnerReference {
-    OwnerReference {
-        api_version: format!("{}/v1alpha1", api::GROUP),
-        kind: "BatleHubLocalInstance".into(),
-        name: owner.name.clone(),
-        uid: owner.uid.clone(),
-        controller: Some(true),
-        block_owner_deletion: Some(true),
-    }
-}
-
-/// Whether `meta` is an object the operator may write over for `owner`:
-/// owned by it, or labelled for it (`managed-by` and `instance`) and
-/// controlled by no other object.
-pub fn is_ours(meta: &ObjectMeta, owner: &Owner) -> bool {
-    let references = meta.owner_references.iter().flatten();
-    if references.clone().any(|r| r.uid == owner.uid) {
-        return true;
-    }
-    if references
-        .clone()
-        .any(|r| r.controller == Some(true) && r.uid != owner.uid)
-    {
-        return false;
-    }
-    let label = |key: &str| meta.labels.as_ref().and_then(|l| l.get(key));
-    label("app.kubernetes.io/managed-by").is_some_and(|v| v == MANAGED_BY)
-        && label("app.kubernetes.io/instance").is_some_and(|v| *v == owner.name)
-}
-
-fn conflict(kind: &str, name: &str, namespace: &str) -> WorkloadError {
-    WorkloadError::Conflict(format!(
-        "{kind} {namespace}/{name} exists and isn't this instance's (no owner reference to it, \
-         nor the labels app.kubernetes.io/managed-by={MANAGED_BY} and \
-         app.kubernetes.io/instance=<instance> without another controller): never taken over. \
-         Delete or rename it, or label it to hand it over"
-    ))
-}
+use weebo_kit_adapters::workloads::kube_error;
 
 /// The annotation of the TokenReview binding recording, per instance
 /// (`<namespace>/<name>`), the account it binds: what the subjects are
@@ -296,6 +230,70 @@ fn instance_key(owner: &Owner) -> String {
 }
 
 #[async_trait::async_trait]
+impl OwnedObjects for KubeWorkloads {
+    async fn apply(&self, owner: &Owner, objects: &[OwnedObject]) -> Result<(), WorkloadError> {
+        self.objects.apply(owner, objects).await
+    }
+
+    async fn remove(
+        &self,
+        owner: &Owner,
+        api_version: &str,
+        kind: &str,
+        name: &str,
+    ) -> Result<(), WorkloadError> {
+        self.objects.remove(owner, api_version, kind, name).await
+    }
+
+    async fn list(
+        &self,
+        owner: &Owner,
+        api_version: &str,
+        kind: &str,
+        labels: &BTreeMap<String, String>,
+    ) -> Result<Vec<Listed>, WorkloadError> {
+        self.objects.list(owner, api_version, kind, labels).await
+    }
+
+    async fn secret_text(
+        &self,
+        owner: &Owner,
+        name: &str,
+        key: &str,
+    ) -> Result<Option<String>, WorkloadError> {
+        self.objects.secret_text(owner, name, key).await
+    }
+
+    async fn rollout(&self, owner: &Owner, name: &str) -> Result<Option<Rollout>, WorkloadError> {
+        self.objects.rollout(owner, name).await
+    }
+
+    async fn annotate_template(
+        &self,
+        owner: &Owner,
+        name: &str,
+        annotations: &BTreeMap<String, String>,
+        restart: bool,
+    ) -> Result<bool, WorkloadError> {
+        self.objects
+            .annotate_template(owner, name, annotations, restart)
+            .await
+    }
+
+    async fn pods(
+        &self,
+        owner: &Owner,
+        selector: &BTreeMap<String, String>,
+    ) -> Result<Vec<PodState>, WorkloadError> {
+        self.objects.pods(owner, selector).await
+    }
+
+    async fn claim_size(&self, owner: &Owner, name: &str) -> Result<Option<String>, WorkloadError> {
+        self.objects.claim_size(owner, name).await
+    }
+}
+
+#[async_trait::async_trait]
 impl Workloads for KubeWorkloads {
     async fn bind_token_review(
         &self,
@@ -321,56 +319,6 @@ impl Workloads for KubeWorkloads {
         .await
     }
 
-    async fn apply(&self, owner: &Owner, objects: &[OwnedObject]) -> Result<(), WorkloadError> {
-        self.check_pods(owner, objects).await?;
-        let params = PatchParams::apply(FIELD_MANAGER).force();
-        for object in objects {
-            let api = self.dynamic(owner, &object.api_version, &object.kind);
-            let what = format!("{} {}", object.kind, object.name);
-            if let Some(existing) = api
-                .get_opt(&object.name)
-                .await
-                .map_err(|e| kube_error(&what, e))?
-            {
-                if !is_ours(&existing.metadata, owner) {
-                    return Err(conflict(&object.kind, &object.name, &owner.namespace));
-                }
-                if object.create_only {
-                    continue;
-                }
-            }
-            let mut manifest = object.manifest.clone();
-            manifest["metadata"]["ownerReferences"] = json!([owner_reference(owner)]);
-            api.patch(&object.name, &params, &Patch::Apply(manifest))
-                .await
-                .map_err(|e| kube_error(&what, e))?;
-        }
-        Ok(())
-    }
-
-    async fn remove(
-        &self,
-        owner: &Owner,
-        api_version: &str,
-        kind: &str,
-        name: &str,
-    ) -> Result<(), WorkloadError> {
-        let api = self.dynamic(owner, api_version, kind);
-        let what = format!("{kind} {name}");
-        match api.get_opt(name).await {
-            Ok(Some(existing)) if is_ours(&existing.metadata, owner) => api
-                .delete(name, &DeleteParams::background())
-                .await
-                .map(|_| ())
-                .map_err(|e| kube_error(&what, e)),
-            Ok(_) => Ok(()),
-            // A kind the cluster doesn't serve (no autoscaling/v2…): nothing
-            // of it to remove.
-            Err(kube::Error::Api(e)) if e.code == 404 => Ok(()),
-            Err(e) => Err(kube_error(&what, e)),
-        }
-    }
-
     async fn operator_token(&self, owner: &Owner, name: &str) -> Result<String, WorkloadError> {
         let api: Api<Secret> = Api::namespaced(self.client.clone(), &owner.namespace);
         let what = format!("Secret {name}");
@@ -390,8 +338,8 @@ impl Workloads for KubeWorkloads {
                 .map_err(|_| WorkloadError::Kubernetes(format!("{what}: the token is not UTF-8")))
         };
         if let Some(existing) = api.get_opt(name).await.map_err(|e| kube_error(&what, e))? {
-            if !is_ours(&existing.metadata, owner) {
-                return Err(conflict("Secret", name, &owner.namespace));
+            if !self.is_ours(&existing.metadata, owner) {
+                return Err(self.conflict("Secret", name, &owner.namespace));
             }
             return read(&existing);
         }
@@ -414,7 +362,7 @@ impl Workloads for KubeWorkloads {
                         "true".into(),
                     ),
                 ])),
-                owner_references: Some(vec![owner_reference(owner)]),
+                owner_references: Some(vec![self.owner_reference(owner)]),
                 ..Default::default()
             },
             data: Some(BTreeMap::from([(
@@ -428,129 +376,19 @@ impl Workloads for KubeWorkloads {
             // Created meanwhile: whoever did, read it back (its owner checked).
             Err(kube::Error::Api(e)) if e.code == 409 => {
                 let existing = api.get(name).await.map_err(|e| kube_error(&what, e))?;
-                if !is_ours(&existing.metadata, owner) {
-                    return Err(conflict("Secret", name, &owner.namespace));
+                if !self.is_ours(&existing.metadata, owner) {
+                    return Err(self.conflict("Secret", name, &owner.namespace));
                 }
                 read(&existing)
             }
             Err(e) => Err(kube_error(&what, e)),
         }
     }
-
-    async fn secret_text(
-        &self,
-        owner: &Owner,
-        name: &str,
-        key: &str,
-    ) -> Result<Option<String>, WorkloadError> {
-        let api: Api<Secret> = Api::namespaced(self.client.clone(), &owner.namespace);
-        let Some(secret) = api
-            .get_opt(name)
-            .await
-            .map_err(|e| kube_error(&format!("Secret {name}"), e))?
-        else {
-            return Ok(None);
-        };
-        if !is_ours(&secret.metadata, owner) {
-            return Ok(None);
-        }
-        Ok(secret
-            .data
-            .as_ref()
-            .and_then(|d| d.get(key))
-            .and_then(|b| String::from_utf8(b.0.clone()).ok()))
-    }
-
-    async fn restart(
-        &self,
-        owner: &Owner,
-        name: &str,
-        config_hash: Option<&str>,
-    ) -> Result<bool, WorkloadError> {
-        let api: Api<Deployment> = Api::namespaced(self.client.clone(), &owner.namespace);
-        let what = format!("Deployment {name}");
-        let Some(existing) = api.get_opt(name).await.map_err(|e| kube_error(&what, e))? else {
-            return Ok(false);
-        };
-        if !is_ours(&existing.metadata, owner) {
-            return Err(conflict("Deployment", name, &owner.namespace));
-        }
-        let mut annotations = serde_json::Map::new();
-        annotations.insert(
-            "kubectl.kubernetes.io/restartedAt".into(),
-            json!(k8s_openapi::jiff::Timestamp::now().to_string()),
-        );
-        if let Some(hash) = config_hash {
-            annotations.insert(api::managed::CONFIG_HASH_ANNOTATION.into(), json!(hash));
-        }
-        // A merge patch under its own manager: the operator's next apply
-        // leaves `restartedAt` alone, and agrees on the hash.
-        api.patch(
-            name,
-            &PatchParams {
-                field_manager: Some(format!("{FIELD_MANAGER}-restart")),
-                ..Default::default()
-            },
-            &Patch::Merge(json!({
-                "spec": {"template": {"metadata": {"annotations": annotations}}}
-            })),
-        )
-        .await
-        .map_err(|e| kube_error(&what, e))?;
-        Ok(true)
-    }
-
-    async fn rollout(&self, owner: &Owner, name: &str) -> Result<Option<Rollout>, WorkloadError> {
-        let api: Api<Deployment> = Api::namespaced(self.client.clone(), &owner.namespace);
-        let Some(deployment) = api
-            .get_opt(name)
-            .await
-            .map_err(|e| kube_error(&format!("Deployment {name}"), e))?
-        else {
-            return Ok(None);
-        };
-        let spec = deployment.spec.as_ref();
-        let status = deployment.status.clone().unwrap_or_default();
-        Ok(Some(Rollout {
-            replicas: spec.and_then(|s| s.replicas).unwrap_or(1),
-            updated: status.updated_replicas.unwrap_or(0),
-            available: status.available_replicas.unwrap_or(0),
-            observed: status.observed_generation >= deployment.metadata.generation
-                && deployment.metadata.generation.is_some(),
-            config_hash: spec
-                .and_then(|s| s.template.metadata.as_ref())
-                .and_then(|m| m.annotations.as_ref())
-                .and_then(|a| a.get(api::managed::CONFIG_HASH_ANNOTATION))
-                .cloned(),
-        }))
-    }
-
-    async fn claim_size(&self, owner: &Owner, name: &str) -> Result<Option<String>, WorkloadError> {
-        let api: Api<k8s_openapi::api::core::v1::PersistentVolumeClaim> =
-            Api::namespaced(self.client.clone(), &owner.namespace);
-        let claim = api
-            .get_opt(name)
-            .await
-            .map_err(|e| kube_error(&format!("PersistentVolumeClaim {name}"), e))?;
-        Ok(claim
-            .and_then(|c| c.spec)
-            .and_then(|s| s.resources)
-            .and_then(|r| r.requests)
-            .and_then(|r| r.get("storage").map(|q| q.0.clone())))
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn owner() -> Owner {
-        Owner {
-            namespace: "team".into(),
-            name: "hub".into(),
-            uid: "u-1".into(),
-        }
-    }
 
     #[test]
     fn an_account_two_instances_share_is_one_subject() {
@@ -573,45 +411,5 @@ mod tests {
         );
         assert!(subjects.iter().all(|s| s.kind == "ServiceAccount"));
         assert!(token_review_subjects(&BTreeMap::new()).is_empty());
-    }
-
-    #[test]
-    fn only_owned_or_labelled_objects_are_ours() {
-        let mut meta = ObjectMeta::default();
-        assert!(!is_ours(&meta, &owner()));
-        meta.owner_references = Some(vec![owner_reference(&owner())]);
-        assert!(is_ours(&meta, &owner()));
-        meta.owner_references = Some(vec![OwnerReference {
-            uid: "other".into(),
-            ..owner_reference(&owner())
-        }]);
-        assert!(!is_ours(&meta, &owner()));
-        // Labelled for it, but controlled by another instance: never.
-        meta.labels = Some(BTreeMap::from([
-            ("app.kubernetes.io/managed-by".into(), MANAGED_BY.into()),
-            ("app.kubernetes.io/instance".into(), "hub".into()),
-        ]));
-        assert!(!is_ours(&meta, &owner()));
-        // A non-controller reference doesn't hold it.
-        meta.owner_references = Some(vec![OwnerReference {
-            uid: "other".into(),
-            controller: None,
-            ..owner_reference(&owner())
-        }]);
-        assert!(is_ours(&meta, &owner()));
-        meta.owner_references = None;
-        assert!(is_ours(&meta, &owner()));
-        // `managed-by` alone, or another instance's name: not this one's
-        // (instance `hub` and `hub-worker` share names).
-        meta.labels = Some(BTreeMap::from([(
-            "app.kubernetes.io/managed-by".into(),
-            MANAGED_BY.into(),
-        )]));
-        assert!(!is_ours(&meta, &owner()));
-        meta.labels = Some(BTreeMap::from([
-            ("app.kubernetes.io/managed-by".into(), MANAGED_BY.into()),
-            ("app.kubernetes.io/instance".into(), "hub-worker".into()),
-        ]));
-        assert!(!is_ours(&meta, &owner()));
     }
 }

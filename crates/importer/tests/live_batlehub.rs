@@ -167,7 +167,7 @@ async fn governance_written_elsewhere_is_imported_and_adopted() {
         registries: instances.clone(),
         dependents: Arc::new(ClusterDependents::new(client.clone(), None)),
         workloads: Arc::new(application::test_support::FakeWorkloads::default()),
-        operator: Default::default(),
+        operator: application::workload::OperatorPod::named(application::workload::OPERATOR_CHART),
         token_review_role: None,
         config: Arc::new(BatleHubConfigParser::default()),
         sources: Arc::new(KubeConfigSources::new(client.clone(), instances)),

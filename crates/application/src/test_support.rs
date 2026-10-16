@@ -878,128 +878,66 @@ impl ConfigSources for FakeSources {
     }
 }
 
-/// The Kubernetes objects of managed instances, in memory: applied by
-/// name, a conflict for the names set foreign, a `Deployment` whose
-/// rollout completes when told (or at once).
+/// The Kubernetes objects of managed instances, in memory: the kit's
+/// `FakeOwnedObjects`, plus tokens and the TokenReview binding.
 #[derive(Default)]
 pub struct FakeWorkloads {
-    objects: Mutex<BTreeMap<(String, String), crate::ports::OwnedObject>>,
-    foreign: Mutex<Vec<(String, String)>>,
+    objects: weebo_kit_application::test_support::FakeOwnedObjects,
     tokens: Mutex<BTreeMap<String, String>>,
-    /// Rollouts complete as soon as applied unless held.
-    hold_rollout: Mutex<bool>,
-    removed: Mutex<Vec<String>>,
+    log: Mutex<Vec<String>>,
+}
+
+impl std::ops::Deref for FakeWorkloads {
+    type Target = weebo_kit_application::test_support::FakeOwnedObjects;
+
+    fn deref(&self) -> &Self::Target {
+        &self.objects
+    }
 }
 
 impl FakeWorkloads {
-    /// `kind/name` exists and isn't the operator's.
-    pub fn foreign(&self, kind: &str, name: &str) {
-        self.foreign
-            .lock()
-            .unwrap()
-            .push((kind.into(), name.into()));
-    }
-
-    /// `kind/name` is the operator's again (or gone).
-    pub fn unforeign(&self, kind: &str, name: &str) {
-        self.foreign
-            .lock()
-            .unwrap()
-            .retain(|(k, n)| (k.as_str(), n.as_str()) != (kind, name));
-    }
-
-    pub fn object(&self, kind: &str, name: &str) -> Option<crate::ports::OwnedObject> {
-        self.objects
-            .lock()
-            .unwrap()
-            .get(&(kind.into(), name.into()))
-            .cloned()
-    }
-
-    pub fn hold_rollout(&self, hold: bool) {
-        *self.hold_rollout.lock().unwrap() = hold;
-    }
-
+    /// What was removed, restarted, bound and unbound.
     pub fn removed(&self) -> Vec<String> {
-        self.removed.lock().unwrap().clone()
+        let mut log = self.objects.log();
+        log.extend(self.log.lock().unwrap().iter().cloned());
+        log
     }
 
     /// The configuration file in `<name>-config`.
     pub fn config_file(&self, name: &str) -> Option<String> {
-        let secret = self.object("Secret", &format!("{name}-config"))?;
-        let encoded = secret.manifest["data"][api::managed::CONFIG_KEY]
-            .as_str()?
-            .to_string();
-        let bytes: k8s_openapi::ByteString = serde_json::from_value(Value::String(encoded)).ok()?;
-        String::from_utf8(bytes.0).ok()
+        self.objects
+            .secret(&format!("{name}-config"), api::managed::CONFIG_KEY)
     }
 }
 
 #[async_trait::async_trait]
-impl crate::ports::Workloads for FakeWorkloads {
+impl crate::ports::OwnedObjects for FakeWorkloads {
     async fn apply(
         &self,
-        _owner: &crate::ports::Owner,
+        owner: &crate::ports::Owner,
         objects: &[crate::ports::OwnedObject],
     ) -> Result<(), crate::ports::WorkloadError> {
-        for object in objects {
-            let key = (object.kind.clone(), object.name.clone());
-            if self.foreign.lock().unwrap().contains(&key) {
-                return Err(crate::ports::WorkloadError::Conflict(format!(
-                    "{} {} exists and isn't the operator's",
-                    object.kind, object.name
-                )));
-            }
-            let mut objects = self.objects.lock().unwrap();
-            if object.create_only && objects.contains_key(&key) {
-                continue;
-            }
-            objects.insert(key, object.clone());
-        }
-        Ok(())
+        self.objects.apply(owner, objects).await
     }
 
     async fn remove(
         &self,
-        _owner: &crate::ports::Owner,
-        _api_version: &str,
+        owner: &crate::ports::Owner,
+        api_version: &str,
         kind: &str,
         name: &str,
     ) -> Result<(), crate::ports::WorkloadError> {
-        if self
-            .objects
-            .lock()
-            .unwrap()
-            .remove(&(kind.into(), name.into()))
-            .is_some()
-        {
-            self.removed.lock().unwrap().push(format!("{kind}/{name}"));
-        }
-        Ok(())
+        self.objects.remove(owner, api_version, kind, name).await
     }
 
-    async fn operator_token(
+    async fn list(
         &self,
-        _owner: &crate::ports::Owner,
-        name: &str,
-    ) -> Result<String, crate::ports::WorkloadError> {
-        if self
-            .foreign
-            .lock()
-            .unwrap()
-            .contains(&("Secret".into(), name.into()))
-        {
-            return Err(crate::ports::WorkloadError::Conflict(format!(
-                "Secret {name} exists and isn't the operator's"
-            )));
-        }
-        Ok(self
-            .tokens
-            .lock()
-            .unwrap()
-            .entry(name.into())
-            .or_insert_with(|| format!("token-of-{name}"))
-            .clone())
+        owner: &crate::ports::Owner,
+        api_version: &str,
+        kind: &str,
+        labels: &BTreeMap<String, String>,
+    ) -> Result<Vec<weebo_kit_application::workload::Listed>, crate::ports::WorkloadError> {
+        self.objects.list(owner, api_version, kind, labels).await
     }
 
     async fn secret_text(
@@ -1013,13 +951,71 @@ impl crate::ports::Workloads for FakeWorkloads {
             .and_then(|instance| self.config_file(instance)))
     }
 
+    async fn rollout(
+        &self,
+        owner: &crate::ports::Owner,
+        name: &str,
+    ) -> Result<Option<crate::ports::Rollout>, crate::ports::WorkloadError> {
+        self.objects.rollout(owner, name).await
+    }
+
+    async fn annotate_template(
+        &self,
+        owner: &crate::ports::Owner,
+        name: &str,
+        annotations: &BTreeMap<String, String>,
+        restart: bool,
+    ) -> Result<bool, crate::ports::WorkloadError> {
+        self.objects
+            .annotate_template(owner, name, annotations, restart)
+            .await
+    }
+
+    async fn pods(
+        &self,
+        owner: &crate::ports::Owner,
+        selector: &BTreeMap<String, String>,
+    ) -> Result<Vec<weebo_kit_application::workload::PodState>, crate::ports::WorkloadError> {
+        self.objects.pods(owner, selector).await
+    }
+
+    async fn claim_size(
+        &self,
+        owner: &crate::ports::Owner,
+        name: &str,
+    ) -> Result<Option<String>, crate::ports::WorkloadError> {
+        self.objects.claim_size(owner, name).await
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::ports::Workloads for FakeWorkloads {
+    async fn operator_token(
+        &self,
+        _owner: &crate::ports::Owner,
+        name: &str,
+    ) -> Result<String, crate::ports::WorkloadError> {
+        if self.objects.is_foreign("Secret", name) {
+            return Err(crate::ports::WorkloadError::Conflict(format!(
+                "Secret {name} exists and isn't the operator's"
+            )));
+        }
+        Ok(self
+            .tokens
+            .lock()
+            .unwrap()
+            .entry(name.into())
+            .or_insert_with(|| format!("token-of-{name}"))
+            .clone())
+    }
+
     async fn bind_token_review(
         &self,
         owner: &crate::ports::Owner,
         service_account: &str,
         cluster_role: &str,
     ) -> Result<(), crate::ports::WorkloadError> {
-        self.removed.lock().unwrap().push(format!(
+        self.log.lock().unwrap().push(format!(
             "bound {}/{service_account} to {cluster_role}",
             owner.namespace
         ));
@@ -1031,7 +1027,7 @@ impl crate::ports::Workloads for FakeWorkloads {
         owner: &crate::ports::Owner,
         cluster_role: &str,
     ) -> Result<(), crate::ports::WorkloadError> {
-        let mut log = self.removed.lock().unwrap();
+        let mut log = self.log.lock().unwrap();
         log.push(format!("unbind {} from {cluster_role}", owner.name));
         if log
             .iter()
@@ -1040,67 +1036,5 @@ impl crate::ports::Workloads for FakeWorkloads {
             log.push(format!("unbound {}", owner.name));
         }
         Ok(())
-    }
-
-    async fn restart(
-        &self,
-        _owner: &crate::ports::Owner,
-        name: &str,
-        config_hash: Option<&str>,
-    ) -> Result<bool, crate::ports::WorkloadError> {
-        let mut objects = self.objects.lock().unwrap();
-        let Some(deployment) = objects.get_mut(&("Deployment".into(), name.into())) else {
-            return Ok(false);
-        };
-        if let Some(hash) = config_hash {
-            deployment.manifest["spec"]["template"]["metadata"]["annotations"]
-                [api::managed::CONFIG_HASH_ANNOTATION] = Value::String(hash.into());
-        }
-        self.removed
-            .lock()
-            .unwrap()
-            .push(format!("restarted {name}"));
-        Ok(true)
-    }
-
-    async fn claim_size(
-        &self,
-        _owner: &crate::ports::Owner,
-        name: &str,
-    ) -> Result<Option<String>, crate::ports::WorkloadError> {
-        Ok(self
-            .object("PersistentVolumeClaim", name)
-            .and_then(|claim| {
-                claim.manifest["spec"]["resources"]["requests"]["storage"]
-                    .as_str()
-                    .map(String::from)
-            }))
-    }
-
-    async fn rollout(
-        &self,
-        _owner: &crate::ports::Owner,
-        name: &str,
-    ) -> Result<Option<crate::ports::Rollout>, crate::ports::WorkloadError> {
-        let Some(deployment) = self.object("Deployment", name) else {
-            return Ok(None);
-        };
-        let spec = &deployment.manifest["spec"];
-        let replicas = spec["replicas"].as_i64().unwrap_or(1) as i32;
-        let ready = if *self.hold_rollout.lock().unwrap() {
-            0
-        } else {
-            replicas
-        };
-        Ok(Some(crate::ports::Rollout {
-            replicas,
-            updated: ready,
-            available: ready,
-            observed: true,
-            config_hash: spec["template"]["metadata"]["annotations"]
-                [api::managed::CONFIG_HASH_ANNOTATION]
-                .as_str()
-                .map(String::from),
-        }))
     }
 }
