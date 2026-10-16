@@ -2,6 +2,14 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## [v0.2.0](https://github.com/batleforc/weebo-batlehub/compare/8e2345ffb11da414f0d196beb1530cd91ef74dcc..v0.2.0) - 2026-10-15
+#### Features
+- kit v0.16.0 — namespaced RBAC, force-orphan unbind, status retry (#9) - ([03b87c0](https://github.com/batleforc/weebo-batlehub/commit/03b87c06317c2d0c1cea604b277d391bf122b9f5)) - Maxime, Claude Opus 5.5
+#### Bug Fixes
+- review 2026-10-15 — rollouts, rejected configs, managed pod restrictions (#8) - ([8e2345f](https://github.com/batleforc/weebo-batlehub/commit/8e2345ffb11da414f0d196beb1530cd91ef74dcc)) - Maxime, Claude Opus 5.5
+
+- - -
+
 ## [v0.1.0](https://github.com/batleforc/weebo-batlehub/compare/v0.1.0-alpha.1..v0.1.0) - 2026-10-15
 #### Features
 - weebo-batlehub-importer and the measured budget (M5) (#7) - ([b10a163](https://github.com/batleforc/weebo-batlehub/commit/b10a163cbf757d1e5503b33770504815b8b580d1)) - Maxime, Claude Opus 5.5, Claude Opus 5.5, Claude Opus 5.5, Claude Opus 5.5
