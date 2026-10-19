@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## [v0.2.2](https://github.com/batleforc/weebo-batlehub/compare/ca9f59ce8e0c054f06d4f305152c847ae859841a..v0.2.2) - 2026-10-19
+#### Miscellaneous Chores
+- (**kit**) weebo-operator-kit v0.18.2, 4 tokio workers by default (#11) - ([ca9f59c](https://github.com/batleforc/weebo-batlehub/commit/ca9f59ce8e0c054f06d4f305152c847ae859841a)) - Maxime, Claude Opus 5.5 (1M context)
+
+- - -
+
 ## [v0.2.1](https://github.com/batleforc/weebo-batlehub/compare/823b08a8cb53fd0feaa8048f55d33453b17694ab..v0.2.1) - 2026-10-16
 #### Refactoring
 - kit v0.17.0 — the managed workload core, local instances and namespace consent from the kit (#10) - ([823b08a](https://github.com/batleforc/weebo-batlehub/commit/823b08a8cb53fd0feaa8048f55d33453b17694ab)) - Maxime, Claude Opus 5.5
