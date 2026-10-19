@@ -179,6 +179,12 @@ prometheusRule:
   # -- Share of failed reconciles (over 15 min, per kind) that fires
   # the <Chart>ReconcileErrors alert.
   reconcileErrorRatio: 0.1
+  repeatedDrift:
+    # -- The <Chart>RepeatedDrift alert, on <prefix>_remote_writes_total.
+    # Off: this operator doesn't count its BatleHub admin API writes (no
+    # record_write call), so the metric doesn't exist and the alert could
+    # never fire. Turn it on once the writes are counted.
+    enabled: false
 
 probes:
   # -- Gives the webhook server time to load its certificate before the
