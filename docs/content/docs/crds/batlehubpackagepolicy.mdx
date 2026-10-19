@@ -40,13 +40,64 @@ spec:
 
 | Field | Type | Required | Default | Description |
 | --- | --- | --- | --- | --- |
-| `deletionPolicy` | `string` | no | `"Delete"` | `Delete` (default) clears what this object wrote when it is deleted; `Orphan` leaves it on the instance. |
-| `exemptions` | `object[]` | no |  | The version's exemptions from its gates, one per gate. Needs `version`, and a grant of `gates:exempt` to the operator's identity on the version or its package (no role carries it). |
-| `instanceRef` | `object` | no |  | The `BatleHubLocalInstance` of this namespace holding the registry; unset, the only one of this namespace. Immutable. |
-| `package` | `string` | yes |  | The package, as the registry names it (`@acme/billing`). Immutable. |
-| `policy` | `object` | no |  | The node's policy, as BatleHub's API takes it (snake_case keys): it replaces the node's policy as a whole, a key left out inherits from the tier above. |
-| `registry` | `string` | yes |  | The registry's name on the instance. Immutable. |
-| `version` | `string` | no |  | One version of the package; unset, the package itself. Immutable. |
+| `deletionPolicy` | `string` | no | `"Delete"` | `Delete` (default) clears what this object wrote when it is deleted; `Orphan` leaves it on the instance.<br /><br />Values: `"Delete"`, `"Orphan"` |
+| [`exemptions`](#spec.exemptions) | `object[]` | no |  | The version's exemptions from its gates, one per gate. Needs `version`, and a grant of `gates:exempt` to the operator's identity on the version or its package (no role carries it).<br /><br />Constraints: `maxItems: 4` |
+| [`instanceRef`](#spec.instanceRef) | `object` | no |  | The `BatleHubLocalInstance` of this namespace holding the registry; unset, the only one of this namespace. Immutable. |
+| `package` | `string` | yes |  | The package, as the registry names it (`@acme/billing`). Immutable.<br /><br />Constraints: `minLength: 1`, `maxLength: 1024` |
+| [`policy`](#spec.policy) | `object` | no |  | The node's policy, as BatleHub's API takes it (snake_case keys): it replaces the node's policy as a whole, a key left out inherits from the tier above. |
+| `registry` | `string` | yes |  | The registry's name on the instance. Immutable.<br /><br />Constraints: `minLength: 1`, `maxLength: 253` |
+| `version` | `string` | no |  | One version of the package; unset, the package itself. Immutable.<br /><br />Constraints: `minLength: 1`, `maxLength: 256` |
+
+**Rules**
+
+- instanceRef is immutable — `has(self.instanceRef) == has(oldSelf.instanceRef)`
+- version is immutable — `has(self.version) == has(oldSelf.version)`
+- set policy, exemptions, or both — `has(self.policy) || (has(self.exemptions) && size(self.exemptions) > 0)`
+- exemptions apply to a version: set version — `!has(self.exemptions) || size(self.exemptions) == 0 || has(self.version)`
+- `package`: package is immutable — `self == oldSelf`
+- `package`: package may not be blank, have a `.` or `..` part between slashes, nor start or end with a space — `self == self.trim() && self.split('/').all(s, s != '.' && s != '..')`
+- `registry`: registry is immutable — `self == oldSelf`
+- `registry`: registry must be a registry name — `self != '.' && self != '..' && !self.contains('/')`
+- `version`: version is immutable — `self == oldSelf`
+- `version`: version may not be `.`, contain `..`, `/` or `\`, nor start or end with a space — `self == self.trim() && self != '.' && !self.contains('..') && !self.contains('/') && !self.contains('\\')`
+
+### `spec.exemptions[]` [#spec.exemptions]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `exemptUntil` | `string` | yes |  | RFC 3339, in the future when written: an expired exemption is reported (`ExemptionExpired`), never written.<br /><br />Constraints: `minLength: 1` |
+| `gate` | `string` | yes |  | The gates a version may be exempted from.<br /><br />Values: `"cve_gate"`, `"license_gate"`, `"security_verdict"`, `"flags"` |
+| `reason` | `string` | yes |  | Why: kept in BatleHub's audit trail.<br /><br />Constraints: `minLength: 1`, `maxLength: 1024` |
+
+### `spec.instanceRef` [#spec.instanceRef]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `kind` | `string` | no |  | `LocalInstance`, the only kind (may be left out).<br /><br />Values: `"LocalInstance"` |
+| `name` | `string` | yes |  | `metadata.name` of the `BatleHubLocalInstance`.<br /><br />Constraints: `minLength: 1` |
+| `namespace` | `string` | no |  | Not allowed: the instance is in this object's namespace. |
+
+**Rules**
+
+- instanceRef is immutable — `self == oldSelf`
+- the instance must be in this object's namespace — `!has(self.__namespace__)`
+
+### `spec.policy` [#spec.policy]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `prerelease_visibility` | `string` | no |  | Values: `"public"`, `"internal"`, `"team"`, `"private"` |
+| `quota` | `object` | no |  |  |
+| [`rules`](#spec.policy.rules) | `object[]` | no |  |  |
+| `versioning` | `object` | no |  |  |
+| `visibility` | `string` | no |  | Values: `"public"`, `"internal"`, `"team"`, `"private"` |
+
+### `spec.policy.rules[]` [#spec.policy.rules]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `gate` | `string` | yes |  | Constraints: `minLength: 1` |
+| `settings` | `object` | no |  |  |
 
 ## Build a manifest
 

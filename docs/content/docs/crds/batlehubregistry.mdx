@@ -43,11 +43,44 @@ spec:
 | Field | Type | Required | Default | Description |
 | --- | --- | --- | --- | --- |
 | `config` | `object` | no |  | Every other key of the `[[registries]]` table, written in YAML key for key (`mode`, `upstreams`, `rbac`, `rules`, `cache`, `hosts`…). |
-| `configFrom` | `object[]` | no |  | TOML fragments of the table merged over `config` (`upstream_auth`, `tls`…), from this namespace. A fragment may not set `type` nor `name`. |
-| `instanceRef` | `object` | no |  | The `BatleHubLocalInstance` serving this registry; unset, the only one of this namespace. Another namespace's instance must accept this one (its `registrySelector.namespaces`). |
-| `name` | `string` | no |  | The name BatleHub serves it under; defaults to this object's name. |
+| [`configFrom`](#spec.configFrom) | `object[]` | no |  | TOML fragments of the table merged over `config` (`upstream_auth`, `tls`…), from this namespace. A fragment may not set `type` nor `name`. |
+| [`instanceRef`](#spec.instanceRef) | `object` | no |  | The `BatleHubLocalInstance` serving this registry; unset, the only one of this namespace. Another namespace's instance must accept this one (its `registrySelector.namespaces`). |
+| `name` | `string` | no |  | The name BatleHub serves it under; defaults to this object's name.<br /><br />Constraints: `minLength: 1` |
 | `suspend` | `boolean` | no |  | Keep the object, leave the registry out of the configuration. |
-| `type` | `string` | yes |  | The registry's type: `npm`, `cargo`, `pypi`… (validated by BatleHub's parser). |
+| `type` | `string` | yes |  | The registry's type: `npm`, `cargo`, `pypi`… (validated by BatleHub's parser).<br /><br />Constraints: `minLength: 1` |
+
+### `spec.configFrom[]` [#spec.configFrom]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| [`configMapRef`](#spec.configFrom.configMapRef) | `object` | no |  | A key of a `ConfigMap`. |
+| [`secretRef`](#spec.configFrom.secretRef) | `object` | no |  | A key of a `Secret` labelled `batlehub.weebo.io/credential: "true"`. |
+
+**Rules**
+
+- set exactly one of configMapRef and secretRef — `has(self.configMapRef) != has(self.secretRef)`
+
+### `spec.configFrom[].configMapRef` [#spec.configFrom.configMapRef]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `key` | `string` | no | `"config.toml"` | Defaults to `config.toml`. |
+| `name` | `string` | yes |  | Constraints: `minLength: 1` |
+
+### `spec.configFrom[].secretRef` [#spec.configFrom.secretRef]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `key` | `string` | no | `"config.toml"` | Defaults to `config.toml`. |
+| `name` | `string` | yes |  | Constraints: `minLength: 1` |
+
+### `spec.instanceRef` [#spec.instanceRef]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `kind` | `string` | no |  | `LocalInstance`, the only kind (may be left out).<br /><br />Values: `"LocalInstance"` |
+| `name` | `string` | yes |  | `metadata.name` of the `BatleHubLocalInstance`.<br /><br />Constraints: `minLength: 1` |
+| `namespace` | `string` | no |  | Namespace of the instance; defaults to this registry's own. Another namespace's instance must accept this one (its `registrySelector.namespaces`). |
 
 ## Build a manifest
 

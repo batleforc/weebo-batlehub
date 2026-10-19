@@ -41,13 +41,76 @@ spec:
 
 | Field | Type | Required | Default | Description |
 | --- | --- | --- | --- | --- |
-| `action` | `string` | yes |  | What to run (the guide lists each action's endpoint and params). |
-| `instanceRef` | `object` | no |  | The `BatleHubLocalInstance` of this namespace to act on; unset, the only one of this namespace. Immutable. |
-| `params` | `object` | no | `{}` | The action's parameters: which ones an action needs is checked when the object is written. |
-| `schedule` | `string` | no |  | A 5-field cron expression (minute hour day-of-month month day-of-week, UTC; day-of-week 0-7 from Sunday). Unset: one run. |
+| `action` | `string` | yes |  | What to run (the guide lists each action's endpoint and params).<br /><br />Values: `"configReload"`, `"configValidate"`, `"configApplyPending"`, `"configDiscardPending"`, `"cacheWarm"`, `"cacheClearMetadata"`, `"cacheClearArtifacts"`, `"cacheEvict"`, `"cacheCoherence"`, `"packageInvalidate"`, `"exploreInvalidate"`, `"retentionRun"`, `"tombstonesCompact"`, `"vulnerabilityRescan"`, `"verdictBackfill"`, `"upstreamRecheck"`, `"auditLogPurge"`, `"airGapMissingPurge"`, `"releaseImport"`, `"ipBlock"`, `"ipUnblock"`, `"userBlock"`, `"userUnblock"`, `"packageBlock"`, `"packageUnblock"`, `"quotaReset"`, `"bannerSet"`, `"bannerClear"`, `"restart"`, `"healthCheck"` |
+| [`instanceRef`](#spec.instanceRef) | `object` | no |  | The `BatleHubLocalInstance` of this namespace to act on; unset, the only one of this namespace. Immutable. |
+| [`params`](#spec.params) | `object` | no | `{}` | The action's parameters: which ones an action needs is checked when the object is written. |
+| `schedule` | `string` | no |  | A 5-field cron expression (minute hour day-of-month month day-of-week, UTC; day-of-week 0-7 from Sunday). Unset: one run.<br /><br />Constraints: `minLength: 1`, `maxLength: 128` |
 | `suspend` | `boolean` | no | `false` | Pauses the schedule. |
-| `timeoutSeconds` | `integer` | no | `600` | Bounds the run, and the request to BatleHub. |
-| `ttlSecondsAfterFinished` | `integer` | no |  | Deletes a single run's object this long after it finished. |
+| `timeoutSeconds` | `integer` | no | `600` | Bounds the run, and the request to BatleHub.<br /><br />Constraints: `minimum: 1`, `maximum: 86400` |
+| `ttlSecondsAfterFinished` | `integer` | no |  | Deletes a single run's object this long after it finished.<br /><br />Constraints: `minimum: 0` |
+
+**Rules**
+
+- cacheWarm needs params registry — `self.action != 'cacheWarm' || (has(self.params) && has(self.params.registry))`
+- cacheClearMetadata needs params registry — `self.action != 'cacheClearMetadata' || (has(self.params) && has(self.params.registry))`
+- cacheClearArtifacts needs params registry — `self.action != 'cacheClearArtifacts' || (has(self.params) && has(self.params.registry))`
+- cacheEvict needs params registry — `self.action != 'cacheEvict' || (has(self.params) && has(self.params.registry))`
+- cacheCoherence needs params registry — `self.action != 'cacheCoherence' || (has(self.params) && has(self.params.registry))`
+- packageInvalidate needs params registry, package, version — `self.action != 'packageInvalidate' || (has(self.params) && has(self.params.registry) && has(self.params.package) && has(self.params.version))`
+- retentionRun needs params registry — `self.action != 'retentionRun' || (has(self.params) && has(self.params.registry))`
+- tombstonesCompact needs params registry — `self.action != 'tombstonesCompact' || (has(self.params) && has(self.params.registry))`
+- vulnerabilityRescan needs params registry — `self.action != 'vulnerabilityRescan' || (has(self.params) && has(self.params.registry))`
+- verdictBackfill needs params registry — `self.action != 'verdictBackfill' || (has(self.params) && has(self.params.registry))`
+- upstreamRecheck needs params registry, package — `self.action != 'upstreamRecheck' || (has(self.params) && has(self.params.registry) && has(self.params.package))`
+- auditLogPurge needs params one of before, olderThanDays — `self.action != 'auditLogPurge' || (has(self.params) && (has(self.params.before) || has(self.params.olderThanDays)))`
+- releaseImport needs params registry — `self.action != 'releaseImport' || (has(self.params) && has(self.params.registry))`
+- ipBlock needs params ip — `self.action != 'ipBlock' || (has(self.params) && has(self.params.ip))`
+- ipUnblock needs params ip — `self.action != 'ipUnblock' || (has(self.params) && has(self.params.ip))`
+- userBlock needs params user — `self.action != 'userBlock' || (has(self.params) && has(self.params.user))`
+- userUnblock needs params user — `self.action != 'userUnblock' || (has(self.params) && has(self.params.user))`
+- packageBlock needs params registry, package, version, reason — `self.action != 'packageBlock' || (has(self.params) && has(self.params.registry) && has(self.params.package) && has(self.params.version) && has(self.params.reason))`
+- packageUnblock needs params registry, package, version — `self.action != 'packageUnblock' || (has(self.params) && has(self.params.registry) && has(self.params.package) && has(self.params.version))`
+- quotaReset needs params registry, user — `self.action != 'quotaReset' || (has(self.params) && has(self.params.registry) && has(self.params.user))`
+- bannerSet needs params message, level — `self.action != 'bannerSet' || (has(self.params) && has(self.params.message) && has(self.params.level))`
+- instanceRef is immutable — `has(self.instanceRef) == has(oldSelf.instanceRef)`
+
+### `spec.instanceRef` [#spec.instanceRef]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `kind` | `string` | no |  | `LocalInstance`, the only kind (may be left out).<br /><br />Values: `"LocalInstance"` |
+| `name` | `string` | yes |  | `metadata.name` of the `BatleHubLocalInstance`.<br /><br />Constraints: `minLength: 1` |
+| `namespace` | `string` | no |  | Not allowed: the instance is in this object's namespace. |
+
+**Rules**
+
+- instanceRef is immutable — `self == oldSelf`
+- the instance must be in this object's namespace — `!has(self.__namespace__)`
+
+### `spec.params` [#spec.params]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `artifact` | `string` | no |  |  |
+| `before` | `string` | no |  | RFC 3339: purge what is older. |
+| `dryRun` | `boolean` | no |  | Report only (default `true`) for the actions that respect it. |
+| `durationSeconds` | `integer` | no |  | `ipBlock`: how long; unset, until unblocked.<br /><br />Constraints: `minimum: 1` |
+| `ip` | `string` | no |  | Constraints: `minLength: 1` |
+| `level` | `string` | no |  | `bannerSet`.<br /><br />Values: `"info"`, `"warning"`, `"error"` |
+| `message` | `string` | no |  | `bannerSet`.<br /><br />Constraints: `minLength: 1`, `maxLength: 2048` |
+| `olderThanDays` | `integer` | no |  | Purge what is older than this many days (instead of `before`).<br /><br />Constraints: `minimum: 1` |
+| `package` | `string` | no |  | Constraints: `minLength: 1`, `maxLength: 1024` |
+| `packages` | `string[]` | no |  | Packages to warm. |
+| `path` | `string` | no |  |  |
+| `paths` | `string[]` | no |  | Paths to warm (registries addressed by path). |
+| `reason` | `string` | no |  |  |
+| `registry` | `string` | no |  | A registry's name on the instance.<br /><br />Constraints: `minLength: 1`, `maxLength: 253` |
+| `repo` | `string` | no |  | `releaseImport`: the repository. |
+| `state` | `string` | no |  | `vulnerabilityRescan`, `verdictBackfill`: only the verdicts in this state.<br /><br />Values: `"allowed"`, `"warned"`, `"quarantined"`, `"denied"` |
+| `tag` | `string` | no |  | `releaseImport`: the release tag. |
+| `user` | `string` | no |  | A user id, as the instance stores it (`oidc:alice`).<br /><br />Constraints: `minLength: 1` |
+| `version` | `string` | no |  | Constraints: `minLength: 1`, `maxLength: 256` |
+| `versions` | `integer` | no |  | `cacheWarm`: how many of the latest versions.<br /><br />Constraints: `minimum: 1` |
 
 ## Build a manifest
 
