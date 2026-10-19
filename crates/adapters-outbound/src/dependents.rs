@@ -13,11 +13,17 @@ use kube::core::Selector;
 use kube::{Client, ResourceExt};
 use serde::de::DeserializeOwned;
 use weebo_kit_api::InstanceRef;
+use weebo_kit_runtime::shared::{SharedWatch, SharedWatches};
+
+use crate::scoped;
 
 pub struct ClusterDependents {
     client: Client,
     watched_namespace: Option<String>,
     selector: Option<Selector>,
+    /// The binary's shared watches: each kind read from its store once
+    /// listed, from the API otherwise.
+    watches: SharedWatches,
 }
 
 impl ClusterDependents {
@@ -26,7 +32,15 @@ impl ClusterDependents {
             client,
             watched_namespace,
             selector: None,
+            watches: SharedWatches::default(),
         }
+    }
+
+    /// Read the kinds from the binary's shared watches (on the same scope)
+    /// instead of a LIST each.
+    pub fn with_watches(mut self, watches: SharedWatches) -> Self {
+        self.watches = watches;
+        self
     }
 
     /// The operator's label selector: a registry outside it is another
@@ -144,11 +158,10 @@ impl ClusterDependents {
             return Ok(Vec::new());
         };
         let api: Api<K> = Api::namespaced(self.client.clone(), namespace);
-        let objects = api
-            .list(&self.params())
+        let store = self.watches.get::<K>().map(SharedWatch::store);
+        let objects = scoped::list(store.as_ref(), &api, &self.params(), Some(namespace))
             .await
-            .map_err(|e| format!("listing {}s: {e}", K::KIND))?
-            .items;
+            .map_err(|e| format!("listing {}s: {e}", K::KIND))?;
         Ok(objects
             .iter()
             .filter(|o| local_binds(*o, instance, default))
@@ -168,11 +181,10 @@ impl InstanceDependents for ClusterDependents {
             Some(namespace) => Api::namespaced(self.client.clone(), namespace),
             None => Api::all(self.client.clone()),
         };
-        let registries = api
-            .list(&self.params())
+        let store = self.watches.get::<Registry>().map(SharedWatch::store);
+        let registries = scoped::list(store.as_ref(), &api, &self.params(), None)
             .await
-            .map_err(|e| format!("listing BatleHubRegistries: {e}"))?
-            .items;
+            .map_err(|e| format!("listing BatleHubRegistries: {e}"))?;
         let mut dependents: Vec<String> = registries
             .iter()
             .filter(|r| binds(r, instance, default))

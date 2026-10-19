@@ -126,7 +126,15 @@ async fn instance_with_tls(
 }
 
 fn ctx(client: &Client, dependents: Arc<FakeDependents>) -> Arc<Ctx> {
-    let instances = Arc::new(LocalInstanceDirectory::new(client.clone()));
+    // As `operator::main`: one shared watch per kind, the instance and
+    // registry stores from them.
+    let health = Arc::new(Health::default());
+    let watches = controller::spawn_watches(client, &WatchScope::cluster(), &health);
+    let instances = Arc::new(
+        LocalInstanceDirectory::new(client.clone())
+            .with_store(watches.get::<LocalInstance>().expect("spawned").store()),
+    );
+    let registries = watches.get::<api::Registry>().map(|w| w.store());
     Arc::new(Ctx {
         client: client.clone(),
         gateways: Arc::new(HttpGatewayFactory::new(client.clone(), instances.clone())),
@@ -137,7 +145,7 @@ fn ctx(client: &Client, dependents: Arc<FakeDependents>) -> Arc<Ctx> {
         operator: application::workload::OperatorPod::named(application::workload::OPERATOR_CHART),
         token_review_role: None,
         config: Arc::new(BatleHubConfigParser::default()),
-        sources: Arc::new(KubeConfigSources::new(client.clone(), instances)),
+        sources: Arc::new(KubeConfigSources::new(client.clone(), instances).with_store(registries)),
         recorder: Recorder::new(
             client.clone(),
             Reporter {
@@ -146,9 +154,10 @@ fn ctx(client: &Client, dependents: Arc<FakeDependents>) -> Arc<Ctx> {
             },
         ),
         shutdown: Shutdown::never(),
-        health: Arc::new(Health::default()),
+        health,
         scope: WatchScope::cluster(),
         images: Default::default(),
+        watches,
     })
 }
 

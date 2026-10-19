@@ -256,10 +256,17 @@ fn ctx_with(
     workloads: Arc<dyn application::ports::Workloads>,
 ) -> (Arc<Ctx>, Arc<Health>) {
     let health = Arc::new(Health::default());
-    let instances = Arc::new(LocalInstanceDirectory::new(operator.clone()).with_scope(
+    // As `operator::main`: one shared watch per kind, the instance store
+    // from it.
+    let watches = controller::spawn_watches(operator, &scope, &health);
+    let mut instances = LocalInstanceDirectory::new(operator.clone()).with_scope(
         scope.watched_namespace().map(String::from),
         scope.selector().cloned(),
-    ));
+    );
+    if let Some(shared) = watches.get::<LocalInstance>() {
+        instances = instances.with_store(shared.store());
+    }
+    let instances = Arc::new(instances);
     let ctx = Arc::new(Ctx {
         client: operator.clone(),
         gateways: Arc::new(StaticGatewayFactory::new(Arc::new(FakeGateway::default()))),
@@ -282,6 +289,7 @@ fn ctx_with(
         health: health.clone(),
         scope,
         images: Default::default(),
+        watches,
     });
     (ctx, health)
 }

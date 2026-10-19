@@ -16,7 +16,8 @@ use api::{LocalInstance, Maintenance, NamespaceClaim, PackageGrant, PackagePolic
 use application::workload::OperatorPod;
 use kube::Client;
 use kube::runtime::events::{Recorder, Reporter};
-use weebo_kit_runtime::{Health, WatchScope, leader, pod, store, telemetry, webhook_server};
+use weebo_kit_runtime::shared::{LISTED_TIMEOUT, SharedWatch};
+use weebo_kit_runtime::{Health, WatchScope, leader, pod, telemetry, webhook_server};
 
 /// Default `LEASE_NAME`. Keep it across releases: old and new pods of a
 /// rollout must compete for the same lease.
@@ -88,28 +89,27 @@ async fn run(telemetry: &telemetry::Telemetry) -> anyhow::Result<()> {
     let shutdown = Shutdown::on_termination()?;
     let health = Arc::new(Health::default());
 
-    // Every resolution reads the instances: one reflector on the only
-    // instance kind, namespaced.
-    let store = store::spawn_reflector(
-        scope.api::<LocalInstance>(client.clone()),
-        &scope,
-        health.clone(),
-        "BatleHubLocalInstance reflector",
+    // One watch per CR kind, shared by every controller and by the stores
+    // read in place of a LIST (instances, registries, dependents). Spawned
+    // now, before the lease: a standby keeps them warm, and the
+    // controllers start from stores that already listed.
+    let watches = controller::spawn_watches(&client, &scope, &health);
+    let mut instances = LocalInstanceDirectory::new(client.clone()).with_scope(
+        scope.watched_namespace().map(String::from),
+        scope.selector().cloned(),
     );
-    let instances = Arc::new(
-        LocalInstanceDirectory::new(client.clone())
+    if let Some(shared) = watches.get::<LocalInstance>() {
+        instances = instances.with_store(shared.store());
+    }
+    let instances = Arc::new(instances);
+
+    let sources = Arc::new(
+        KubeConfigSources::new(client.clone(), instances.clone())
             .with_scope(
                 scope.watched_namespace().map(String::from),
                 scope.selector().cloned(),
             )
-            .with_store(store),
-    );
-
-    let sources = Arc::new(
-        KubeConfigSources::new(client.clone(), instances.clone()).with_scope(
-            scope.watched_namespace().map(String::from),
-            scope.selector().cloned(),
-        ),
+            .with_store(watches.get::<Registry>().map(SharedWatch::store)),
     );
     let parser = Arc::new(BatleHubConfigParser::default());
     // What a managed instance's pods may run (the chart's
@@ -132,7 +132,8 @@ async fn run(telemetry: &telemetry::Telemetry) -> anyhow::Result<()> {
         registries: instances,
         dependents: Arc::new(
             ClusterDependents::new(client.clone(), scope.watched_namespace().map(String::from))
-                .with_selector(scope.selector().cloned()),
+                .with_selector(scope.selector().cloned())
+                .with_watches(watches.clone()),
         ),
         workloads: Arc::new(
             KubeWorkloads::new(client.clone()).with_allowed_images(allowed_images.clone()),
@@ -154,6 +155,7 @@ async fn run(telemetry: &telemetry::Telemetry) -> anyhow::Result<()> {
         health: health.clone(),
         scope: scope.clone(),
         images: settings.images,
+        watches,
     });
 
     // The HTTPS server (probes, the scope guard, the admission webhook)
@@ -175,9 +177,17 @@ async fn run(telemetry: &telemetry::Telemetry) -> anyhow::Result<()> {
     .await?;
 
     // The controllers, in contrast, run on one replica at a time: two
-    // active reconcilers could both create the same remote object.
+    // active reconcilers could both create the same remote object. A
+    // replica campaigns once its shared watches listed (their LISTs done
+    // before the lease, not in the leader's first minute), or after
+    // LISTED_TIMEOUT: a watch that can't list is reported by /livez, not
+    // waited for.
+    let campaign = async {
+        ctx.watches.wait_listed(LISTED_TIMEOUT).await;
+        leader::acquire_leadership(&client, holder_id, DEFAULT_LEASE_NAME).await
+    };
     let leadership = tokio::select! {
-        leadership = leader::acquire_leadership(&client, holder_id, DEFAULT_LEASE_NAME) => leadership,
+        leadership = campaign => leadership,
         () = shutdown.wait() => {
             server.stopped().await;
             return Ok(());

@@ -1527,6 +1527,20 @@ Les controllers de gouvernance et de maintenance surveillent aussi les
 `BatleHubLocalInstance` (une instance qui devient `Ready` relance ses CR,
 qui sortent de `InstanceNotReady`).
 
+Une watch par kind de CR, partagée (`SharedWatches` du kit v0.20.0,
+`controller::spawn_watches`) : les six kinds, chacune ouverte une fois par
+le binaire, avant la campagne pour le lease (`wait_listed(LISTED_TIMEOUT)`),
+et servant à la fois de watch principale à son controller
+(`watches.controller`), de watch référencée aux autres (`watches_in` : les
+instances pour la gouvernance, la maintenance et les registries ; les
+registries pour l'instance) et de store aux lectures qui faisaient un LIST
+(`LocalInstanceDirectory`, les registries que rend une instance, les CR
+liées à une instance qu'on supprime, le compte d'instances du namespace) —
+le LIST de l'API reste le repli tant que le store n'a pas listé
+(`wait_synced`). Les objets possédés (Deployments), ConfigMaps et
+Namespaces en métadonnées gardent leur propre watch : un seul controller
+les lit. Passé de 16 watches à 9.
+
 ### 6.8 Webhook de validation
 
 Deux couches refusent un objet invalide avant stockage :

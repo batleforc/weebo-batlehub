@@ -25,6 +25,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use weebo_kit_runtime::events;
 use weebo_kit_runtime::metrics::ReconcileMetrics;
+use weebo_kit_runtime::shared::{SharedWatches, WatchesIn};
 use weebo_kit_runtime::status::StatusUpdate;
 use weebo_kit_runtime::{Health, WatchScope};
 
@@ -93,6 +94,54 @@ pub struct Ctx {
     /// The images a managed instance runs when its spec names none
     /// (`WEEBO_BATLEHUB_DEFAULT_IMAGE`, `…_DEFAULT_WORKER_IMAGE`).
     pub images: ImageDefaults,
+    /// The binary's shared watches ([`spawn_watches`]): one per CR kind
+    /// for every controller and every store read
+    /// (`SharedWatches::default()`: each controller watches on its own).
+    pub watches: SharedWatches,
+}
+
+/// One watch per CR kind, on `scope`, for every controller (as its own
+/// kind or a referenced one) and the stores read in place of a LIST.
+/// Spawned before the lease is campaigned for: a standby keeps them warm.
+pub fn spawn_watches(client: &Client, scope: &WatchScope, health: &Arc<Health>) -> SharedWatches {
+    let mut watches = SharedWatches::default();
+    watches.spawn(
+        scope.api::<api::LocalInstance>(client.clone()),
+        scope,
+        health,
+        "BatleHubLocalInstance watch",
+    );
+    watches.spawn(
+        scope.api::<api::Registry>(client.clone()),
+        scope,
+        health,
+        "BatleHubRegistry watch",
+    );
+    watches.spawn(
+        scope.api::<api::NamespaceClaim>(client.clone()),
+        scope,
+        health,
+        "BatleHubNamespaceClaim watch",
+    );
+    watches.spawn(
+        scope.api::<api::PackageGrant>(client.clone()),
+        scope,
+        health,
+        "BatleHubPackageGrant watch",
+    );
+    watches.spawn(
+        scope.api::<api::PackagePolicy>(client.clone()),
+        scope,
+        health,
+        "BatleHubPackagePolicy watch",
+    );
+    watches.spawn(
+        scope.api::<api::Maintenance>(client.clone()),
+        scope,
+        health,
+        "BatleHubMaintenance watch",
+    );
+    watches
 }
 
 /// The default images of managed instances: `repository[:tag]` each,
@@ -370,17 +419,18 @@ where
 /// readiness): the kinds bound to an instance of their own namespace.
 pub fn with_instances<K>(
     controller: kube::runtime::Controller<K>,
-    scope: &WatchScope,
-    client: Client,
+    ctx: &Ctx,
+    client: &Client,
 ) -> kube::runtime::Controller<K>
 where
     K: Resource<DynamicType = ()> + Clone + Debug + DeserializeOwned + Send + Sync + 'static,
 {
     let store = controller.store();
-    controller.watches(
-        scope.api::<api::LocalInstance>(client),
-        scope.watcher_config(),
-        move |instance| {
+    controller.watches_in(
+        &ctx.watches,
+        &ctx.scope,
+        client,
+        move |instance: api::LocalInstance| {
             let namespace = instance.namespace();
             store
                 .state()

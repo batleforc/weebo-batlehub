@@ -15,6 +15,7 @@ use kube::runtime::controller::Action;
 use kube::runtime::reflector::ObjectRef;
 use kube::{Client, ResourceExt};
 use serde_json::Map;
+use weebo_kit_runtime::shared::WatchesIn;
 
 use super::{Ctx, Error, error_policy};
 
@@ -22,15 +23,18 @@ pub const KIND: &str = "BatleHubRegistry";
 
 pub async fn run(client: Client, ctx: Arc<Ctx>) {
     let health = ctx.health.clone();
-    let controller = super::controller(ctx.scope.api::<Registry>(client.clone()), &ctx.scope);
+    let controller = ctx
+        .watches
+        .controller(ctx.scope.api::<Registry>(client.clone()), &ctx.scope);
     let store = controller.store();
     let results = controller
         // An instance appearing, going, or switching `manageConfig` changes
         // which registries no instance renders.
-        .watches(
-            ctx.scope.api::<LocalInstance>(client),
-            ctx.scope.watcher_config(),
-            move |_| {
+        .watches_in(
+            &ctx.watches,
+            &ctx.scope,
+            &client,
+            move |_: LocalInstance| {
                 store
                     .state()
                     .iter()

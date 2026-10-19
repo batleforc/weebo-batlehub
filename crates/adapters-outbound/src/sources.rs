@@ -14,15 +14,20 @@ use application::ports::{ConfigSources, RegistryResolver, RegistryView, SourceEr
 use k8s_openapi::api::core::v1::{ConfigMap, Secret};
 use kube::api::{Api, ListParams};
 use kube::core::Selector;
+use kube::runtime::reflector::Store;
 use kube::{Client, ResourceExt};
 
 use crate::instances::LocalInstanceDirectory;
+use crate::scoped;
 
 pub struct KubeConfigSources {
     client: Client,
     instances: Arc<LocalInstanceDirectory>,
     watched_namespace: Option<String>,
     selector: Option<Selector>,
+    /// The registries' watch store (the same scope): read once listed,
+    /// instead of a LIST on every instance pass.
+    registries: Option<Store<Registry>>,
 }
 
 impl KubeConfigSources {
@@ -32,7 +37,15 @@ impl KubeConfigSources {
             instances,
             watched_namespace: None,
             selector: None,
+            registries: None,
         }
+    }
+
+    /// The binary's `BatleHubRegistry` watch store, on the scope of
+    /// [`Self::with_scope`].
+    pub fn with_store(mut self, registries: Option<Store<Registry>>) -> Self {
+        self.registries = registries;
+        self
     }
 
     /// The operator's watch scope: the namespace it is limited to and its
@@ -179,11 +192,9 @@ impl ConfigSources for KubeConfigSources {
             Some(selector) => ListParams::default().labels_from(selector),
             None => ListParams::default(),
         };
-        let registries = api
-            .list(&params)
+        let registries = scoped::list(self.registries.as_ref(), &api, &params, None)
             .await
-            .map_err(|e| format!("listing BatleHubRegistries: {e}"))?
-            .items;
+            .map_err(|e| format!("listing BatleHubRegistries: {e}"))?;
         let mut views = Vec::with_capacity(registries.len());
         for registry in registries {
             let namespace = registry.namespace().unwrap_or_default();

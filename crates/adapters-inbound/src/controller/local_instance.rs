@@ -59,7 +59,9 @@ const KIND: &str = "BatleHubLocalInstance";
 
 pub async fn run(client: Client, ctx: Arc<Ctx>) {
     let health = ctx.health.clone();
-    let controller = super::controller(ctx.scope.api::<LocalInstance>(client.clone()), &ctx.scope);
+    let controller = ctx
+        .watches
+        .controller(ctx.scope.api::<LocalInstance>(client.clone()), &ctx.scope);
     // A managed instance's Deployments: a rollout progressing is a pass.
     let deployments: Api<Deployment> = match ctx.scope.watched_namespace() {
         Some(namespace) => Api::namespaced(client.clone(), namespace),
@@ -87,16 +89,27 @@ pub async fn run(client: Client, ctx: Arc<Ctx>) {
     // A registry may attach to any instance: every one renders again
     // (requests for one instance collapse in the queue). Its store tells
     // which ConfigMaps the registries read.
-    let (registries, writer) = reflector::store::<Registry>();
-    let registry_changes = watcher(
-        ctx.scope.api::<Registry>(client.clone()),
-        ctx.scope.watcher_config(),
-    )
-    .default_backoff()
-    .reflect(writer)
-    .touched_objects();
     let on_registry = all.clone();
-    let controller = controller.watches_stream(registry_changes, move |_| on_registry());
+    let (registries, controller) = match ctx.watches.get::<Registry>() {
+        Some(shared) => (
+            shared.store(),
+            controller.watches_stream(shared.touched(), move |_| on_registry()),
+        ),
+        None => {
+            let (registries, writer) = reflector::store::<Registry>();
+            let registry_changes = watcher(
+                ctx.scope.api::<Registry>(client.clone()),
+                ctx.scope.watcher_config(),
+            )
+            .default_backoff()
+            .reflect(writer)
+            .touched_objects();
+            (
+                registries,
+                controller.watches_stream(registry_changes, move |_| on_registry()),
+            )
+        }
+    };
 
     // Metadata only: no ConfigMap data in memory.
     let configmaps: Api<PartialObjectMeta<ConfigMap>> = match ctx.scope.watched_namespace() {
@@ -664,7 +677,7 @@ async fn cleanup(
 ) -> Result<(), Error> {
     // Bound by default too when it is the only one of its namespace (in
     // the operator's scope).
-    let default = api.list(&ctx.scope.list_params()).await?.items.len() == 1;
+    let default = namespace_instances(api, instance, ctx).await? == 1;
     let bound = bound(instance);
     let dependents = ctx
         .dependents
@@ -679,6 +692,33 @@ async fn cleanup(
     let outcome = Outcome::failed(in_use.clone());
     super::publish(api, &ctx.recorder, instance, &outcome, Map::new()).await?;
     Err(Error::Waiting(in_use))
+}
+
+/// How many instances `instance`'s namespace holds in the operator's
+/// scope: from the shared watch once it has listed, from the API
+/// otherwise (an unsynced store is never read as empty).
+async fn namespace_instances(
+    api: &Api<LocalInstance>,
+    instance: &LocalInstance,
+    ctx: &Ctx,
+) -> Result<usize, Error> {
+    if let Some(shared) = ctx.watches.get::<LocalInstance>() {
+        let store = shared.store();
+        if weebo_kit_adapters::wait_synced(
+            &store,
+            weebo_kit_adapters::instance::STORE_READY_TIMEOUT,
+        )
+        .await
+        {
+            let namespace = instance.namespace();
+            return Ok(store
+                .state()
+                .iter()
+                .filter(|i| i.namespace() == namespace)
+                .count());
+        }
+    }
+    Ok(api.list(&ctx.scope.list_params()).await?.items.len())
 }
 
 /// Run on every deletion, `force-orphan` included (after [`cleanup`]
