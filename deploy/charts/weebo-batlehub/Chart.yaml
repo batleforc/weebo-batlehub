@@ -2,8 +2,8 @@ apiVersion: v2
 name: weebo-batlehub
 description: Kubernetes operator driving BatleHub (package registry proxy-cache) instances as CRDs.
 type: application
-version: 0.2.2
-appVersion: "0.2.2"
+version: 0.2.3
+appVersion: "0.2.3"
 # Native `preStop: sleep` and the admission/policy APIs used here.
 kubeVersion: ">=1.30.0-0"
 home: https://github.com/batleforc/weebo-batlehub
