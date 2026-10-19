@@ -44,11 +44,721 @@ spec:
 | Field | Type | Required | Default | Description |
 | --- | --- | --- | --- | --- |
 | `config` | `object` | no |  | BatleHub's configuration file (`config.toml`) written in YAML, key for key: a TOML table is an object, an array of tables a list of objects. Never typed here: BatleHub's own parser validates it. `${VAR}` placeholders are kept and resolved by the instance from its own environment (`managed.env`). Rendered with `managed`, or `external.manageConfig`. |
-| `configLayers` | `object[]` | no |  | TOML documents merged in order over `config`, the way BatleHub merges its `--config` layers (the later wins; tables merge; arrays of tables merge entry by entry on a unique `name`, else `type`). |
-| `external` | `object` | no |  | A BatleHub the operator doesn't deploy: it reaches it at `url` with an admin token, observes it and, with `manageConfig`, pushes its configuration. |
-| `managed` | `object` | no |  | A BatleHub the operator deploys, in this namespace, and whose configuration it always manages. |
-| `registrySelector` | `object` | no |  | Which `BatleHubRegistry`s this instance serves, rendered as `[[registries]]` entries after `configLayers`. |
-| `reload` | `object` | no |  | How a new configuration reaches the instance. |
+| [`configLayers`](#spec.configLayers) | `object[]` | no |  | TOML documents merged in order over `config`, the way BatleHub merges its `--config` layers (the later wins; tables merge; arrays of tables merge entry by entry on a unique `name`, else `type`). |
+| [`external`](#spec.external) | `object` | no |  | A BatleHub the operator doesn't deploy: it reaches it at `url` with an admin token, observes it and, with `manageConfig`, pushes its configuration. |
+| [`managed`](#spec.managed) | `object` | no |  | A BatleHub the operator deploys, in this namespace, and whose configuration it always manages. |
+| [`registrySelector`](#spec.registrySelector) | `object` | no |  | Which `BatleHubRegistry`s this instance serves, rendered as `[[registries]]` entries after `configLayers`. |
+| [`reload`](#spec.reload) | `object` | no |  | How a new configuration reaches the instance. |
+
+**Rules**
+
+- set exactly one of external and managed — `has(self.external) != has(self.managed)`
+- the mode (external or managed) is immutable — `has(self.external) == has(oldSelf.external)`
+
+### `spec.configLayers[]` [#spec.configLayers]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| [`configMapRef`](#spec.configLayers.configMapRef) | `object` | no |  | A key of a `ConfigMap`. |
+| [`secretRef`](#spec.configLayers.secretRef) | `object` | no |  | A key of a `Secret` labelled `batlehub.weebo.io/credential: "true"`. |
+
+**Rules**
+
+- set exactly one of configMapRef and secretRef — `has(self.configMapRef) != has(self.secretRef)`
+
+### `spec.configLayers[].configMapRef` [#spec.configLayers.configMapRef]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `key` | `string` | no | `"config.toml"` | Defaults to `config.toml`. |
+| `name` | `string` | yes |  | Constraints: `minLength: 1` |
+
+### `spec.configLayers[].secretRef` [#spec.configLayers.secretRef]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `key` | `string` | no | `"config.toml"` | Defaults to `config.toml`. |
+| `name` | `string` | yes |  | Constraints: `minLength: 1` |
+
+### `spec.external` [#spec.external]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| [`adminTokenSecretRef`](#spec.external.adminTokenSecretRef) | `object` | yes |  | A token of BatleHub's `admin` role, in a `Secret` of this namespace labelled `batlehub.weebo.io/instance-token: "true"` (without the label the operator doesn't read it). Read on every reconcile: rotating it needs no restart. |
+| `manageConfig` | `boolean` | no |  | Push the configuration rendered from `config`, `configLayers` and the registries through the admin API, replacing the instance's first configuration file. The instance needs hot reload enabled. A change of a key that needs a restart is held back (`RestartForbidden`): the operator can't restart an instance it doesn't deploy. Without it, the operator only observes. |
+| [`podSelector`](#spec.external.podSelector) | `object` | no |  | The instance's proxy pods, when it runs in this namespace (the BatleHub chart): its replicas don't share a reload, so the operator pushes and approves the configuration on each selected pod, over plain HTTP on its IP and container port (the one named `http`, else the first container's first). Select the proxy pods only: the chart's worker pods carry the same labels plus `app.kubernetes.io/component: worker` (exclude it with a `DoesNotExist` expression). Without it, `url` is the only entry point, and an instance of several replicas is not supported with `manageConfig`. |
+| [`tls`](#spec.external.tls) | `object` | no | `{"insecureSkipVerify":false}` | TLS verification of the connection to `url`: a private CA to trust (`tls.caSecretRef`, a `Secret` of this namespace), or the `tls.insecureSkipVerify` escape hatch. |
+| `url` | `string` | yes |  | Base URL of the BatleHub instance, e.g. `https://batlehub.example.com`. |
+
+### `spec.external.adminTokenSecretRef` [#spec.external.adminTokenSecretRef]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `key` | `string` | yes |  |  |
+| `name` | `string` | yes |  |  |
+
+### `spec.external.podSelector` [#spec.external.podSelector]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| [`matchExpressions`](#spec.external.podSelector.matchExpressions) | `object[]` | no |  | matchExpressions is a list of label selector requirements. The requirements are ANDed. |
+| `matchLabels` | `map[string]` | no |  | matchLabels is a map of \{key,value\} pairs. A single \{key,value\} in the matchLabels map is equivalent to an element of matchExpressions, whose key field is "key", the operator is "In", and the values array contains only "value". The requirements are ANDed. |
+
+### `spec.external.podSelector.matchExpressions[]` [#spec.external.podSelector.matchExpressions]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `key` | `string` | yes |  | key is the label key that the selector applies to. |
+| `operator` | `string` | yes |  | operator represents a key's relationship to a set of values. Valid operators are In, NotIn, Exists and DoesNotExist. |
+| `values` | `string[]` | no |  | values is an array of string values. If the operator is In or NotIn, the values array must be non-empty. If the operator is Exists or DoesNotExist, the values array must be empty. This array is replaced during a strategic merge patch. |
+
+### `spec.external.tls` [#spec.external.tls]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| [`caSecretRef`](#spec.external.tls.caSecretRef) | `object` | no |  | Optional custom CA certificate (a PEM bundle under `key`) to verify the instance's TLS with, read from a `Secret` of the instance's own namespace. Added on top of the platform trust store. |
+| `insecureSkipVerify` | `boolean` | no | `false` | Skip certificate verification entirely — insecure, intended only for throwaway/self-signed instances. Prefer `caSecretRef` below. |
+
+### `spec.external.tls.caSecretRef` [#spec.external.tls.caSecretRef]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `key` | `string` | yes |  |  |
+| `name` | `string` | yes |  |  |
+
+### `spec.managed` [#spec.managed]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| [`affinity`](#spec.managed.affinity) | `object` | no |  | Affinity is a group of affinity scheduling rules. |
+| [`credentials`](#spec.managed.credentials) | `object` | no |  | A `Secret` of this namespace holding a second configuration layer (`credentials.toml`: upstream tokens, database passwords…), labelled `batlehub.weebo.io/credential: "true"`. Mounted as is, never rendered: its hash only (`status.credentialsHash`) enters the configuration, so a rotation is a reload. |
+| [`env`](#spec.managed.env) | `object[]` | no |  | The environment of the proxy and worker containers: where `${VAR}` placeholders resolve. |
+| [`envFrom`](#spec.managed.envFrom) | `object[]` | no |  |  |
+| [`extraVolumeMounts`](#spec.managed.extraVolumeMounts) | `object[]` | no |  |  |
+| `extraVolumes` | `object[]` | no |  | CA bundles, a `static_dir`, a `cli_binary_path`… |
+| `hotReload` | `boolean` | no |  | `false` sets `BATLEHUB_DISABLE_HOT_RELOAD=1`: every change of the configuration is then a restart. |
+| [`image`](#spec.managed.image) | `object` | no |  |  |
+| [`imagePullSecrets`](#spec.managed.imagePullSecrets) | `object[]` | no |  |  |
+| [`ingress`](#spec.managed.ingress) | `object` | no |  | An `Ingress` to the proxy pods. Its hosts are not derived from the registries' `hosts`: set `server.trusted_proxies` knowingly. |
+| [`networkPolicy`](#spec.managed.networkPolicy) | `object` | no |  | A `NetworkPolicy` on the proxy and worker pods: egress refused but DNS and `egressTo`; ingress on the HTTP port from `ingressFrom` (every source when empty) and the operator. |
+| `nodeSelector` | `map[string]` | no |  |  |
+| [`operatorAccess`](#spec.managed.operatorAccess) | `object` | no |  | How the operator reaches the admin API it needs. |
+| [`persistence`](#spec.managed.persistence) | `object` | no |  | The artifact cache, with BatleHub's default filesystem storage. |
+| `podAnnotations` | `map[string]` | no |  |  |
+| [`podDisruptionBudget`](#spec.managed.podDisruptionBudget) | `object` | no |  | Rendered from 2 proxy replicas. |
+| `podLabels` | `map[string]` | no |  |  |
+| `podSecurityContext` | `object` | no |  | Unset: non-root (65532), seccomp `RuntimeDefault`. |
+| `replicas` | `integer` | no | `1` | Proxy pods. A filesystem cache on a `ReadWriteOnce` volume allows one.<br /><br />Constraints: `minimum: 0` |
+| [`resources`](#spec.managed.resources) | `object` | no |  | ResourceRequirements describes the compute resource requirements. |
+| `runtimeClassName` | `string` | no |  |  |
+| `securityContext` | `object` | no |  | Unset: read-only root filesystem, no capability, no privilege escalation. |
+| [`service`](#spec.managed.service) | `object` | no |  |  |
+| [`serviceAccount`](#spec.managed.serviceAccount) | `object` | no |  |  |
+| [`tolerations`](#spec.managed.tolerations) | `object[]` | no |  |  |
+| `updateStrategy` | `string` | no |  | How the proxy pods are replaced when a key read at startup changes; unset, derived (`Recreate` with a filesystem cache on a `ReadWriteOnce` volume, `RollingUpdate` with `maxUnavailable: 0` otherwise). `status.updateStrategy` shows the one in effect.<br /><br />Values: `"Recreate"`, `"RollingUpdate"` |
+| [`worker`](#spec.managed.worker) | `object` | no |  | A separate `Deployment` of workers (`--roles worker`: vulnerability scans); the proxy pods then run `--roles proxy`. Unset: one pod does both. |
+
+### `spec.managed.affinity` [#spec.managed.affinity]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| [`nodeAffinity`](#spec.managed.affinity.nodeAffinity) | `object` | no |  | Describes node affinity scheduling rules for the pod. |
+| [`podAffinity`](#spec.managed.affinity.podAffinity) | `object` | no |  | Describes pod affinity scheduling rules (e.g. co-locate this pod in the same node, zone, etc. as some other pod(s)). |
+| [`podAntiAffinity`](#spec.managed.affinity.podAntiAffinity) | `object` | no |  | Describes pod anti-affinity scheduling rules (e.g. avoid putting this pod in the same node, zone, etc. as some other pod(s)). |
+
+### `spec.managed.affinity.nodeAffinity` [#spec.managed.affinity.nodeAffinity]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| [`preferredDuringSchedulingIgnoredDuringExecution`](#spec.managed.affinity.nodeAffinity.preferredDuringSchedulingIgnoredDuringExecution) | `object[]` | no |  | The scheduler will prefer to schedule pods to nodes that satisfy the affinity expressions specified by this field, but it may choose a node that violates one or more of the expressions. The node that is most preferred is the one with the greatest sum of weights, i.e. for each node that meets all of the scheduling requirements (resource request, requiredDuringScheduling affinity expressions, etc.), compute a sum by iterating through the elements of this field and adding "weight" to the sum if the node matches the corresponding matchExpressions; the node(s) with the highest sum are the most preferred. |
+| [`requiredDuringSchedulingIgnoredDuringExecution`](#spec.managed.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution) | `object` | no |  | If the affinity requirements specified by this field are not met at scheduling time, the pod will not be scheduled onto the node. If the affinity requirements specified by this field cease to be met at some point during pod execution (e.g. due to an update), the system may or may not try to eventually evict the pod from its node. |
+
+### `spec.managed.affinity.nodeAffinity.preferredDuringSchedulingIgnoredDuringExecution[]` [#spec.managed.affinity.nodeAffinity.preferredDuringSchedulingIgnoredDuringExecution]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| [`preference`](#spec.managed.affinity.nodeAffinity.preferredDuringSchedulingIgnoredDuringExecution.preference) | `object` | yes |  | A node selector term, associated with the corresponding weight. |
+| `weight` | `integer` | yes |  | Weight associated with matching the corresponding nodeSelectorTerm, in the range 1-100. |
+
+### `spec.managed.affinity.nodeAffinity.preferredDuringSchedulingIgnoredDuringExecution[].preference` [#spec.managed.affinity.nodeAffinity.preferredDuringSchedulingIgnoredDuringExecution.preference]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| [`matchExpressions`](#spec.managed.affinity.nodeAffinity.preferredDuringSchedulingIgnoredDuringExecution.preference.matchExpressions) | `object[]` | no |  | A list of node selector requirements by node's labels. |
+| [`matchFields`](#spec.managed.affinity.nodeAffinity.preferredDuringSchedulingIgnoredDuringExecution.preference.matchFields) | `object[]` | no |  | A list of node selector requirements by node's fields. |
+
+### `spec.managed.affinity.nodeAffinity.preferredDuringSchedulingIgnoredDuringExecution[].preference.matchExpressions[]` [#spec.managed.affinity.nodeAffinity.preferredDuringSchedulingIgnoredDuringExecution.preference.matchExpressions]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `key` | `string` | yes |  | The label key that the selector applies to. |
+| `operator` | `string` | yes |  | Represents a key's relationship to a set of values. Valid operators are In, NotIn, Exists, DoesNotExist. Gt, and Lt. |
+| `values` | `string[]` | no |  | An array of string values. If the operator is In or NotIn, the values array must be non-empty. If the operator is Exists or DoesNotExist, the values array must be empty. If the operator is Gt or Lt, the values array must have a single element, which will be interpreted as an integer. This array is replaced during a strategic merge patch. |
+
+### `spec.managed.affinity.nodeAffinity.preferredDuringSchedulingIgnoredDuringExecution[].preference.matchFields[]` [#spec.managed.affinity.nodeAffinity.preferredDuringSchedulingIgnoredDuringExecution.preference.matchFields]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `key` | `string` | yes |  | The label key that the selector applies to. |
+| `operator` | `string` | yes |  | Represents a key's relationship to a set of values. Valid operators are In, NotIn, Exists, DoesNotExist. Gt, and Lt. |
+| `values` | `string[]` | no |  | An array of string values. If the operator is In or NotIn, the values array must be non-empty. If the operator is Exists or DoesNotExist, the values array must be empty. If the operator is Gt or Lt, the values array must have a single element, which will be interpreted as an integer. This array is replaced during a strategic merge patch. |
+
+### `spec.managed.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution` [#spec.managed.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| [`nodeSelectorTerms`](#spec.managed.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms) | `object[]` | yes |  | Required. A list of node selector terms. The terms are ORed. |
+
+### `spec.managed.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[]` [#spec.managed.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| [`matchExpressions`](#spec.managed.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms.matchExpressions) | `object[]` | no |  | A list of node selector requirements by node's labels. |
+| [`matchFields`](#spec.managed.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms.matchFields) | `object[]` | no |  | A list of node selector requirements by node's fields. |
+
+### `spec.managed.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[].matchExpressions[]` [#spec.managed.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms.matchExpressions]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `key` | `string` | yes |  | The label key that the selector applies to. |
+| `operator` | `string` | yes |  | Represents a key's relationship to a set of values. Valid operators are In, NotIn, Exists, DoesNotExist. Gt, and Lt. |
+| `values` | `string[]` | no |  | An array of string values. If the operator is In or NotIn, the values array must be non-empty. If the operator is Exists or DoesNotExist, the values array must be empty. If the operator is Gt or Lt, the values array must have a single element, which will be interpreted as an integer. This array is replaced during a strategic merge patch. |
+
+### `spec.managed.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[].matchFields[]` [#spec.managed.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms.matchFields]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `key` | `string` | yes |  | The label key that the selector applies to. |
+| `operator` | `string` | yes |  | Represents a key's relationship to a set of values. Valid operators are In, NotIn, Exists, DoesNotExist. Gt, and Lt. |
+| `values` | `string[]` | no |  | An array of string values. If the operator is In or NotIn, the values array must be non-empty. If the operator is Exists or DoesNotExist, the values array must be empty. If the operator is Gt or Lt, the values array must have a single element, which will be interpreted as an integer. This array is replaced during a strategic merge patch. |
+
+### `spec.managed.affinity.podAffinity` [#spec.managed.affinity.podAffinity]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| [`preferredDuringSchedulingIgnoredDuringExecution`](#spec.managed.affinity.podAffinity.preferredDuringSchedulingIgnoredDuringExecution) | `object[]` | no |  | The scheduler will prefer to schedule pods to nodes that satisfy the affinity expressions specified by this field, but it may choose a node that violates one or more of the expressions. The node that is most preferred is the one with the greatest sum of weights, i.e. for each node that meets all of the scheduling requirements (resource request, requiredDuringScheduling affinity expressions, etc.), compute a sum by iterating through the elements of this field and adding "weight" to the sum if the node has pods which matches the corresponding podAffinityTerm; the node(s) with the highest sum are the most preferred. |
+| [`requiredDuringSchedulingIgnoredDuringExecution`](#spec.managed.affinity.podAffinity.requiredDuringSchedulingIgnoredDuringExecution) | `object[]` | no |  | If the affinity requirements specified by this field are not met at scheduling time, the pod will not be scheduled onto the node. If the affinity requirements specified by this field cease to be met at some point during pod execution (e.g. due to a pod label update), the system may or may not try to eventually evict the pod from its node. When there are multiple elements, the lists of nodes corresponding to each podAffinityTerm are intersected, i.e. all terms must be satisfied. |
+
+### `spec.managed.affinity.podAffinity.preferredDuringSchedulingIgnoredDuringExecution[]` [#spec.managed.affinity.podAffinity.preferredDuringSchedulingIgnoredDuringExecution]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| [`podAffinityTerm`](#spec.managed.affinity.podAffinity.preferredDuringSchedulingIgnoredDuringExecution.podAffinityTerm) | `object` | yes |  | Required. A pod affinity term, associated with the corresponding weight. |
+| `weight` | `integer` | yes |  | weight associated with matching the corresponding podAffinityTerm, in the range 1-100. |
+
+### `spec.managed.affinity.podAffinity.preferredDuringSchedulingIgnoredDuringExecution[].podAffinityTerm` [#spec.managed.affinity.podAffinity.preferredDuringSchedulingIgnoredDuringExecution.podAffinityTerm]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| [`labelSelector`](#spec.managed.affinity.podAffinity.preferredDuringSchedulingIgnoredDuringExecution.podAffinityTerm.labelSelector) | `object` | no |  | A label query over a set of resources, in this case pods. If it's null, this PodAffinityTerm matches with no Pods. |
+| `matchLabelKeys` | `string[]` | no |  | MatchLabelKeys is a set of pod label keys to select which pods will be taken into consideration. The keys are used to lookup values from the incoming pod labels, those key-value labels are merged with `labelSelector` as `key in (value)` to select the group of existing pods which pods will be taken into consideration for the incoming pod's pod (anti) affinity. Keys that don't exist in the incoming pod labels will be ignored. The default value is empty. The same key is forbidden to exist in both matchLabelKeys and labelSelector. Also, matchLabelKeys cannot be set when labelSelector isn't set. |
+| `mismatchLabelKeys` | `string[]` | no |  | MismatchLabelKeys is a set of pod label keys to select which pods will be taken into consideration. The keys are used to lookup values from the incoming pod labels, those key-value labels are merged with `labelSelector` as `key notin (value)` to select the group of existing pods which pods will be taken into consideration for the incoming pod's pod (anti) affinity. Keys that don't exist in the incoming pod labels will be ignored. The default value is empty. The same key is forbidden to exist in both mismatchLabelKeys and labelSelector. Also, mismatchLabelKeys cannot be set when labelSelector isn't set. |
+| [`namespaceSelector`](#spec.managed.affinity.podAffinity.preferredDuringSchedulingIgnoredDuringExecution.podAffinityTerm.namespaceSelector) | `object` | no |  | A label query over the set of namespaces that the term applies to. The term is applied to the union of the namespaces selected by this field and the ones listed in the namespaces field. null selector and null or empty namespaces list means "this pod's namespace". An empty selector (\{\}) matches all namespaces. |
+| `namespaces` | `string[]` | no |  | namespaces specifies a static list of namespace names that the term applies to. The term is applied to the union of the namespaces listed in this field and the ones selected by namespaceSelector. null or empty namespaces list and null namespaceSelector means "this pod's namespace". |
+| `topologyKey` | `string` | yes |  | This pod should be co-located (affinity) or not co-located (anti-affinity) with the pods matching the labelSelector in the specified namespaces, where co-located is defined as running on a node whose value of the label with key topologyKey matches that of any node on which any of the selected pods is running. Empty topologyKey is not allowed. |
+
+### `spec.managed.affinity.podAffinity.preferredDuringSchedulingIgnoredDuringExecution[].podAffinityTerm.labelSelector` [#spec.managed.affinity.podAffinity.preferredDuringSchedulingIgnoredDuringExecution.podAffinityTerm.labelSelector]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| [`matchExpressions`](#spec.managed.affinity.podAffinity.preferredDuringSchedulingIgnoredDuringExecution.podAffinityTerm.labelSelector.matchExpressions) | `object[]` | no |  | matchExpressions is a list of label selector requirements. The requirements are ANDed. |
+| `matchLabels` | `map[string]` | no |  | matchLabels is a map of \{key,value\} pairs. A single \{key,value\} in the matchLabels map is equivalent to an element of matchExpressions, whose key field is "key", the operator is "In", and the values array contains only "value". The requirements are ANDed. |
+
+### `spec.managed.affinity.podAffinity.preferredDuringSchedulingIgnoredDuringExecution[].podAffinityTerm.labelSelector.matchExpressions[]` [#spec.managed.affinity.podAffinity.preferredDuringSchedulingIgnoredDuringExecution.podAffinityTerm.labelSelector.matchExpressions]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `key` | `string` | yes |  | key is the label key that the selector applies to. |
+| `operator` | `string` | yes |  | operator represents a key's relationship to a set of values. Valid operators are In, NotIn, Exists and DoesNotExist. |
+| `values` | `string[]` | no |  | values is an array of string values. If the operator is In or NotIn, the values array must be non-empty. If the operator is Exists or DoesNotExist, the values array must be empty. This array is replaced during a strategic merge patch. |
+
+### `spec.managed.affinity.podAffinity.preferredDuringSchedulingIgnoredDuringExecution[].podAffinityTerm.namespaceSelector` [#spec.managed.affinity.podAffinity.preferredDuringSchedulingIgnoredDuringExecution.podAffinityTerm.namespaceSelector]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| [`matchExpressions`](#spec.managed.affinity.podAffinity.preferredDuringSchedulingIgnoredDuringExecution.podAffinityTerm.namespaceSelector.matchExpressions) | `object[]` | no |  | matchExpressions is a list of label selector requirements. The requirements are ANDed. |
+| `matchLabels` | `map[string]` | no |  | matchLabels is a map of \{key,value\} pairs. A single \{key,value\} in the matchLabels map is equivalent to an element of matchExpressions, whose key field is "key", the operator is "In", and the values array contains only "value". The requirements are ANDed. |
+
+### `spec.managed.affinity.podAffinity.preferredDuringSchedulingIgnoredDuringExecution[].podAffinityTerm.namespaceSelector.matchExpressions[]` [#spec.managed.affinity.podAffinity.preferredDuringSchedulingIgnoredDuringExecution.podAffinityTerm.namespaceSelector.matchExpressions]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `key` | `string` | yes |  | key is the label key that the selector applies to. |
+| `operator` | `string` | yes |  | operator represents a key's relationship to a set of values. Valid operators are In, NotIn, Exists and DoesNotExist. |
+| `values` | `string[]` | no |  | values is an array of string values. If the operator is In or NotIn, the values array must be non-empty. If the operator is Exists or DoesNotExist, the values array must be empty. This array is replaced during a strategic merge patch. |
+
+### `spec.managed.affinity.podAffinity.requiredDuringSchedulingIgnoredDuringExecution[]` [#spec.managed.affinity.podAffinity.requiredDuringSchedulingIgnoredDuringExecution]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| [`labelSelector`](#spec.managed.affinity.podAffinity.requiredDuringSchedulingIgnoredDuringExecution.labelSelector) | `object` | no |  | A label query over a set of resources, in this case pods. If it's null, this PodAffinityTerm matches with no Pods. |
+| `matchLabelKeys` | `string[]` | no |  | MatchLabelKeys is a set of pod label keys to select which pods will be taken into consideration. The keys are used to lookup values from the incoming pod labels, those key-value labels are merged with `labelSelector` as `key in (value)` to select the group of existing pods which pods will be taken into consideration for the incoming pod's pod (anti) affinity. Keys that don't exist in the incoming pod labels will be ignored. The default value is empty. The same key is forbidden to exist in both matchLabelKeys and labelSelector. Also, matchLabelKeys cannot be set when labelSelector isn't set. |
+| `mismatchLabelKeys` | `string[]` | no |  | MismatchLabelKeys is a set of pod label keys to select which pods will be taken into consideration. The keys are used to lookup values from the incoming pod labels, those key-value labels are merged with `labelSelector` as `key notin (value)` to select the group of existing pods which pods will be taken into consideration for the incoming pod's pod (anti) affinity. Keys that don't exist in the incoming pod labels will be ignored. The default value is empty. The same key is forbidden to exist in both mismatchLabelKeys and labelSelector. Also, mismatchLabelKeys cannot be set when labelSelector isn't set. |
+| [`namespaceSelector`](#spec.managed.affinity.podAffinity.requiredDuringSchedulingIgnoredDuringExecution.namespaceSelector) | `object` | no |  | A label query over the set of namespaces that the term applies to. The term is applied to the union of the namespaces selected by this field and the ones listed in the namespaces field. null selector and null or empty namespaces list means "this pod's namespace". An empty selector (\{\}) matches all namespaces. |
+| `namespaces` | `string[]` | no |  | namespaces specifies a static list of namespace names that the term applies to. The term is applied to the union of the namespaces listed in this field and the ones selected by namespaceSelector. null or empty namespaces list and null namespaceSelector means "this pod's namespace". |
+| `topologyKey` | `string` | yes |  | This pod should be co-located (affinity) or not co-located (anti-affinity) with the pods matching the labelSelector in the specified namespaces, where co-located is defined as running on a node whose value of the label with key topologyKey matches that of any node on which any of the selected pods is running. Empty topologyKey is not allowed. |
+
+### `spec.managed.affinity.podAffinity.requiredDuringSchedulingIgnoredDuringExecution[].labelSelector` [#spec.managed.affinity.podAffinity.requiredDuringSchedulingIgnoredDuringExecution.labelSelector]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| [`matchExpressions`](#spec.managed.affinity.podAffinity.requiredDuringSchedulingIgnoredDuringExecution.labelSelector.matchExpressions) | `object[]` | no |  | matchExpressions is a list of label selector requirements. The requirements are ANDed. |
+| `matchLabels` | `map[string]` | no |  | matchLabels is a map of \{key,value\} pairs. A single \{key,value\} in the matchLabels map is equivalent to an element of matchExpressions, whose key field is "key", the operator is "In", and the values array contains only "value". The requirements are ANDed. |
+
+### `spec.managed.affinity.podAffinity.requiredDuringSchedulingIgnoredDuringExecution[].labelSelector.matchExpressions[]` [#spec.managed.affinity.podAffinity.requiredDuringSchedulingIgnoredDuringExecution.labelSelector.matchExpressions]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `key` | `string` | yes |  | key is the label key that the selector applies to. |
+| `operator` | `string` | yes |  | operator represents a key's relationship to a set of values. Valid operators are In, NotIn, Exists and DoesNotExist. |
+| `values` | `string[]` | no |  | values is an array of string values. If the operator is In or NotIn, the values array must be non-empty. If the operator is Exists or DoesNotExist, the values array must be empty. This array is replaced during a strategic merge patch. |
+
+### `spec.managed.affinity.podAffinity.requiredDuringSchedulingIgnoredDuringExecution[].namespaceSelector` [#spec.managed.affinity.podAffinity.requiredDuringSchedulingIgnoredDuringExecution.namespaceSelector]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| [`matchExpressions`](#spec.managed.affinity.podAffinity.requiredDuringSchedulingIgnoredDuringExecution.namespaceSelector.matchExpressions) | `object[]` | no |  | matchExpressions is a list of label selector requirements. The requirements are ANDed. |
+| `matchLabels` | `map[string]` | no |  | matchLabels is a map of \{key,value\} pairs. A single \{key,value\} in the matchLabels map is equivalent to an element of matchExpressions, whose key field is "key", the operator is "In", and the values array contains only "value". The requirements are ANDed. |
+
+### `spec.managed.affinity.podAffinity.requiredDuringSchedulingIgnoredDuringExecution[].namespaceSelector.matchExpressions[]` [#spec.managed.affinity.podAffinity.requiredDuringSchedulingIgnoredDuringExecution.namespaceSelector.matchExpressions]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `key` | `string` | yes |  | key is the label key that the selector applies to. |
+| `operator` | `string` | yes |  | operator represents a key's relationship to a set of values. Valid operators are In, NotIn, Exists and DoesNotExist. |
+| `values` | `string[]` | no |  | values is an array of string values. If the operator is In or NotIn, the values array must be non-empty. If the operator is Exists or DoesNotExist, the values array must be empty. This array is replaced during a strategic merge patch. |
+
+### `spec.managed.affinity.podAntiAffinity` [#spec.managed.affinity.podAntiAffinity]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| [`preferredDuringSchedulingIgnoredDuringExecution`](#spec.managed.affinity.podAntiAffinity.preferredDuringSchedulingIgnoredDuringExecution) | `object[]` | no |  | The scheduler will prefer to schedule pods to nodes that satisfy the anti-affinity expressions specified by this field, but it may choose a node that violates one or more of the expressions. The node that is most preferred is the one with the greatest sum of weights, i.e. for each node that meets all of the scheduling requirements (resource request, requiredDuringScheduling anti-affinity expressions, etc.), compute a sum by iterating through the elements of this field and subtracting "weight" from the sum if the node has pods which matches the corresponding podAffinityTerm; the node(s) with the highest sum are the most preferred. |
+| [`requiredDuringSchedulingIgnoredDuringExecution`](#spec.managed.affinity.podAntiAffinity.requiredDuringSchedulingIgnoredDuringExecution) | `object[]` | no |  | If the anti-affinity requirements specified by this field are not met at scheduling time, the pod will not be scheduled onto the node. If the anti-affinity requirements specified by this field cease to be met at some point during pod execution (e.g. due to a pod label update), the system may or may not try to eventually evict the pod from its node. When there are multiple elements, the lists of nodes corresponding to each podAffinityTerm are intersected, i.e. all terms must be satisfied. |
+
+### `spec.managed.affinity.podAntiAffinity.preferredDuringSchedulingIgnoredDuringExecution[]` [#spec.managed.affinity.podAntiAffinity.preferredDuringSchedulingIgnoredDuringExecution]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| [`podAffinityTerm`](#spec.managed.affinity.podAntiAffinity.preferredDuringSchedulingIgnoredDuringExecution.podAffinityTerm) | `object` | yes |  | Required. A pod affinity term, associated with the corresponding weight. |
+| `weight` | `integer` | yes |  | weight associated with matching the corresponding podAffinityTerm, in the range 1-100. |
+
+### `spec.managed.affinity.podAntiAffinity.preferredDuringSchedulingIgnoredDuringExecution[].podAffinityTerm` [#spec.managed.affinity.podAntiAffinity.preferredDuringSchedulingIgnoredDuringExecution.podAffinityTerm]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| [`labelSelector`](#spec.managed.affinity.podAntiAffinity.preferredDuringSchedulingIgnoredDuringExecution.podAffinityTerm.labelSelector) | `object` | no |  | A label query over a set of resources, in this case pods. If it's null, this PodAffinityTerm matches with no Pods. |
+| `matchLabelKeys` | `string[]` | no |  | MatchLabelKeys is a set of pod label keys to select which pods will be taken into consideration. The keys are used to lookup values from the incoming pod labels, those key-value labels are merged with `labelSelector` as `key in (value)` to select the group of existing pods which pods will be taken into consideration for the incoming pod's pod (anti) affinity. Keys that don't exist in the incoming pod labels will be ignored. The default value is empty. The same key is forbidden to exist in both matchLabelKeys and labelSelector. Also, matchLabelKeys cannot be set when labelSelector isn't set. |
+| `mismatchLabelKeys` | `string[]` | no |  | MismatchLabelKeys is a set of pod label keys to select which pods will be taken into consideration. The keys are used to lookup values from the incoming pod labels, those key-value labels are merged with `labelSelector` as `key notin (value)` to select the group of existing pods which pods will be taken into consideration for the incoming pod's pod (anti) affinity. Keys that don't exist in the incoming pod labels will be ignored. The default value is empty. The same key is forbidden to exist in both mismatchLabelKeys and labelSelector. Also, mismatchLabelKeys cannot be set when labelSelector isn't set. |
+| [`namespaceSelector`](#spec.managed.affinity.podAntiAffinity.preferredDuringSchedulingIgnoredDuringExecution.podAffinityTerm.namespaceSelector) | `object` | no |  | A label query over the set of namespaces that the term applies to. The term is applied to the union of the namespaces selected by this field and the ones listed in the namespaces field. null selector and null or empty namespaces list means "this pod's namespace". An empty selector (\{\}) matches all namespaces. |
+| `namespaces` | `string[]` | no |  | namespaces specifies a static list of namespace names that the term applies to. The term is applied to the union of the namespaces listed in this field and the ones selected by namespaceSelector. null or empty namespaces list and null namespaceSelector means "this pod's namespace". |
+| `topologyKey` | `string` | yes |  | This pod should be co-located (affinity) or not co-located (anti-affinity) with the pods matching the labelSelector in the specified namespaces, where co-located is defined as running on a node whose value of the label with key topologyKey matches that of any node on which any of the selected pods is running. Empty topologyKey is not allowed. |
+
+### `spec.managed.affinity.podAntiAffinity.preferredDuringSchedulingIgnoredDuringExecution[].podAffinityTerm.labelSelector` [#spec.managed.affinity.podAntiAffinity.preferredDuringSchedulingIgnoredDuringExecution.podAffinityTerm.labelSelector]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| [`matchExpressions`](#spec.managed.affinity.podAntiAffinity.preferredDuringSchedulingIgnoredDuringExecution.podAffinityTerm.labelSelector.matchExpressions) | `object[]` | no |  | matchExpressions is a list of label selector requirements. The requirements are ANDed. |
+| `matchLabels` | `map[string]` | no |  | matchLabels is a map of \{key,value\} pairs. A single \{key,value\} in the matchLabels map is equivalent to an element of matchExpressions, whose key field is "key", the operator is "In", and the values array contains only "value". The requirements are ANDed. |
+
+### `spec.managed.affinity.podAntiAffinity.preferredDuringSchedulingIgnoredDuringExecution[].podAffinityTerm.labelSelector.matchExpressions[]` [#spec.managed.affinity.podAntiAffinity.preferredDuringSchedulingIgnoredDuringExecution.podAffinityTerm.labelSelector.matchExpressions]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `key` | `string` | yes |  | key is the label key that the selector applies to. |
+| `operator` | `string` | yes |  | operator represents a key's relationship to a set of values. Valid operators are In, NotIn, Exists and DoesNotExist. |
+| `values` | `string[]` | no |  | values is an array of string values. If the operator is In or NotIn, the values array must be non-empty. If the operator is Exists or DoesNotExist, the values array must be empty. This array is replaced during a strategic merge patch. |
+
+### `spec.managed.affinity.podAntiAffinity.preferredDuringSchedulingIgnoredDuringExecution[].podAffinityTerm.namespaceSelector` [#spec.managed.affinity.podAntiAffinity.preferredDuringSchedulingIgnoredDuringExecution.podAffinityTerm.namespaceSelector]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| [`matchExpressions`](#spec.managed.affinity.podAntiAffinity.preferredDuringSchedulingIgnoredDuringExecution.podAffinityTerm.namespaceSelector.matchExpressions) | `object[]` | no |  | matchExpressions is a list of label selector requirements. The requirements are ANDed. |
+| `matchLabels` | `map[string]` | no |  | matchLabels is a map of \{key,value\} pairs. A single \{key,value\} in the matchLabels map is equivalent to an element of matchExpressions, whose key field is "key", the operator is "In", and the values array contains only "value". The requirements are ANDed. |
+
+### `spec.managed.affinity.podAntiAffinity.preferredDuringSchedulingIgnoredDuringExecution[].podAffinityTerm.namespaceSelector.matchExpressions[]` [#spec.managed.affinity.podAntiAffinity.preferredDuringSchedulingIgnoredDuringExecution.podAffinityTerm.namespaceSelector.matchExpressions]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `key` | `string` | yes |  | key is the label key that the selector applies to. |
+| `operator` | `string` | yes |  | operator represents a key's relationship to a set of values. Valid operators are In, NotIn, Exists and DoesNotExist. |
+| `values` | `string[]` | no |  | values is an array of string values. If the operator is In or NotIn, the values array must be non-empty. If the operator is Exists or DoesNotExist, the values array must be empty. This array is replaced during a strategic merge patch. |
+
+### `spec.managed.affinity.podAntiAffinity.requiredDuringSchedulingIgnoredDuringExecution[]` [#spec.managed.affinity.podAntiAffinity.requiredDuringSchedulingIgnoredDuringExecution]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| [`labelSelector`](#spec.managed.affinity.podAntiAffinity.requiredDuringSchedulingIgnoredDuringExecution.labelSelector) | `object` | no |  | A label query over a set of resources, in this case pods. If it's null, this PodAffinityTerm matches with no Pods. |
+| `matchLabelKeys` | `string[]` | no |  | MatchLabelKeys is a set of pod label keys to select which pods will be taken into consideration. The keys are used to lookup values from the incoming pod labels, those key-value labels are merged with `labelSelector` as `key in (value)` to select the group of existing pods which pods will be taken into consideration for the incoming pod's pod (anti) affinity. Keys that don't exist in the incoming pod labels will be ignored. The default value is empty. The same key is forbidden to exist in both matchLabelKeys and labelSelector. Also, matchLabelKeys cannot be set when labelSelector isn't set. |
+| `mismatchLabelKeys` | `string[]` | no |  | MismatchLabelKeys is a set of pod label keys to select which pods will be taken into consideration. The keys are used to lookup values from the incoming pod labels, those key-value labels are merged with `labelSelector` as `key notin (value)` to select the group of existing pods which pods will be taken into consideration for the incoming pod's pod (anti) affinity. Keys that don't exist in the incoming pod labels will be ignored. The default value is empty. The same key is forbidden to exist in both mismatchLabelKeys and labelSelector. Also, mismatchLabelKeys cannot be set when labelSelector isn't set. |
+| [`namespaceSelector`](#spec.managed.affinity.podAntiAffinity.requiredDuringSchedulingIgnoredDuringExecution.namespaceSelector) | `object` | no |  | A label query over the set of namespaces that the term applies to. The term is applied to the union of the namespaces selected by this field and the ones listed in the namespaces field. null selector and null or empty namespaces list means "this pod's namespace". An empty selector (\{\}) matches all namespaces. |
+| `namespaces` | `string[]` | no |  | namespaces specifies a static list of namespace names that the term applies to. The term is applied to the union of the namespaces listed in this field and the ones selected by namespaceSelector. null or empty namespaces list and null namespaceSelector means "this pod's namespace". |
+| `topologyKey` | `string` | yes |  | This pod should be co-located (affinity) or not co-located (anti-affinity) with the pods matching the labelSelector in the specified namespaces, where co-located is defined as running on a node whose value of the label with key topologyKey matches that of any node on which any of the selected pods is running. Empty topologyKey is not allowed. |
+
+### `spec.managed.affinity.podAntiAffinity.requiredDuringSchedulingIgnoredDuringExecution[].labelSelector` [#spec.managed.affinity.podAntiAffinity.requiredDuringSchedulingIgnoredDuringExecution.labelSelector]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| [`matchExpressions`](#spec.managed.affinity.podAntiAffinity.requiredDuringSchedulingIgnoredDuringExecution.labelSelector.matchExpressions) | `object[]` | no |  | matchExpressions is a list of label selector requirements. The requirements are ANDed. |
+| `matchLabels` | `map[string]` | no |  | matchLabels is a map of \{key,value\} pairs. A single \{key,value\} in the matchLabels map is equivalent to an element of matchExpressions, whose key field is "key", the operator is "In", and the values array contains only "value". The requirements are ANDed. |
+
+### `spec.managed.affinity.podAntiAffinity.requiredDuringSchedulingIgnoredDuringExecution[].labelSelector.matchExpressions[]` [#spec.managed.affinity.podAntiAffinity.requiredDuringSchedulingIgnoredDuringExecution.labelSelector.matchExpressions]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `key` | `string` | yes |  | key is the label key that the selector applies to. |
+| `operator` | `string` | yes |  | operator represents a key's relationship to a set of values. Valid operators are In, NotIn, Exists and DoesNotExist. |
+| `values` | `string[]` | no |  | values is an array of string values. If the operator is In or NotIn, the values array must be non-empty. If the operator is Exists or DoesNotExist, the values array must be empty. This array is replaced during a strategic merge patch. |
+
+### `spec.managed.affinity.podAntiAffinity.requiredDuringSchedulingIgnoredDuringExecution[].namespaceSelector` [#spec.managed.affinity.podAntiAffinity.requiredDuringSchedulingIgnoredDuringExecution.namespaceSelector]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| [`matchExpressions`](#spec.managed.affinity.podAntiAffinity.requiredDuringSchedulingIgnoredDuringExecution.namespaceSelector.matchExpressions) | `object[]` | no |  | matchExpressions is a list of label selector requirements. The requirements are ANDed. |
+| `matchLabels` | `map[string]` | no |  | matchLabels is a map of \{key,value\} pairs. A single \{key,value\} in the matchLabels map is equivalent to an element of matchExpressions, whose key field is "key", the operator is "In", and the values array contains only "value". The requirements are ANDed. |
+
+### `spec.managed.affinity.podAntiAffinity.requiredDuringSchedulingIgnoredDuringExecution[].namespaceSelector.matchExpressions[]` [#spec.managed.affinity.podAntiAffinity.requiredDuringSchedulingIgnoredDuringExecution.namespaceSelector.matchExpressions]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `key` | `string` | yes |  | key is the label key that the selector applies to. |
+| `operator` | `string` | yes |  | operator represents a key's relationship to a set of values. Valid operators are In, NotIn, Exists and DoesNotExist. |
+| `values` | `string[]` | no |  | values is an array of string values. If the operator is In or NotIn, the values array must be non-empty. If the operator is Exists or DoesNotExist, the values array must be empty. This array is replaced during a strategic merge patch. |
+
+### `spec.managed.credentials` [#spec.managed.credentials]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `key` | `string` | yes |  |  |
+| `name` | `string` | yes |  |  |
+
+### `spec.managed.env[]` [#spec.managed.env]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `name` | `string` | yes |  | Name of the environment variable. May consist of any printable ASCII characters except '='. |
+| `value` | `string` | no |  | Variable references $(VAR_NAME) are expanded using the previously defined environment variables in the container and any service environment variables. If a variable cannot be resolved, the reference in the input string will be unchanged. Double $$ are reduced to a single $, which allows for escaping the $(VAR_NAME) syntax: i.e. "$$(VAR_NAME)" will produce the string literal "$(VAR_NAME)". Escaped references will never be expanded, regardless of whether the variable exists or not. Defaults to "". |
+| [`valueFrom`](#spec.managed.env.valueFrom) | `object` | no |  | Source for the environment variable's value. Cannot be used if value is not empty. |
+
+### `spec.managed.env[].valueFrom` [#spec.managed.env.valueFrom]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| [`configMapKeyRef`](#spec.managed.env.valueFrom.configMapKeyRef) | `object` | no |  | Selects a key of a ConfigMap. |
+| [`fieldRef`](#spec.managed.env.valueFrom.fieldRef) | `object` | no |  | Selects a field of the pod: supports metadata.name, metadata.namespace, `metadata.labels['<KEY>']`, `metadata.annotations['<KEY>']`, spec.nodeName, spec.serviceAccountName, status.hostIP, status.podIP, status.podIPs. |
+| [`fileKeyRef`](#spec.managed.env.valueFrom.fileKeyRef) | `object` | no |  | FileKeyRef selects a key of the env file. Requires the EnvFiles feature gate to be enabled. |
+| [`resourceFieldRef`](#spec.managed.env.valueFrom.resourceFieldRef) | `object` | no |  | Selects a resource of the container: only resources limits and requests (limits.cpu, limits.memory, limits.ephemeral-storage, requests.cpu, requests.memory and requests.ephemeral-storage) are currently supported. |
+| [`secretKeyRef`](#spec.managed.env.valueFrom.secretKeyRef) | `object` | no |  | Selects a key of a secret in the pod's namespace |
+
+### `spec.managed.env[].valueFrom.configMapKeyRef` [#spec.managed.env.valueFrom.configMapKeyRef]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `key` | `string` | yes |  | The key to select. |
+| `name` | `string` | yes |  | Name of the referent. This field is effectively required, but due to backwards compatibility is allowed to be empty. Instances of this type with an empty value here are almost certainly wrong. More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names |
+| `optional` | `boolean` | no |  | Specify whether the ConfigMap or its key must be defined |
+
+### `spec.managed.env[].valueFrom.fieldRef` [#spec.managed.env.valueFrom.fieldRef]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `apiVersion` | `string` | no |  | Version of the schema the FieldPath is written in terms of, defaults to "v1". |
+| `fieldPath` | `string` | yes |  | Path of the field to select in the specified API version. |
+
+### `spec.managed.env[].valueFrom.fileKeyRef` [#spec.managed.env.valueFrom.fileKeyRef]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `key` | `string` | yes |  | The key within the env file. An invalid key will prevent the pod from starting. The keys defined within a source may consist of any printable ASCII characters except '='. During Alpha stage of the EnvFiles feature gate, the key size is limited to 128 characters. |
+| `optional` | `boolean` | no |  | Specify whether the file or its key must be defined. If the file or key does not exist, then the env var is not published. If optional is set to true and the specified key does not exist, the environment variable will not be set in the Pod's containers.<br /><br />If optional is set to false and the specified key does not exist, an error will be returned during Pod creation. |
+| `path` | `string` | yes |  | The path within the volume from which to select the file. Must be relative and may not contain the '..' path or start with '..'. |
+| `volumeName` | `string` | yes |  | The name of the volume mount containing the env file. |
+
+### `spec.managed.env[].valueFrom.resourceFieldRef` [#spec.managed.env.valueFrom.resourceFieldRef]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `containerName` | `string` | no |  | Container name: required for volumes, optional for env vars |
+| `divisor` | `int-or-string` | no |  | Specifies the output format of the exposed resources, defaults to "1" |
+| `resource` | `string` | yes |  | Required: resource to select |
+
+### `spec.managed.env[].valueFrom.secretKeyRef` [#spec.managed.env.valueFrom.secretKeyRef]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `key` | `string` | yes |  | The key of the secret to select from.  Must be a valid secret key. |
+| `name` | `string` | yes |  | Name of the referent. This field is effectively required, but due to backwards compatibility is allowed to be empty. Instances of this type with an empty value here are almost certainly wrong. More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names |
+| `optional` | `boolean` | no |  | Specify whether the Secret or its key must be defined |
+
+### `spec.managed.envFrom[]` [#spec.managed.envFrom]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| [`configMapRef`](#spec.managed.envFrom.configMapRef) | `object` | no |  | The ConfigMap to select from |
+| `prefix` | `string` | no |  | Optional text to prepend to the name of each environment variable. May consist of any printable ASCII characters except '='. |
+| [`secretRef`](#spec.managed.envFrom.secretRef) | `object` | no |  | The Secret to select from |
+
+### `spec.managed.envFrom[].configMapRef` [#spec.managed.envFrom.configMapRef]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `name` | `string` | yes |  | Name of the referent. This field is effectively required, but due to backwards compatibility is allowed to be empty. Instances of this type with an empty value here are almost certainly wrong. More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names |
+| `optional` | `boolean` | no |  | Specify whether the ConfigMap must be defined |
+
+### `spec.managed.envFrom[].secretRef` [#spec.managed.envFrom.secretRef]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `name` | `string` | yes |  | Name of the referent. This field is effectively required, but due to backwards compatibility is allowed to be empty. Instances of this type with an empty value here are almost certainly wrong. More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names |
+| `optional` | `boolean` | no |  | Specify whether the Secret must be defined |
+
+### `spec.managed.extraVolumeMounts[]` [#spec.managed.extraVolumeMounts]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `mountPath` | `string` | yes |  | Path within the container at which the volume should be mounted.  Must not contain ':'. |
+| `mountPropagation` | `string` | no |  | mountPropagation determines how mounts are propagated from the host to container and the other way around. When not set, MountPropagationNone is used. This field is beta in 1.10. When RecursiveReadOnly is set to IfPossible or to Enabled, MountPropagation must be None or unspecified (which defaults to None). |
+| `name` | `string` | yes |  | This must match the Name of a Volume. |
+| `readOnly` | `boolean` | no |  | Mounted read-only if true, read-write otherwise (false or unspecified). Defaults to false. |
+| `recursiveReadOnly` | `string` | no |  | RecursiveReadOnly specifies whether read-only mounts should be handled recursively.<br /><br />If ReadOnly is false, this field has no meaning and must be unspecified.<br /><br />If ReadOnly is true, and this field is set to Disabled, the mount is not made recursively read-only.  If this field is set to IfPossible, the mount is made recursively read-only, if it is supported by the container runtime.  If this field is set to Enabled, the mount is made recursively read-only if it is supported by the container runtime, otherwise the pod will not be started and an error will be generated to indicate the reason.<br /><br />If this field is set to IfPossible or Enabled, MountPropagation must be set to None (or be unspecified, which defaults to None).<br /><br />If this field is not specified, it is treated as an equivalent of Disabled. |
+| `subPath` | `string` | no |  | Path within the volume from which the container's volume should be mounted. Defaults to "" (volume's root). |
+| `subPathExpr` | `string` | no |  | Expanded path within the volume from which the container's volume should be mounted. Behaves similarly to SubPath but environment variable references $(VAR_NAME) are expanded using the container's environment. Defaults to "" (volume's root). SubPathExpr and SubPath are mutually exclusive. |
+
+### `spec.managed.image` [#spec.managed.image]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `pullPolicy` | `string` | no |  | Default `IfNotPresent`.<br /><br />Values: `"Always"`, `"IfNotPresent"`, `"Never"` |
+| `repository` | `string` | no |  | Default `ghcr.io/batlehub/batlehub`. |
+| `tag` | `string` | no |  | Default: the BatleHub version this operator targets. |
+
+### `spec.managed.imagePullSecrets[]` [#spec.managed.imagePullSecrets]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `name` | `string` | yes |  | Name of the referent. This field is effectively required, but due to backwards compatibility is allowed to be empty. Instances of this type with an empty value here are almost certainly wrong. More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names |
+
+### `spec.managed.ingress` [#spec.managed.ingress]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `annotations` | `map[string]` | no |  |  |
+| `className` | `string` | no |  |  |
+| `extraHosts` | `string[]` | no |  |  |
+| `host` | `string` | yes |  | Constraints: `minLength: 1` |
+| [`tls`](#spec.managed.ingress.tls) | `object[]` | no |  |  |
+
+### `spec.managed.ingress.tls[]` [#spec.managed.ingress.tls]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `hosts` | `string[]` | no |  | hosts is a list of hosts included in the TLS certificate. The values in this list must match the name/s used in the tlsSecret. Defaults to the wildcard host setting for the loadbalancer controller fulfilling this Ingress, if left unspecified. |
+| `secretName` | `string` | no |  | secretName is the name of the secret used to terminate TLS traffic on port 443. Field is left optional to allow TLS routing based on SNI hostname alone. If the SNI host in a listener conflicts with the "Host" header field used by an IngressRule, the SNI host is used for termination and value of the "Host" header is used for routing. |
+
+### `spec.managed.networkPolicy` [#spec.managed.networkPolicy]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `egressTo` | `object[]` | no |  | Where the pods may connect besides DNS (the database, the object store, the upstream registries). |
+| `ingressFrom` | `object[]` | no |  | Who may reach the HTTP port; empty: anyone. The operator's pods (its chart's selector labels, in its namespace) are added. |
+
+### `spec.managed.operatorAccess` [#spec.managed.operatorAccess]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `generateToken` | `boolean` | no | `true` | Generate a token once in `<name>-operator-token` and declare its Argon2id hash in the configuration (`[[auth]] type = "token"`, role `admin`). Delete that Secret to rotate it (a restart: `auth` is read at startup). |
+| [`tokenSecretRef`](#spec.managed.operatorAccess.tokenSecretRef) | `object` | no |  | Without `generateToken`: your own admin token, in a `Secret` of this namespace labelled `batlehub.weebo.io/instance-token: "true"`, that `config` must declare. |
+| `userId` | `string` | no | `"weebo-batlehub-operator"` | The generated token's user id, as BatleHub's audit records it. |
+
+**Rules**
+
+- tokenSecretRef is required without generateToken — `self.generateToken || has(self.tokenSecretRef)`
+
+### `spec.managed.operatorAccess.tokenSecretRef` [#spec.managed.operatorAccess.tokenSecretRef]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `key` | `string` | yes |  |  |
+| `name` | `string` | yes |  |  |
+
+### `spec.managed.persistence` [#spec.managed.persistence]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `accessMode` | `string` | no | `"ReadWriteOnce"` | Default `ReadWriteOnce`. A single-writer mode (`ReadWriteOnce`, `ReadWriteOncePod`) allows one proxy pod; `ReadWriteOncePod`, no separate worker either (it mounts the cache too).<br /><br />Values: `"ReadWriteOnce"`, `"ReadWriteOncePod"`, `"ReadWriteMany"` |
+| `enabled` | `boolean` | no | `true` | A `PersistentVolumeClaim` for the cache; `false`: an `emptyDir` (`ephemeralSizeLimit`), lost with the pod. |
+| `ephemeralSizeLimit` | `int-or-string` | no | `"1Gi"` | Quantity is a fixed-point representation of a number. It provides convenient marshaling/unmarshaling in JSON and YAML, in addition to String() and AsInt64() accessors.<br /><br />The serialization format is:<br /><br />\`\`\` \<quantity\>        ::= \<signedNumber\>\<suffix\><br /><br />(Note that \<suffix\> may be empty, from the "" case in \<decimalSI\>.)<br /><br />\<digit\>           ::= 0 \| 1 \| ... \| 9 \<digits\>          ::= \<digit\> \| \<digit\>\<digits\> \<number\>          ::= \<digits\> \| \<digits\>.\<digits\> \| \<digits\>. \| .\<digits\> \<sign\>            ::= "+" \| "-" \<signedNumber\>    ::= \<number\> \| \<sign\>\<number\> \<suffix\>          ::= \<binarySI\> \| \<decimalExponent\> \| \<decimalSI\> \<binarySI\>        ::= Ki \| Mi \| Gi \| Ti \| Pi \| Ei<br /><br />(International System of units; See: http://physics.nist.gov/cuu/Units/binary.html)<br /><br />\<decimalSI\>       ::= m \| "" \| k \| M \| G \| T \| P \| E<br /><br />(Note that 1024 = 1Ki but 1000 = 1k; I didn't choose the capitalization.)<br /><br />\<decimalExponent\> ::= "e" \<signedNumber\> \| "E" \<signedNumber\> \`\`\`<br /><br />No matter which of the three exponent forms is used, no quantity may represent a number greater than 2^63-1 in magnitude, nor may it have more than 3 decimal places. Numbers larger or more precise will be capped or rounded up. (E.g.: 0.1m will rounded up to 1m.) This may be extended in the future if we require larger or smaller quantities.<br /><br />When a Quantity is parsed from a string, it will remember the type of suffix it had, and will use the same type again when it is serialized.<br /><br />Before serializing, Quantity will be put in "canonical form". This means that Exponent/suffix will be adjusted up or down (with a corresponding increase or decrease in Mantissa) such that:<br /><br />- No precision is lost - No fractional digits will be emitted - The exponent (or suffix) is as large as possible.<br /><br />The sign will be omitted unless the number is negative.<br /><br />Examples:<br /><br />- 1.5 will be serialized as "1500m" - 1.5Gi will be serialized as "1536Mi"<br /><br />Note that the quantity will NEVER be internally represented by a floating point number. That is the whole point of this exercise.<br /><br />Non-canonical values will still parse as long as they are well formed, but will be re-emitted in their canonical form. (So always use canonical form, or don't diff.)<br /><br />This format is intended to make it difficult to use these numbers without writing some sort of special handling code in the hopes that that will cause implementors to also use a fixed point implementation. |
+| `existingClaim` | `string` | no |  | A claim of this namespace to use instead of creating one. |
+| `size` | `int-or-string` | no | `"10Gi"` | Quantity is a fixed-point representation of a number. It provides convenient marshaling/unmarshaling in JSON and YAML, in addition to String() and AsInt64() accessors.<br /><br />The serialization format is:<br /><br />\`\`\` \<quantity\>        ::= \<signedNumber\>\<suffix\><br /><br />(Note that \<suffix\> may be empty, from the "" case in \<decimalSI\>.)<br /><br />\<digit\>           ::= 0 \| 1 \| ... \| 9 \<digits\>          ::= \<digit\> \| \<digit\>\<digits\> \<number\>          ::= \<digits\> \| \<digits\>.\<digits\> \| \<digits\>. \| .\<digits\> \<sign\>            ::= "+" \| "-" \<signedNumber\>    ::= \<number\> \| \<sign\>\<number\> \<suffix\>          ::= \<binarySI\> \| \<decimalExponent\> \| \<decimalSI\> \<binarySI\>        ::= Ki \| Mi \| Gi \| Ti \| Pi \| Ei<br /><br />(International System of units; See: http://physics.nist.gov/cuu/Units/binary.html)<br /><br />\<decimalSI\>       ::= m \| "" \| k \| M \| G \| T \| P \| E<br /><br />(Note that 1024 = 1Ki but 1000 = 1k; I didn't choose the capitalization.)<br /><br />\<decimalExponent\> ::= "e" \<signedNumber\> \| "E" \<signedNumber\> \`\`\`<br /><br />No matter which of the three exponent forms is used, no quantity may represent a number greater than 2^63-1 in magnitude, nor may it have more than 3 decimal places. Numbers larger or more precise will be capped or rounded up. (E.g.: 0.1m will rounded up to 1m.) This may be extended in the future if we require larger or smaller quantities.<br /><br />When a Quantity is parsed from a string, it will remember the type of suffix it had, and will use the same type again when it is serialized.<br /><br />Before serializing, Quantity will be put in "canonical form". This means that Exponent/suffix will be adjusted up or down (with a corresponding increase or decrease in Mantissa) such that:<br /><br />- No precision is lost - No fractional digits will be emitted - The exponent (or suffix) is as large as possible.<br /><br />The sign will be omitted unless the number is negative.<br /><br />Examples:<br /><br />- 1.5 will be serialized as "1500m" - 1.5Gi will be serialized as "1536Mi"<br /><br />Note that the quantity will NEVER be internally represented by a floating point number. That is the whole point of this exercise.<br /><br />Non-canonical values will still parse as long as they are well formed, but will be re-emitted in their canonical form. (So always use canonical form, or don't diff.)<br /><br />This format is intended to make it difficult to use these numbers without writing some sort of special handling code in the hopes that that will cause implementors to also use a fixed point implementation. |
+| `storageClass` | `string` | no |  |  |
+
+### `spec.managed.podDisruptionBudget` [#spec.managed.podDisruptionBudget]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `maxUnavailable` | `int-or-string` | no |  | IntOrString is a type that can hold an int32 or a string.  When used in JSON or YAML marshalling and unmarshalling, it produces or consumes the inner type.  This allows you to have, for example, a JSON field that can accept a name or number. |
+| `minAvailable` | `int-or-string` | no |  | IntOrString is a type that can hold an int32 or a string.  When used in JSON or YAML marshalling and unmarshalling, it produces or consumes the inner type.  This allows you to have, for example, a JSON field that can accept a name or number. |
+
+**Rules**
+
+- set one of minAvailable and maxUnavailable — `has(self.minAvailable) != has(self.maxUnavailable)`
+
+### `spec.managed.resources` [#spec.managed.resources]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| [`claims`](#spec.managed.resources.claims) | `object[]` | no |  | Claims lists the names of resources, defined in spec.resourceClaims, that are used by this container.<br /><br />This field depends on the DynamicResourceAllocation feature gate.<br /><br />This field is immutable. It can only be set for containers. |
+| `limits` | `map[int-or-string]` | no |  | Limits describes the maximum amount of compute resources allowed. More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/ |
+| `requests` | `map[int-or-string]` | no |  | Requests describes the minimum amount of compute resources required. If Requests is omitted for a container, it defaults to Limits if that is explicitly specified, otherwise to an implementation-defined value. Requests cannot exceed Limits. More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/ |
+
+### `spec.managed.resources.claims[]` [#spec.managed.resources.claims]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `name` | `string` | yes |  | Name must match the name of one entry in pod.spec.resourceClaims of the Pod where this field is used. It makes that resource available inside a container. |
+| `request` | `string` | no |  | Request is the name chosen for a request in the referenced claim. If empty, everything from the claim is made available, otherwise only the result of this request. |
+
+### `spec.managed.service` [#spec.managed.service]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `annotations` | `map[string]` | no |  |  |
+| `port` | `integer` | no | `8080` | The `Service`'s port (default 8080); the container's follows `config.server.port`.<br /><br />Constraints: `minimum: 1`, `maximum: 65535` |
+| `type` | `string` | no | `"ClusterIP"` | Default `ClusterIP`.<br /><br />Values: `"ClusterIP"`, `"NodePort"`, `"LoadBalancer"` |
+
+### `spec.managed.serviceAccount` [#spec.managed.serviceAccount]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `annotations` | `map[string]` | no |  |  |
+| `autoTokenReview` | `boolean` | no | `true` | With a `kubernetes` auth provider in the configuration, bind the account to TokenReview (the chart's `<release>-tokenreview` ClusterRole); the pods then mount its token. |
+| `create` | `boolean` | no | `true` | `false`: use `name`, which must exist. |
+| `name` | `string` | no |  | Default: the instance's name. |
+
+### `spec.managed.tolerations[]` [#spec.managed.tolerations]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `effect` | `string` | no |  | Effect indicates the taint effect to match. Empty means match all taint effects. When specified, allowed values are NoSchedule, PreferNoSchedule and NoExecute. |
+| `key` | `string` | no |  | Key is the taint key that the toleration applies to. Empty means match all taint keys. If the key is empty, operator must be Exists; this combination means to match all values and all keys. |
+| `operator` | `string` | no |  | Operator represents a key's relationship to the value. Valid operators are Exists, Equal, Lt, and Gt. Defaults to Equal. Exists is equivalent to wildcard for value, so that a pod can tolerate all taints of a particular category. Lt and Gt perform numeric comparisons (requires feature gate TaintTolerationComparisonOperators). |
+| `tolerationSeconds` | `integer` | no |  | TolerationSeconds represents the period of time the toleration (which must be of effect NoExecute, otherwise this field is ignored) tolerates the taint. By default, it is not set, which means tolerate the taint forever (do not evict). Zero and negative values will be treated as 0 (evict immediately) by the system. |
+| `value` | `string` | no |  | Value is the taint value the toleration matches to. If the operator is Exists, the value should be empty, otherwise just a regular string. |
+
+### `spec.managed.worker` [#spec.managed.worker]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| [`autoscaling`](#spec.managed.worker.autoscaling) | `object` | no |  | A `HorizontalPodAutoscaler` on the scan queue's depth. |
+| [`image`](#spec.managed.worker.image) | `object` | no |  | Default `ghcr.io/batlehub/batlehub-worker`, the proxy's tag. |
+| `nodeSelector` | `map[string]` | no |  |  |
+| `replicas` | `integer` | no | `1` | Constraints: `minimum: 0` |
+| [`resources`](#spec.managed.worker.resources) | `object` | no |  | ResourceRequirements describes the compute resource requirements. |
+| `runtimeClassName` | `string` | no |  | `gvisor`, to sandbox the scanners. |
+| `scratchSizeLimit` | `int-or-string` | no | `"4Gi"` | The scratch `emptyDir` of the scans (`TMPDIR`), default 4Gi. |
+| [`tolerations`](#spec.managed.worker.tolerations) | `object[]` | no |  |  |
+
+### `spec.managed.worker.autoscaling` [#spec.managed.worker.autoscaling]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `maxReplicas` | `integer` | yes |  | Constraints: `minimum: 1` |
+| `metricName` | `string` | no | `"batlehub_scan_jobs_queued"` | The external metric of the queue's depth (a metrics adapter serves it), default `batlehub_scan_jobs_queued`. |
+| `minReplicas` | `integer` | no | `1` | Constraints: `minimum: 1` |
+| `targetQueued` | `integer` | no | `20` | Queued scans per worker the autoscaler aims at.<br /><br />Constraints: `minimum: 1` |
+
+**Rules**
+
+- minReplicas exceeds maxReplicas — `self.minReplicas <= self.maxReplicas`
+
+### `spec.managed.worker.image` [#spec.managed.worker.image]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `pullPolicy` | `string` | no |  | Default `IfNotPresent`.<br /><br />Values: `"Always"`, `"IfNotPresent"`, `"Never"` |
+| `repository` | `string` | no |  | Default `ghcr.io/batlehub/batlehub`. |
+| `tag` | `string` | no |  | Default: the BatleHub version this operator targets. |
+
+### `spec.managed.worker.resources` [#spec.managed.worker.resources]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| [`claims`](#spec.managed.worker.resources.claims) | `object[]` | no |  | Claims lists the names of resources, defined in spec.resourceClaims, that are used by this container.<br /><br />This field depends on the DynamicResourceAllocation feature gate.<br /><br />This field is immutable. It can only be set for containers. |
+| `limits` | `map[int-or-string]` | no |  | Limits describes the maximum amount of compute resources allowed. More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/ |
+| `requests` | `map[int-or-string]` | no |  | Requests describes the minimum amount of compute resources required. If Requests is omitted for a container, it defaults to Limits if that is explicitly specified, otherwise to an implementation-defined value. Requests cannot exceed Limits. More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/ |
+
+### `spec.managed.worker.resources.claims[]` [#spec.managed.worker.resources.claims]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `name` | `string` | yes |  | Name must match the name of one entry in pod.spec.resourceClaims of the Pod where this field is used. It makes that resource available inside a container. |
+| `request` | `string` | no |  | Request is the name chosen for a request in the referenced claim. If empty, everything from the claim is made available, otherwise only the result of this request. |
+
+### `spec.managed.worker.tolerations[]` [#spec.managed.worker.tolerations]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `effect` | `string` | no |  | Effect indicates the taint effect to match. Empty means match all taint effects. When specified, allowed values are NoSchedule, PreferNoSchedule and NoExecute. |
+| `key` | `string` | no |  | Key is the taint key that the toleration applies to. Empty means match all taint keys. If the key is empty, operator must be Exists; this combination means to match all values and all keys. |
+| `operator` | `string` | no |  | Operator represents a key's relationship to the value. Valid operators are Exists, Equal, Lt, and Gt. Defaults to Equal. Exists is equivalent to wildcard for value, so that a pod can tolerate all taints of a particular category. Lt and Gt perform numeric comparisons (requires feature gate TaintTolerationComparisonOperators). |
+| `tolerationSeconds` | `integer` | no |  | TolerationSeconds represents the period of time the toleration (which must be of effect NoExecute, otherwise this field is ignored) tolerates the taint. By default, it is not set, which means tolerate the taint forever (do not evict). Zero and negative values will be treated as 0 (evict immediately) by the system. |
+| `value` | `string` | no |  | Value is the taint value the toleration matches to. If the operator is Exists, the value should be empty, otherwise just a regular string. |
+
+### `spec.registrySelector` [#spec.registrySelector]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| [`namespaces`](#spec.registrySelector.namespaces) | `object` | no |  | The namespaces whose registries may attach to this instance (with an `instanceRef` naming it): its own always. |
+| [`selector`](#spec.registrySelector.selector) | `object` | no |  | Only the registries whose labels match; all of them when unset. |
+
+### `spec.registrySelector.namespaces` [#spec.registrySelector.namespaces]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `from` | `string` | no | `"Same"` | `Same` (the instance's namespace), `All`, or `Selector`.<br /><br />Values: `"Same"`, `"All"`, `"Selector"` |
+| [`selector`](#spec.registrySelector.namespaces.selector) | `object` | no |  | The labels of the namespaces accepted, with `from: Selector`. |
+
+**Rules**
+
+- namespaces.selector is required with from: Selector — `self.from != 'Selector' || has(self.selector)`
+
+### `spec.registrySelector.namespaces.selector` [#spec.registrySelector.namespaces.selector]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| [`matchExpressions`](#spec.registrySelector.namespaces.selector.matchExpressions) | `object[]` | no |  | matchExpressions is a list of label selector requirements. The requirements are ANDed. |
+| `matchLabels` | `map[string]` | no |  | matchLabels is a map of \{key,value\} pairs. A single \{key,value\} in the matchLabels map is equivalent to an element of matchExpressions, whose key field is "key", the operator is "In", and the values array contains only "value". The requirements are ANDed. |
+
+### `spec.registrySelector.namespaces.selector.matchExpressions[]` [#spec.registrySelector.namespaces.selector.matchExpressions]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `key` | `string` | yes |  | key is the label key that the selector applies to. |
+| `operator` | `string` | yes |  | operator represents a key's relationship to a set of values. Valid operators are In, NotIn, Exists and DoesNotExist. |
+| `values` | `string[]` | no |  | values is an array of string values. If the operator is In or NotIn, the values array must be non-empty. If the operator is Exists or DoesNotExist, the values array must be empty. This array is replaced during a strategic merge patch. |
+
+### `spec.registrySelector.selector` [#spec.registrySelector.selector]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| [`matchExpressions`](#spec.registrySelector.selector.matchExpressions) | `object[]` | no |  | matchExpressions is a list of label selector requirements. The requirements are ANDed. |
+| `matchLabels` | `map[string]` | no |  | matchLabels is a map of \{key,value\} pairs. A single \{key,value\} in the matchLabels map is equivalent to an element of matchExpressions, whose key field is "key", the operator is "In", and the values array contains only "value". The requirements are ANDed. |
+
+### `spec.registrySelector.selector.matchExpressions[]` [#spec.registrySelector.selector.matchExpressions]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `key` | `string` | yes |  | key is the label key that the selector applies to. |
+| `operator` | `string` | yes |  | operator represents a key's relationship to a set of values. Valid operators are In, NotIn, Exists and DoesNotExist. |
+| `values` | `string[]` | no |  | values is an array of string values. If the operator is In or NotIn, the values array must be non-empty. If the operator is Exists or DoesNotExist, the values array must be empty. This array is replaced during a strategic merge patch. |
+
+### `spec.reload` [#spec.reload]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `partial` | `string` | no | `"Reload"` | `managed`: what a change of a key BatleHub applies to requests but not to the components it built at startup (warming, release imports, the scan worker — BatleHub's `Partial` tier, every `registries[*]` among them) is. `Reload` (default) hot-reloads it and raises `PartiallyApplied`, naming the keys, until the pods restart; `Restart` treats it as a key read at startup (`reload.restart` decides).<br /><br />Values: `"Reload"`, `"Restart"` |
+| `restart` | `string` | no | `"Rollout"` | `managed`: `Rollout` restarts the pods when a key BatleHub reads at startup changes; `Never` raises `RestartRequired` instead, naming the keys, until the pods restart otherwise.<br /><br />Values: `"Rollout"`, `"Never"` |
+| `strategy` | `string` | no | `"Auto"` | `Auto` applies every validated configuration; `Manual` holds it (`ConfigHeld`, its hash in `status.pendingConfigHash`) until the annotation `batlehub.weebo.io/approved-config-hash` carries that exact hash.<br /><br />Values: `"Auto"`, `"Manual"` |
+| `validation` | `string` | no | `"Strict"` | `Strict` blocks a configuration BatleHub's parser refuses (`ConfigInvalid`); `Lenient` pushes it anyway (`ConfigInvalidLenient`), for when the stand-in value the operator gives a `${VAR}` it can't read is what fails. The instance still validates it with its real environment before loading it.<br /><br />Values: `"Strict"`, `"Lenient"` |
 
 ## Build a manifest
 

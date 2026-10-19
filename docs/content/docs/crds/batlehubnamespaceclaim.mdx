@@ -41,11 +41,32 @@ spec:
 
 | Field | Type | Required | Default | Description |
 | --- | --- | --- | --- | --- |
-| `deletionPolicy` | `string` | no | `"Delete"` | `Delete` (default) releases the prefix when this object is deleted; `Orphan` leaves the claim on the instance. |
-| `group` | `string` | yes |  | The group owning the prefix, as the instance's auth providers name it: `oidc:frontend-team`, `kubernetes:system:serviceaccounts:ci`… Changing it releases the prefix then claims it for the new group. |
-| `instanceRef` | `object` | no |  | The `BatleHubLocalInstance` of this namespace holding the registry; unset, the only one of this namespace. Immutable. |
-| `prefix` | `string` | yes |  | The package name prefix, in the ecosystem's own spelling: an npm scope (`@acme`), a Go module or Maven path, an OpenVSX publisher… A claim covers `prefix` itself and every package under it. No part between slashes may be `.` or `..`. Immutable. |
-| `registry` | `string` | yes |  | The registry's name on the instance (a `[[registries]]` entry, from the instance's configuration or a `BatleHubRegistry`). Immutable. |
+| `deletionPolicy` | `string` | no | `"Delete"` | `Delete` (default) releases the prefix when this object is deleted; `Orphan` leaves the claim on the instance.<br /><br />Values: `"Delete"`, `"Orphan"` |
+| `group` | `string` | yes |  | The group owning the prefix, as the instance's auth providers name it: `oidc:frontend-team`, `kubernetes:system:serviceaccounts:ci`… Changing it releases the prefix then claims it for the new group.<br /><br />Constraints: `pattern: ^\S+$`, `minLength: 1`, `maxLength: 512` |
+| [`instanceRef`](#spec.instanceRef) | `object` | no |  | The `BatleHubLocalInstance` of this namespace holding the registry; unset, the only one of this namespace. Immutable. |
+| `prefix` | `string` | yes |  | The package name prefix, in the ecosystem's own spelling: an npm scope (`@acme`), a Go module or Maven path, an OpenVSX publisher… A claim covers `prefix` itself and every package under it. No part between slashes may be `.` or `..`. Immutable.<br /><br />Constraints: `minLength: 1`, `maxLength: 1024` |
+| `registry` | `string` | yes |  | The registry's name on the instance (a `[[registries]]` entry, from the instance's configuration or a `BatleHubRegistry`). Immutable.<br /><br />Constraints: `minLength: 1`, `maxLength: 253` |
+
+**Rules**
+
+- instanceRef is immutable — `has(self.instanceRef) == has(oldSelf.instanceRef)`
+- `prefix`: prefix is immutable — `self == oldSelf`
+- `prefix`: prefix may not be blank, have a `.` or `..` part between slashes, nor start or end with a space — `self == self.trim() && self.split('/').all(s, s != '.' && s != '..')`
+- `registry`: registry is immutable — `self == oldSelf`
+- `registry`: registry must be a registry name — `self != '.' && self != '..' && !self.contains('/')`
+
+### `spec.instanceRef` [#spec.instanceRef]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `kind` | `string` | no |  | `LocalInstance`, the only kind (may be left out).<br /><br />Values: `"LocalInstance"` |
+| `name` | `string` | yes |  | `metadata.name` of the `BatleHubLocalInstance`.<br /><br />Constraints: `minLength: 1` |
+| `namespace` | `string` | no |  | Not allowed: the instance is in this object's namespace. |
+
+**Rules**
+
+- instanceRef is immutable — `self == oldSelf`
+- the instance must be in this object's namespace — `!has(self.__namespace__)`
 
 ## Build a manifest
 

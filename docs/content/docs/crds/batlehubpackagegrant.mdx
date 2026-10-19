@@ -44,12 +44,43 @@ spec:
 
 | Field | Type | Required | Default | Description |
 | --- | --- | --- | --- | --- |
-| `deletionPolicy` | `string` | no | `"Delete"` | `Delete` (default) revokes the grants this object wrote when it is deleted; `Orphan` leaves them on the instance. |
-| `grants` | `object[]` | yes |  | One grant per subject. |
-| `instanceRef` | `object` | no |  | The `BatleHubLocalInstance` of this namespace holding the registry; unset, the only one of this namespace. Immutable. |
-| `package` | `string` | yes |  | The package, as the registry names it (`@acme/billing`). Immutable. |
-| `registry` | `string` | yes |  | The registry's name on the instance. Immutable. |
-| `version` | `string` | no |  | One version of the package (it must exist); unset, the package itself (every version). Immutable. |
+| `deletionPolicy` | `string` | no | `"Delete"` | `Delete` (default) revokes the grants this object wrote when it is deleted; `Orphan` leaves them on the instance.<br /><br />Values: `"Delete"`, `"Orphan"` |
+| [`grants`](#spec.grants) | `object[]` | yes |  | One grant per subject.<br /><br />Constraints: `minItems: 1`, `maxItems: 256` |
+| [`instanceRef`](#spec.instanceRef) | `object` | no |  | The `BatleHubLocalInstance` of this namespace holding the registry; unset, the only one of this namespace. Immutable. |
+| `package` | `string` | yes |  | The package, as the registry names it (`@acme/billing`). Immutable.<br /><br />Constraints: `minLength: 1`, `maxLength: 1024` |
+| `registry` | `string` | yes |  | The registry's name on the instance. Immutable.<br /><br />Constraints: `minLength: 1`, `maxLength: 253` |
+| `version` | `string` | no |  | One version of the package (it must exist); unset, the package itself (every version). Immutable.<br /><br />Constraints: `minLength: 1`, `maxLength: 256` |
+
+**Rules**
+
+- instanceRef is immutable — `has(self.instanceRef) == has(oldSelf.instanceRef)`
+- version is immutable — `has(self.version) == has(oldSelf.version)`
+- `package`: package is immutable — `self == oldSelf`
+- `package`: package may not be blank, have a `.` or `..` part between slashes, nor start or end with a space — `self == self.trim() && self.split('/').all(s, s != '.' && s != '..')`
+- `registry`: registry is immutable — `self == oldSelf`
+- `registry`: registry must be a registry name — `self != '.' && self != '..' && !self.contains('/')`
+- `version`: version is immutable — `self == oldSelf`
+- `version`: version may not be `.`, contain `..`, `/` or `\`, nor start or end with a space — `self == self.trim() && self != '.' && !self.contains('..') && !self.contains('/') && !self.contains('\\')`
+
+### `spec.grants[]` [#spec.grants]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `actions` | `string[]` | yes |  | Action patterns: `releases:read`, `releases:*`… BatleHub expands a pattern when it stores the grant (`status.applied[].stored`).<br /><br />Constraints: `minItems: 1`, `maxItems: 64` |
+| `subject` | `string` | yes |  | Who, as BatleHub spells it: `user:alice`, `group:oidc1:eng`, `role:user`, `*`.<br /><br />Constraints: `pattern: ^\S+$`, `minLength: 1`, `maxLength: 512` |
+
+### `spec.instanceRef` [#spec.instanceRef]
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `kind` | `string` | no |  | `LocalInstance`, the only kind (may be left out).<br /><br />Values: `"LocalInstance"` |
+| `name` | `string` | yes |  | `metadata.name` of the `BatleHubLocalInstance`.<br /><br />Constraints: `minLength: 1` |
+| `namespace` | `string` | no |  | Not allowed: the instance is in this object's namespace. |
+
+**Rules**
+
+- instanceRef is immutable — `self == oldSelf`
+- the instance must be in this object's namespace — `!has(self.__namespace__)`
 
 ## Build a manifest
 
