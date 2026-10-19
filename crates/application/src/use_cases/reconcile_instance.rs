@@ -29,11 +29,11 @@ use std::sync::Arc;
 
 use api::local_instance::{PodConfig, ReloadStrategy};
 use domain::error::ReasonCode;
-use domain::{Advisory, Failure};
+use domain::{Advisory, Failure, RemoteWrite};
 
 use crate::ports::{AdminGateway, ConfigWarning, GatewayError, PendingSource};
-use crate::use_cases::Outcome;
 use crate::use_cases::render_config::{Rendered, sha256};
+use crate::use_cases::{Outcome, Writes};
 
 /// How many dependents, warnings or pods a message names.
 const SHOWN: usize = 5;
@@ -200,6 +200,7 @@ pub async fn reconcile_instance(
                 report.reloaded = push.reloaded;
                 report.outcome.ready = push.ready;
                 report.outcome.advisories = push.advisories;
+                report.outcome = report.outcome.wrote(push.writes);
             }
             warnings
         }
@@ -218,6 +219,7 @@ struct Push {
     status: ConfigStatus,
     due_in: Option<u64>,
     reloaded: bool,
+    writes: Writes,
 }
 
 /// The document as written to a target: the nonce's comment last.
@@ -271,6 +273,7 @@ async fn manage(gateway: &dyn AdminGateway, managed: ManagedConfig) -> Push {
         status: ConfigStatus::from_state(&state),
         due_in: None,
         reloaded: false,
+        writes: Writes::default(),
     };
     let rendered = match managed.rendered {
         Ok(rendered) => rendered,
@@ -322,11 +325,21 @@ async fn manage(gateway: &dyn AdminGateway, managed: ManagedConfig) -> Push {
             pods.iter().map(|(n, g)| (n.clone(), g.as_ref())).collect()
         }
     };
-    let mut loaded = false;
+    let mut loaded = 0;
     let result = push_to(&targets, &rendered, &state, &mut push.status, &mut loaded).await;
-    if loaded {
+    if loaded > 0 {
         push.reloaded = true;
         push.status.reloaded_at = Some(state.now);
+    }
+    // One write per target that loaded it. The configuration already
+    // applied: a target moved on its own, a drift; a new one is the spec
+    // (or what it references) applied.
+    for _ in 0..loaded {
+        if state.applied_hash.as_deref() == Some(hash) {
+            push.writes.drifted("config");
+        } else {
+            push.writes.writes.push(RemoteWrite::Drift);
+        }
     }
     match result {
         Ok(()) => {
@@ -388,14 +401,14 @@ fn read_only_message(name: &str, then: &str) -> String {
     )
 }
 
-/// Brings every target to `rendered`; `loaded` tells whether one loaded
-/// it, even when a later one fails.
+/// Brings every target to `rendered`; `loaded` counts the targets that
+/// loaded it, even when a later one fails.
 async fn push_to(
     targets: &[(String, &dyn AdminGateway)],
     rendered: &Rendered,
     state: &ConfigState,
     status: &mut ConfigStatus,
-    loaded: &mut bool,
+    loaded: &mut usize,
 ) -> Result<(), Stop> {
     let fail = |e: GatewayError| (Failure::new(e.reason(), e.to_string()), None);
     // BatleHub quotes values in its refusals: a Secret's, or one its
@@ -518,7 +531,7 @@ async fn push_to(
             Err(e) => return Err(fail(e)),
         }
         match target.apply_pending().await {
-            Ok(()) => *loaded = true,
+            Ok(()) => *loaded += 1,
             Err(GatewayError::NoPending(why)) => {
                 return Err((
                     Failure::new(
@@ -717,6 +730,24 @@ mod tests {
         assert_eq!(status.config_hash, Some(sha256(DOC)));
         assert_eq!(status.reloaded_at, Some(1_000_000));
         assert!(status.pods.is_empty());
+        // A new configuration applied: a write, not a drift to announce.
+        assert_eq!(report.outcome.writes, [RemoteWrite::Drift]);
+        assert!(report.outcome.drift.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_file_changed_on_the_instance_is_a_drift_corrected() {
+        let gateway = FakeGateway::default();
+        gateway.write_file("edited by hand");
+        let state = ConfigState {
+            applied_hash: Some(sha256(DOC)),
+            ..now()
+        };
+        let report = reconcile_instance(&gateway, managed(state)).await;
+        assert_eq!(report.outcome.reason(), ReasonCode::Reconciled);
+        assert_eq!(gateway.file(), DOC);
+        assert_eq!(report.outcome.writes, [RemoteWrite::Drift]);
+        assert_eq!(report.outcome.drift.fields(), ["config"]);
     }
 
     #[tokio::test]
@@ -729,6 +760,9 @@ mod tests {
         assert!(!report.reloaded);
         assert_eq!(gateway.calls(), ["content", "pending"]);
         assert_eq!(report.config.unwrap().applied_hash, Some(sha256(DOC)));
+        // Unchanged: nothing written, nothing counted.
+        assert!(report.outcome.writes.is_empty());
+        assert!(report.outcome.drift.is_empty());
     }
 
     #[tokio::test]
@@ -775,6 +809,7 @@ mod tests {
         assert_eq!(status.rejected_at, Some(1_000_000));
         assert_eq!(status.applied_hash, None);
         assert_eq!(gateway.calls(), ["content", "validate"]);
+        assert!(report.outcome.writes.is_empty());
         let Err(first) = report.outcome.ready.clone() else {
             unreachable!()
         };

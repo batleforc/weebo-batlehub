@@ -146,6 +146,7 @@ async fn cleanup(claim: &NamespaceClaim, ctx: &Ctx) -> Result<(), Error> {
     )
     .await
     .map_err(Error::Cleanup)?;
+    super::record_deleted(KIND, usize::from(released));
     if released {
         events::announce_change(
             &ctx.recorder,

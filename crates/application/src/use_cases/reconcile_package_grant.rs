@@ -9,7 +9,7 @@ use api::package_grant::{AppliedGrant, SubjectGrant};
 use domain::Failure;
 use domain::error::ReasonCode;
 
-use super::Outcome;
+use super::{Outcome, Writes};
 use crate::ports::{AdminGateway, GatewayError, Ledger, PackageNode, StoredGrant};
 
 /// What a pass ended on.
@@ -94,6 +94,7 @@ pub async fn reconcile_package_grant(
         ledger,
         applied,
         changed: false,
+        writes: Writes::default(),
     };
     let outcome = match pass.run(desired).await {
         Ok(failures) => match combine(failures) {
@@ -103,7 +104,7 @@ pub async fn reconcile_package_grant(
         Err(failure) => Outcome::failed(failure),
     };
     GrantReport {
-        outcome,
+        outcome: outcome.wrote(pass.writes),
         applied: pass.applied,
         changed: pass.changed,
     }
@@ -132,6 +133,7 @@ struct Pass<'a> {
     ledger: &'a dyn Ledger<Vec<AppliedGrant>>,
     applied: Vec<AppliedGrant>,
     changed: bool,
+    writes: Writes,
 }
 
 impl Pass<'_> {
@@ -159,6 +161,10 @@ impl Pass<'_> {
                 .await
             {
                 Ok(write) => {
+                    match known {
+                        Some(_) => self.writes.drifted("grants"),
+                        None => self.writes.created(),
+                    }
                     let entry = AppliedGrant {
                         subject: grant.subject.clone(),
                         requested,
@@ -188,9 +194,11 @@ impl Pass<'_> {
             .collect();
         for subject in gone {
             match self.gateway.delete_grant(self.node, &subject).await {
+                // A subject left the spec: its grant is put back to none.
+                Ok(true) => self.writes.drifted("grants"),
                 // The row is the ownership projection's now: not ours to
                 // remove any more.
-                Ok(_) | Err(GatewayError::HeldByOwnership(_)) => {}
+                Ok(false) | Err(GatewayError::HeldByOwnership(_)) => {}
                 Err(err) => return Err(err.into()),
             }
             self.applied.retain(|a| a.subject != subject);
@@ -228,6 +236,8 @@ pub async fn revoke_package_grant(
 
 #[cfg(test)]
 mod tests {
+    use domain::RemoteWrite;
+
     use super::*;
     use crate::test_support::{FakeGateway, FakeLedger};
 
@@ -273,11 +283,19 @@ mod tests {
         // Recorded after each write, not at the end.
         assert_eq!(ledger.records().len(), 2);
         assert_eq!(ledger.records()[0].len(), 1);
+        assert_eq!(
+            report.outcome.writes,
+            [RemoteWrite::Created, RemoteWrite::Created]
+        );
+        assert!(report.outcome.drift.is_empty());
 
         let again = pass(&gateway, &ledger, &desired, report.applied.clone()).await;
         assert_eq!(again.outcome.reason(), ReasonCode::Reconciled);
         assert!(!again.changed);
         assert_eq!(again.applied, report.applied);
+        // Unchanged: nothing written, nothing counted.
+        assert!(again.outcome.writes.is_empty());
+        assert!(again.outcome.drift.is_empty());
     }
 
     #[tokio::test]
@@ -353,12 +371,19 @@ mod tests {
             ["releases:read"]
         );
         assert!(gateway.grant_row(&node(), "user:bob").is_some());
+        // Both put back: drifts, the field named once.
+        assert_eq!(
+            again.outcome.writes,
+            [RemoteWrite::Drift, RemoteWrite::Drift]
+        );
+        assert_eq!(again.outcome.drift.fields(), ["grants"]);
 
         let only_alice = [grant("user:alice", &["releases:read"])];
         let last = pass(&gateway, &ledger, &only_alice, again.applied).await;
         assert_eq!(last.outcome.reason(), ReasonCode::Reconciled);
         assert!(gateway.grant_row(&node(), "user:bob").is_none());
         assert_eq!(last.applied.len(), 1);
+        assert_eq!(last.outcome.writes, [RemoteWrite::Drift]);
     }
 
     #[tokio::test]

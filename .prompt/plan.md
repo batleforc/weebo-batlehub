@@ -1152,7 +1152,7 @@ lève (`needs_a_change`, reprise à 300 s, 2.10).
 | `CacheVolumeSingleWriter` | advisory | | managed, cache filesystem sur un claim RWO/RWOP monté par plus de pods qu'il n'en admet (plusieurs réplicas proxy, worker sur RWOP) |
 | `CacheVolumeNotResized` | advisory | | managed : `persistence.size` diffère de la demande du PVC, que l'opérateur ne redimensionne jamais |
 | `RegistrySuspended`, `MaintenanceRunning`, `MaintenanceSuspended`, `SuspiciousGrant`, `ExemptionExpired` | advisory | | par kind |
-| `ConfigReloaded`, `ConfigRolledOut`, `RestartInterrupts`, `MaintenanceStarted`, `Revoked`, `Released` | advisory | | Events seulement (`announce_change`, `finalize`) ; `RestartInterrupts` en `Warning` |
+| `ConfigReloaded`, `DriftCorrected`, `ConfigRolledOut`, `RestartInterrupts`, `MaintenanceStarted`, `Revoked`, `Released` | advisory | | Events seulement (`announce_change`, `finalize`) ; `RestartInterrupts` en `Warning` |
 
 Renommés par rapport à la v2 : `AmbiguousDefaultInstance` →
 `InstanceAmbiguous` (code du gabarit) ; `RemoteConflict` disparaît (le

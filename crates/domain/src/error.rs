@@ -227,6 +227,11 @@ weebo_kit_domain::reason_codes! {
         // --- Events only ---
         /// The instance reloaded a new configuration (Event only).
         ConfigReloaded,
+        /// What the operator wrote in BatleHub no longer held its desired
+        /// value (changed on the instance's side) and was put back; the
+        /// Event names what (Event only). Coming back on every reconcile
+        /// for the same object, it is a comparison bug, not a drift.
+        DriftCorrected,
         /// A new configuration was rolled out by restarting the pods (Event
         /// only).
         ConfigRolledOut,
@@ -278,6 +283,7 @@ impl ReasonCode {
             | ReasonCode::CacheVolumeNotResized
             | ReasonCode::CacheVolumeSingleWriter
             | ReasonCode::ConfigReloaded
+            | ReasonCode::DriftCorrected
             | ReasonCode::ConfigRolledOut
             | ReasonCode::RestartInterrupts
             | ReasonCode::MaintenanceStarted

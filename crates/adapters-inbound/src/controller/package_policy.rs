@@ -163,6 +163,7 @@ async fn cleanup(api: &Api<PackagePolicy>, policy: &PackagePolicy, ctx: &Ctx) ->
     let cleared = clear_package_policy(&node, &record, access.gateway.as_ref())
         .await
         .map_err(Error::Cleanup)?;
+    super::record_deleted(KIND, cleared);
     if cleared > 0 {
         events::announce_change(
             &ctx.recorder,

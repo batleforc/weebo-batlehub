@@ -13,7 +13,7 @@ pub mod reconcile_registry;
 pub mod render_config;
 
 use domain::error::ReasonCode;
-use domain::{Advisory, Failure};
+use domain::{Advisory, Drift, Failure, RemoteWrite};
 
 use crate::ports::{
     BoundInstance, GatewayError, GatewayFactoryError, InstanceError, instance_reason,
@@ -37,6 +37,33 @@ pub fn instance_failure(err: InstanceError) -> Failure {
     Failure::new(instance_reason(&err), err.to_string())
 }
 
+/// The writes of a pass to BatleHub's admin API, as it makes them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Writes {
+    pub writes: Vec<RemoteWrite>,
+    pub drift: Drift,
+}
+
+impl Writes {
+    /// Something new written where nothing of this CR was.
+    pub fn created(&mut self) {
+        self.writes.push(RemoteWrite::Created);
+    }
+
+    /// `field` (what the CR owns, e.g. `grants`) rewritten to its desired
+    /// value — named once in the `DriftCorrected` Event.
+    pub fn drifted(&mut self, field: &'static str) {
+        self.writes.push(RemoteWrite::Drift);
+        let named = self.drift.fields().contains(&field);
+        self.drift.note(field, !named);
+    }
+
+    /// Removed by the finalizer.
+    pub fn deleted(&mut self) {
+        self.writes.push(RemoteWrite::Deleted);
+    }
+}
+
 /// What a reconcile ended on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Outcome {
@@ -46,6 +73,13 @@ pub struct Outcome {
     pub ready: Result<String, Failure>,
     /// Non-blocking conditions next to `Ready: True`.
     pub advisories: Vec<Advisory>,
+    /// Each write this pass made to BatleHub's admin API, failed pass
+    /// included — counted in `<prefix>_remote_writes_total`. Empty when
+    /// everything was in sync.
+    pub writes: Vec<RemoteWrite>,
+    /// What a drift correction put back (a `DriftCorrected` Event names
+    /// it, unless the spec just changed).
+    pub drift: Drift,
 }
 
 impl Outcome {
@@ -54,6 +88,8 @@ impl Outcome {
             instance: None,
             ready: Ok(message.into()),
             advisories: Vec::new(),
+            writes: Vec::new(),
+            drift: Drift::default(),
         }
     }
 
@@ -62,6 +98,8 @@ impl Outcome {
             instance: None,
             ready: Err(failure.into()),
             advisories: Vec::new(),
+            writes: Vec::new(),
+            drift: Drift::default(),
         }
     }
 
@@ -71,6 +109,14 @@ impl Outcome {
             reason,
             message: message.into(),
         });
+        self
+    }
+
+    /// Records the writes a pass made, and what its drift corrections
+    /// put back.
+    pub fn wrote(mut self, writes: Writes) -> Self {
+        self.writes = writes.writes;
+        self.drift = writes.drift;
         self
     }
 
