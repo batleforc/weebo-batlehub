@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## [v0.3.0](https://github.com/batleforc/weebo-batlehub/compare/75c605dcaba7bb2379a760575f7c7b8f440d8356..v0.3.0) - 2026-10-19
+#### Features
+- (**metrics**) count BatleHub writes (remote_writes_total, DriftCorrected), RepeatedDrift back on (#15) - ([75c605d](https://github.com/batleforc/weebo-batlehub/commit/75c605dcaba7bb2379a760575f7c7b8f440d8356)) - Maxime, Claude Opus 5.5 (1M context)
+
+- - -
+
 ## [v0.2.4](https://github.com/batleforc/weebo-batlehub/compare/08015a67e5af89680a50b6ca853873419dd0d5bd..v0.2.4) - 2026-10-19
 #### Refactoring
 - (**controller**) one shared watch per kind (kit v0.20.0) (#14) - ([2657c0e](https://github.com/batleforc/weebo-batlehub/commit/2657c0e1f79318217a40d25afb9c9a9ae0664939)) - Maxime, Claude Opus 5.5 (1M context)
