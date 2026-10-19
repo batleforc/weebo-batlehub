@@ -4,6 +4,8 @@
 
 pub mod error;
 
+pub use weebo_kit_domain::drift::{Drift, RemoteWrite};
+
 /// A `Ready: False` cause, carrying one of this operator's reason codes.
 pub type Failure = weebo_kit_domain::Failure<error::ReasonCode>;
 /// A non-blocking condition shown next to `Ready: True`.

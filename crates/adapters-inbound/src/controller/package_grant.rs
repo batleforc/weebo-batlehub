@@ -148,6 +148,7 @@ async fn cleanup(api: &Api<PackageGrant>, grant: &PackageGrant, ctx: &Ctx) -> Re
     let revoked = revoke_package_grant(&node, &status.applied, access.gateway.as_ref())
         .await
         .map_err(Error::Cleanup)?;
+    super::record_deleted(KIND, revoked);
     if revoked > 0 {
         events::announce_change(
             &ctx.recorder,

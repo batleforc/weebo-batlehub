@@ -20,6 +20,7 @@ CR is deleted.
 | The instance reloaded a new configuration. | `Normal` | `ConfigReloaded` | `Reconcile` | what happened, with the remote object's id |
 | A maintenance run started. | `Normal` | `MaintenanceStarted` | `Reconcile` | what happened, with the remote object's id |
 | The finalizer revoked what the CR wrote in BatleHub. | `Normal` | `Revoked` | `Cleanup` | what happened, with the remote object's id |
+| What the operator wrote in BatleHub no longer held its desired value (changed on the instance's side) and was put back; the Event names what. | `Normal` | `DriftCorrected` | `Reconcile` | the fields put back |
 | A reconcile stops before writing a status (Kubernetes API call, finalizer…) | `Warning` | `KubernetesApiError` | `Reconcile` | the error |
 | A finalizer cleanup fails | `Warning` | the failure's code | `Cleanup` | the error |
 | The finalizer finishes its cleanup | `Normal` | `Released` | `Cleanup` | `cleanup finished, finalizer released` |

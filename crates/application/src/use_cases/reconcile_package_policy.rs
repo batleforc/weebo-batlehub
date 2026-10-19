@@ -17,8 +17,8 @@ use domain::error::ReasonCode;
 use jiff::Timestamp;
 use serde_json::{Map, Value};
 
-use super::Outcome;
 use super::render_config::sha256;
+use super::{Outcome, Writes};
 use crate::ports::{AdminGateway, Exemption, GatewayError, Ledger, PackageNode};
 
 /// What a `BatleHubPackagePolicy` asks for.
@@ -151,6 +151,7 @@ pub async fn reconcile_package_policy(
         record,
         changed: false,
         registry_checked: false,
+        writes: Writes::default(),
     };
     let outcome = match pass.run(now).await {
         Ok((failures, expired)) => match combine(failures) {
@@ -170,7 +171,7 @@ pub async fn reconcile_package_policy(
         Err(failure) => Outcome::failed(failure),
     };
     PolicyReport {
-        outcome,
+        outcome: outcome.wrote(pass.writes),
         record: pass.record,
         changed: pass.changed,
     }
@@ -193,6 +194,7 @@ struct Pass<'a> {
     record: PolicyRecord,
     changed: bool,
     registry_checked: bool,
+    writes: Writes,
 }
 
 impl Pass<'_> {
@@ -240,6 +242,10 @@ impl Pass<'_> {
                     .put_policy(node, &with_exemptions(Some(policy), exempt_rules))
                     .await
                     .map_err(|e| self.refused(e))?;
+                match self.record.applied_policy_hash {
+                    Some(_) => self.writes.drifted("policy"),
+                    None => self.writes.created(),
+                }
                 let (written, _) = split(self.gateway.policy(node).await?);
                 self.record.applied_policy_hash = desired;
                 self.record.observed_policy_hash = written.as_ref().map(policy_hash);
@@ -247,6 +253,7 @@ impl Pass<'_> {
             }
             None if self.record.applied_policy_hash.is_some() => {
                 self.clear(exempt_rules).await?;
+                self.writes.drifted("policy");
                 self.record.applied_policy_hash = None;
                 self.record.observed_policy_hash = None;
                 self.save().await
@@ -324,6 +331,11 @@ impl Pass<'_> {
             };
             match self.gateway.set_exemption(node, &write).await {
                 Ok(()) => {
+                    if known {
+                        self.writes.drifted("exemptions");
+                    } else {
+                        self.writes.created();
+                    }
                     let entry = AppliedExemption {
                         gate: gate.to_string(),
                         exempt_until: until,
@@ -358,6 +370,7 @@ impl Pass<'_> {
         for gate in gone {
             match self.gateway.delete_exemption(node, &gate).await {
                 Ok(()) => {
+                    self.writes.drifted("exemptions");
                     self.record.applied_exemptions.retain(|a| a.gate != gate);
                     self.save().await?;
                 }
@@ -461,6 +474,7 @@ pub async fn clear_package_policy(
 #[cfg(test)]
 mod tests {
     use api::package_policy::Gate;
+    use domain::RemoteWrite;
     use serde_json::json;
 
     use super::*;
@@ -541,10 +555,14 @@ mod tests {
             report.record.applied_policy_hash
         );
         assert_eq!(ledger.records().len(), 1);
+        assert_eq!(report.outcome.writes, [RemoteWrite::Created]);
 
         let again = pass(&gateway, &ledger, Some(&policy), &[], report.record.clone()).await;
         assert_eq!(again.outcome.reason(), ReasonCode::Reconciled);
         assert!(!again.changed);
+        // Unchanged: nothing written, nothing counted.
+        assert!(again.outcome.writes.is_empty());
+        assert!(again.outcome.drift.is_empty());
     }
 
     #[tokio::test]
@@ -566,6 +584,7 @@ mod tests {
             gateway.stored_policy(&version()),
             Some(json!({"visibility": "public"}))
         );
+        assert!(report.outcome.writes.is_empty());
 
         let gateway = served();
         let report = pass(
@@ -581,6 +600,8 @@ mod tests {
         assert_eq!(again.outcome.reason(), ReasonCode::Reconciled);
         assert!(again.changed);
         assert_eq!(gateway.stored_policy(&version()), Some(policy));
+        assert_eq!(again.outcome.writes, [RemoteWrite::Drift]);
+        assert_eq!(again.outcome.drift.fields(), ["policy"]);
     }
 
     #[tokio::test]
@@ -604,6 +625,11 @@ mod tests {
             report.record.applied_exemptions[0].exempt_until,
             "2099-01-01T00:00:00Z"
         );
+        // The policy and the exemption.
+        assert_eq!(
+            report.outcome.writes,
+            [RemoteWrite::Created, RemoteWrite::Created]
+        );
         let again = pass(
             &gateway,
             &ledger,
@@ -613,6 +639,7 @@ mod tests {
         )
         .await;
         assert!(!again.changed);
+        assert!(again.outcome.writes.is_empty());
 
         // A new policy carries the exemption over.
         let stricter = json!({"visibility": "private"});
@@ -628,6 +655,7 @@ mod tests {
         let stored = gateway.stored_policy(&version()).unwrap();
         assert_eq!(stored["visibility"], "private");
         assert_eq!(stored["rules"][0]["gate"], "cve_gate");
+        assert_eq!(rewritten.outcome.writes, [RemoteWrite::Drift]);
 
         // The policy out of the spec: cleared, the exemption kept.
         let cleared = pass(&gateway, &ledger, None, &exemptions, rewritten.record).await;
@@ -636,11 +664,14 @@ mod tests {
         let stored = gateway.stored_policy(&version()).unwrap();
         assert!(stored.get("visibility").is_none());
         assert_eq!(stored["rules"][0]["gate"], "cve_gate");
+        assert_eq!(cleared.outcome.writes, [RemoteWrite::Drift]);
 
         // Then the exemption out too.
         let empty = pass(&gateway, &ledger, None, &[], cleared.record).await;
         assert_eq!(empty.outcome.reason(), ReasonCode::Reconciled);
         assert!(empty.record.applied_exemptions.is_empty());
+        assert_eq!(empty.outcome.writes, [RemoteWrite::Drift]);
+        assert_eq!(empty.outcome.drift.fields(), ["exemptions"]);
         assert_eq!(
             gateway.stored_policy(&version()).unwrap()["rules"],
             json!([])

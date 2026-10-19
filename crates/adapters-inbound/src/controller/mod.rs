@@ -14,8 +14,8 @@ use application::ports::{
 };
 use application::use_cases::{Outcome, instance_failure};
 use application::workload::OperatorPod;
-use domain::Failure;
 use domain::error::ReasonCode;
+use domain::{Failure, RemoteWrite};
 use kube::api::Api;
 use kube::runtime::controller::Action;
 use kube::runtime::events::Recorder;
@@ -281,20 +281,39 @@ pub fn requeue_after(outcome: &Outcome) -> Action {
     weebo_kit_runtime::controller::requeue_after(outcome.steady(), None)
 }
 
-/// `<prefix>_reconcile_total` / `_duration_seconds` (the kit's
-/// `ReconcileMetrics`). A no-op until the telemetry installs a real
-/// `MeterProvider`.
-pub fn record_reconcile(kind: &'static str, started: Instant, outcome: &Outcome) {
+/// The kit's `ReconcileMetrics`. A no-op until the telemetry installs a
+/// real `MeterProvider`.
+fn metrics() -> &'static ReconcileMetrics {
     static METRICS: OnceLock<ReconcileMetrics> = OnceLock::new();
-    METRICS
-        .get_or_init(|| ReconcileMetrics::new(FIELD_MANAGER, METRIC_PREFIX))
-        .record(kind, outcome.reason(), started.elapsed());
+    METRICS.get_or_init(|| ReconcileMetrics::new(FIELD_MANAGER, METRIC_PREFIX))
+}
+
+/// `<prefix>_reconcile_total` / `_duration_seconds`, and
+/// `<prefix>_remote_writes_total` for each write the pass made to
+/// BatleHub. Flat at rest: a steady `cause="drift"` rate is a field
+/// compared wrong (the RepeatedDrift alert).
+pub fn record_reconcile(kind: &'static str, started: Instant, outcome: &Outcome) {
+    metrics().record(kind, outcome.reason(), started.elapsed());
+    for write in &outcome.writes {
+        metrics().record_write(kind, *write);
+    }
+}
+
+/// `<prefix>_remote_writes_total{cause="deleted"}`: what a finalizer
+/// removed from BatleHub.
+pub fn record_deleted(kind: &'static str, removed: usize) {
+    for _ in 0..removed {
+        metrics().record_write(kind, RemoteWrite::Deleted);
+    }
 }
 
 /// What [`publish`] needs of a CR's `status`.
 pub trait HasStatus {
     /// The conditions of the last publish.
     fn conditions(&self) -> &[Condition];
+
+    /// The `metadata.generation` the last successful reconcile applied.
+    fn observed_generation(&self) -> Option<i64>;
 
     /// The instance recorded at the last resolution (the kinds that target
     /// an instance).
@@ -310,6 +329,10 @@ impl HasStatus for api::LocalInstance {
             .map(|s| s.conditions.as_slice())
             .unwrap_or_default()
     }
+
+    fn observed_generation(&self) -> Option<i64> {
+        self.status.as_ref().and_then(|s| s.observed_generation)
+    }
 }
 
 impl HasStatus for api::NamespaceClaim {
@@ -318,6 +341,10 @@ impl HasStatus for api::NamespaceClaim {
             .as_ref()
             .map(|s| s.conditions.as_slice())
             .unwrap_or_default()
+    }
+
+    fn observed_generation(&self) -> Option<i64> {
+        self.status.as_ref().and_then(|s| s.observed_generation)
     }
 
     fn bound_instance(&self) -> Option<&BoundInstance> {
@@ -333,6 +360,10 @@ impl HasStatus for api::PackageGrant {
             .unwrap_or_default()
     }
 
+    fn observed_generation(&self) -> Option<i64> {
+        self.status.as_ref().and_then(|s| s.observed_generation)
+    }
+
     fn bound_instance(&self) -> Option<&BoundInstance> {
         self.status.as_ref().and_then(|s| s.instance.as_ref())
     }
@@ -344,6 +375,10 @@ impl HasStatus for api::PackagePolicy {
             .as_ref()
             .map(|s| s.conditions.as_slice())
             .unwrap_or_default()
+    }
+
+    fn observed_generation(&self) -> Option<i64> {
+        self.status.as_ref().and_then(|s| s.observed_generation)
     }
 
     fn bound_instance(&self) -> Option<&BoundInstance> {
@@ -359,6 +394,10 @@ impl HasStatus for api::Maintenance {
             .unwrap_or_default()
     }
 
+    fn observed_generation(&self) -> Option<i64> {
+        self.status.as_ref().and_then(|s| s.observed_generation)
+    }
+
     fn bound_instance(&self) -> Option<&BoundInstance> {
         self.status.as_ref().and_then(|s| s.instance.as_ref())
     }
@@ -372,6 +411,10 @@ impl HasStatus for api::Registry {
             .unwrap_or_default()
     }
 
+    fn observed_generation(&self) -> Option<i64> {
+        self.status.as_ref().and_then(|s| s.observed_generation)
+    }
+
     fn bound_instance(&self) -> Option<&BoundInstance> {
         self.status.as_ref().and_then(|s| s.instance.as_ref())
     }
@@ -382,7 +425,8 @@ impl HasStatus for api::Registry {
 /// (conditions with the advisories, `observedGeneration` on success, the
 /// bound instance, the kind's own `fields`), retried while the apiserver
 /// is unavailable, then a `Warning` on every failed reconcile and a
-/// `Normal` for every condition change.
+/// `Normal` for every condition change. Then a `DriftCorrected` Event
+/// naming what the pass put back, unless the spec just changed.
 pub async fn publish<K>(
     api: &Api<K>,
     recorder: &Recorder,
@@ -410,8 +454,25 @@ where
             fields,
         },
     )
-    .await
-    .map(|_| ())
+    .await?;
+    // A spec change being applied is not a drift: only what moved on the
+    // instance's side is announced.
+    if !spec_changed(obj) {
+        events::announce_drift(
+            recorder,
+            &obj.object_ref(&()),
+            ReasonCode::DriftCorrected,
+            &outcome.drift,
+        )
+        .await;
+    }
+    Ok(())
+}
+
+/// Whether `obj` (read at the start of the pass) carries a spec its last
+/// successful reconcile didn't apply.
+fn spec_changed<K: Resource + HasStatus>(obj: &K) -> bool {
+    obj.meta().generation != obj.observed_generation()
 }
 
 /// `controller`, also triggered for every CR of a namespace when one of

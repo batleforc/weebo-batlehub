@@ -180,11 +180,10 @@ prometheusRule:
   # the <Chart>ReconcileErrors alert.
   reconcileErrorRatio: 0.1
   repeatedDrift:
-    # -- The <Chart>RepeatedDrift alert, on <prefix>_remote_writes_total.
-    # Off: this operator doesn't count its BatleHub admin API writes (no
-    # record_write call), so the metric doesn't exist and the alert could
-    # never fire. Turn it on once the writes are counted.
-    enabled: false
+    # -- The <Chart>RepeatedDrift alert, on <prefix>_remote_writes_total
+    # (each write to BatleHub's admin API, by kind and cause): the same
+    # kind rewritten on every reconcile is a comparison to fix, not a drift.
+    enabled: true
 
 probes:
   # -- Gives the webhook server time to load its certificate before the

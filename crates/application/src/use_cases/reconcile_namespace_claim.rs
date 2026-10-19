@@ -7,7 +7,7 @@
 use domain::Failure;
 use domain::error::ReasonCode;
 
-use super::Outcome;
+use super::{Outcome, Writes};
 use crate::ports::{AdminGateway, GatewayError, TeamNamespace};
 
 /// What a `BatleHubNamespaceClaim` asks for.
@@ -103,17 +103,24 @@ pub async fn reconcile_namespace_claim(
     claim: &Claim<'_>,
     gateway: &dyn AdminGateway,
 ) -> ClaimReport {
-    match run(claim, gateway).await {
+    let mut writes = Writes::default();
+    let mut report = match run(claim, gateway, &mut writes).await {
         Ok(report) => report,
         Err(failure) => ClaimReport {
             outcome: Outcome::failed(failure),
             state: None,
             changed: false,
         },
-    }
+    };
+    report.outcome = report.outcome.wrote(writes);
+    report
 }
 
-async fn run(claim: &Claim<'_>, gateway: &dyn AdminGateway) -> Result<ClaimReport, Failure> {
+async fn run(
+    claim: &Claim<'_>,
+    gateway: &dyn AdminGateway,
+    writes: &mut Writes,
+) -> Result<ClaimReport, Failure> {
     let held = |count: i64| ClaimState {
         group: Some(claim.group.to_string()),
         package_count: Some(count),
@@ -141,6 +148,8 @@ async fn run(claim: &Claim<'_>, gateway: &dyn AdminGateway) -> Result<ClaimRepor
             gateway
                 .release_namespace(claim.registry, claim.prefix)
                 .await?;
+            // One object rewritten, in two calls.
+            writes.drifted("group");
             claim.create(gateway).await?;
             Ok(ClaimReport {
                 outcome: Outcome::synced(format!(
@@ -166,6 +175,7 @@ async fn run(claim: &Claim<'_>, gateway: &dyn AdminGateway) -> Result<ClaimRepor
                 ));
             }
             claim.create(gateway).await?;
+            writes.created();
             Ok(ClaimReport {
                 outcome: Outcome::synced(format!(
                     "{:?} claimed on registry {:?} for group {:?}",
@@ -197,6 +207,8 @@ pub async fn release_namespace_claim(
 
 #[cfg(test)]
 mod tests {
+    use domain::RemoteWrite;
+
     use super::*;
     use crate::test_support::FakeGateway;
 
@@ -230,10 +242,14 @@ mod tests {
         let held = gateway.claim("npm", "@acme/web").unwrap();
         assert_eq!(held.group, "oidc:web");
         assert_eq!(held.claimed_by.as_deref(), Some(MARKER));
+        assert_eq!(report.outcome.writes, [RemoteWrite::Created]);
 
         let report = reconcile_namespace_claim(&claim("oidc:web"), &gateway).await;
         assert_eq!(reason(&report), ReasonCode::Reconciled);
         assert!(!report.changed);
+        // Unchanged: nothing written, nothing counted.
+        assert!(report.outcome.writes.is_empty());
+        assert!(report.outcome.drift.is_empty());
         assert_eq!(
             gateway.calls(),
             ["namespaces", "registries", "claim", "namespaces"]
@@ -266,6 +282,7 @@ mod tests {
         let message = report.outcome.ready.unwrap_err().message;
         assert!(message.contains("by admin"), "{message}");
         assert_eq!(report.state.unwrap().group, None);
+        assert!(report.outcome.writes.is_empty());
         // Never released by this CR either.
         assert!(
             !release_namespace_claim(&claim("oidc:web"), &gateway)
@@ -291,6 +308,9 @@ mod tests {
             report.state.unwrap().group.as_deref(),
             Some("oidc:frontend")
         );
+        // Release then claim: one object rewritten.
+        assert_eq!(report.outcome.writes, [RemoteWrite::Drift]);
+        assert_eq!(report.outcome.drift.fields(), ["group"]);
     }
 
     #[tokio::test]
