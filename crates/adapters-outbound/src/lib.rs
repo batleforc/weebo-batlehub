@@ -12,6 +12,7 @@ pub mod gateway_factory;
 pub mod instances;
 pub mod metered;
 mod redact;
+pub mod scoped;
 pub mod sources;
 pub mod workloads;
 

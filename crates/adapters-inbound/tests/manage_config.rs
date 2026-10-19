@@ -147,6 +147,7 @@ fn ctx_with(client: &Client, gateways: StaticGatewayFactory) -> Arc<Ctx> {
         health: Arc::new(Health::default()),
         scope: WatchScope::cluster(),
         images: Default::default(),
+        watches: Default::default(),
     })
 }
 

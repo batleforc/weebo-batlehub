@@ -33,8 +33,10 @@ pub const KIND: &str = "BatleHubNamespaceClaim";
 
 pub async fn run(client: Client, ctx: Arc<Ctx>) {
     let health = ctx.health.clone();
-    let controller = super::controller(ctx.scope.api::<NamespaceClaim>(client.clone()), &ctx.scope);
-    let results = super::with_instances(controller, &ctx.scope, client)
+    let controller = ctx
+        .watches
+        .controller(ctx.scope.api::<NamespaceClaim>(client.clone()), &ctx.scope);
+    let results = super::with_instances(controller, &ctx, &client)
         .graceful_shutdown_on(ctx.shutdown.wait())
         .run(reconcile, error_policy, ctx);
     super::drive(KIND, health, results).await;

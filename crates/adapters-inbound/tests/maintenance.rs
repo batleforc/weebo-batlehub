@@ -98,6 +98,7 @@ fn ctx(client: &Client, gateway: Arc<FakeGateway>) -> Arc<Ctx> {
         health: Arc::new(Health::default()),
         scope: WatchScope::cluster(),
         images: Default::default(),
+        watches: Default::default(),
     })
 }
 
