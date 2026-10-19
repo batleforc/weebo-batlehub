@@ -18,6 +18,7 @@ description: What the operator exports, the probes it answers, and the settings 
 | --- | --- | --- | --- |
 | `weebo_batlehub_reconcile_total` | counter | `kind`, `result` (`success`/`error`: the severity of the `Ready` reason), `reason` (the `Ready` reason code) | Reconcile runs |
 | `weebo_batlehub_reconcile_duration_seconds` | histogram | `kind` | Reconcile run duration; buckets 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120 s |
+| `weebo_batlehub_remote_writes_total` | counter | `kind`, `cause` (`created`/`drift`/`deleted`) | Writes to the remote system. At rest it stays flat: an object is only written when it differs from its spec |
 | `weebo_batlehub_webhook_decisions_total` | counter | `kind`, `result` (`allow`/`deny`) | Admission webhook decisions |
 | `weebo_batlehub_leader` | gauge (0/1) | none | `1` on the replica holding the leader lease |
 | `weebo_batlehub_instance_ready` | gauge | `instance_namespace`, `instance_name` | 1 when the BatleHubLocalInstance is `Ready`, 0 otherwise; gone with the instance |
@@ -37,6 +38,10 @@ sum by (kind) (rate(weebo_batlehub_reconcile_total{result="error"}[15m]))
 
 # Why they fail
 sum by (reason) (rate(weebo_batlehub_reconcile_total{result="error"}[15m]))
+
+# Objects rewritten at rest: one correction is a drift, a steady rate is
+# a field compared wrong (the RepeatedDrift alert)
+sum by (kind) (increase(weebo_batlehub_remote_writes_total{cause="drift"}[30m]))
 
 # Reconcile p95, per kind
 histogram_quantile(0.95, sum by (kind, le) (rate(weebo_batlehub_reconcile_duration_seconds_bucket[5m])))
@@ -60,6 +65,7 @@ Served on every replica, on the admission webhook's HTTPS port
 | Setting | Default | What it does |
 | --- | --- | --- |
 | `WEEBO_RECONCILE_CONCURRENCY` | 4 | Reconciles running at once, per controller: a startup sweep can't flood the remote system or the apiserver |
+| `WEEBO_WORKER_THREADS` | 4 | tokio worker threads (chart: `workerThreads`). Not one per core: each worker keeps its own allocator arena and the idle memory grows with them, while reconciles wait on the network, not on CPU |
 | `WEEBO_WATCH_NAMESPACE` | the whole cluster | The namespaced kinds of this namespace only (chart: `watch.namespace`); the cluster-scoped kinds stay watched cluster-wide |
 | `WEEBO_WATCH_CLUSTER_KINDS` | `true` | `false` (chart: `watch.clusterKinds`, with a namespace): full namespaced — no cluster-scoped kind is watched, objects use the LocalInstances of the namespace, the operator runs on Roles only |
 | `WEEBO_CROSS_NAMESPACE_REFS` | `false` | `true` (chart: `references.crossNamespace`): a CR may reference a CR of another namespace that shares itself with it (`spec.sharedWith`); never with `WEEBO_WATCH_NAMESPACE` |
