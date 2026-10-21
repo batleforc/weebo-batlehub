@@ -296,7 +296,10 @@ pub async fn run_maintenance(
         Err(e) => {
             return RunReport {
                 started: false,
-                outcome: Outcome::failed(Failure::new(ReasonCode::KubernetesApiError, e)),
+                outcome: Outcome::failed(Failure::new(
+                    ReasonCode::KubernetesApiError,
+                    e.to_string(),
+                )),
                 status,
             };
         }
@@ -736,7 +739,7 @@ async fn execute(plan: &Plan<'_>, target: &Target<'_>, now: Timestamp) -> Result
                     .approver
                     .approve(hash)
                     .await
-                    .map_err(|e| Failure::new(ReasonCode::MaintenanceFailed, e))?;
+                    .map_err(|e| Failure::new(ReasonCode::MaintenanceFailed, e.to_string()))?;
                 return Ok(json!({"approved": hash}));
             }
             let request = AdminRequest {
@@ -875,7 +878,11 @@ mod tests {
 
     #[async_trait::async_trait]
     impl RunGuard for Guard {
-        async fn start(&self, run: &LastRun, _: Option<&str>) -> Result<bool, String> {
+        async fn start(
+            &self,
+            run: &LastRun,
+            _: Option<&str>,
+        ) -> Result<bool, crate::ports::KubernetesError> {
             if self.refuse {
                 return Ok(false);
             }
@@ -889,7 +896,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl Approver for Approvals {
-        async fn approve(&self, hash: &str) -> Result<(), String> {
+        async fn approve(&self, hash: &str) -> Result<(), crate::ports::KubernetesError> {
             self.0.lock().unwrap().push(hash.into());
             Ok(())
         }

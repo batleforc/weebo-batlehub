@@ -212,7 +212,7 @@ impl Pass<'_> {
         self.ledger
             .record(&self.applied)
             .await
-            .map_err(|e| Failure::new(ReasonCode::KubernetesApiError, e))
+            .map_err(|e| Failure::new(ReasonCode::KubernetesApiError, e.to_string()))
     }
 }
 

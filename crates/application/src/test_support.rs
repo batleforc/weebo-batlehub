@@ -658,9 +658,12 @@ impl<T: Clone> FakeLedger<T> {
 
 #[async_trait::async_trait]
 impl<T: Clone + Send + Sync> Ledger<T> for FakeLedger<T> {
-    async fn record(&self, written: &T) -> Result<(), String> {
+    async fn record(&self, written: &T) -> Result<(), crate::ports::KubernetesError> {
         if *self.fail.lock().unwrap() {
-            return Err("status patch refused".into());
+            return Err(crate::ports::KubernetesError::new(
+                "patching the status",
+                "status patch refused",
+            ));
         }
         self.records.lock().unwrap().push(written.clone());
         Ok(())

@@ -315,7 +315,7 @@ async fn managed_config(
     ctx: &Ctx,
 ) -> ManagedConfig {
     let rendered = match rendered {
-        Ok(rendered) => check_token(&rendered, &access.token, ctx.config.as_ref())
+        Ok(rendered) => check_token(&rendered, access.token.expose(), ctx.config.as_ref())
             .await
             .map(|()| rendered),
         Err(e) => Err(e),
@@ -521,7 +521,7 @@ struct FactoryReach<'a> {
 impl Reach for FactoryReach<'_> {
     async fn gateway(&self) -> Result<(Arc<dyn AdminGateway>, String), Failure> {
         let access = self.ctx.gateways.gateway_for(self.bound).await?;
-        Ok((access.gateway, access.token))
+        Ok((access.gateway, access.token.expose().to_string()))
     }
 
     async fn pods(&self) -> Result<Vec<PodGateway>, Failure> {

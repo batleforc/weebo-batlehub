@@ -53,7 +53,7 @@ impl GatewayFactory for StaticGatewayFactory {
         }
         Ok(InstanceAccess {
             gateway: self.gateway.clone(),
-            token: STATIC_TOKEN.into(),
+            token: application::ports::Token::new(STATIC_TOKEN),
         })
     }
 

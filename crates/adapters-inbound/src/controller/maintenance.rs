@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use api::Maintenance;
 use api::local_instance::ReloadStrategy;
 use api::maintenance::{LastRun, MaintenanceAction};
-use application::ports::{Approver, RunGuard};
+use application::ports::{Approver, KubernetesError, RunGuard};
 use application::use_cases::reconcile_maintenance::{
     Decision, Plan, Restarter, Target, decide, run_maintenance, settle,
 };
@@ -80,7 +80,7 @@ pub async fn record_start(
     resource_version: &str,
     run: &LastRun,
     run_now: Option<&str>,
-) -> Result<bool, String> {
+) -> Result<bool, KubernetesError> {
     let mut status = json!({ "lastRun": run });
     if let Some(token) = run_now {
         status["runNow"] = json!(token);
@@ -95,13 +95,13 @@ pub async fn record_start(
     {
         Ok(_) => Ok(true),
         Err(kube::Error::Api(e)) if e.code == 409 => Ok(false),
-        Err(e) => Err(format!("recording the run: {e}")),
+        Err(e) => Err(KubernetesError::new("recording the run", e)),
     }
 }
 
 #[async_trait::async_trait]
 impl RunGuard for ConditionalStart<'_> {
-    async fn start(&self, run: &LastRun, run_now: Option<&str>) -> Result<bool, String> {
+    async fn start(&self, run: &LastRun, run_now: Option<&str>) -> Result<bool, KubernetesError> {
         let started =
             record_start(&self.api, &self.name, &self.resource_version, run, run_now).await?;
         if started {
@@ -127,7 +127,7 @@ struct AnnotateInstance {
 
 #[async_trait::async_trait]
 impl Approver for AnnotateInstance {
-    async fn approve(&self, hash: &str) -> Result<(), String> {
+    async fn approve(&self, hash: &str) -> Result<(), KubernetesError> {
         let patch = Patch::Merge(json!({
             "metadata": { "annotations": { api::APPROVED_CONFIG_HASH: hash } }
         }));
@@ -135,7 +135,7 @@ impl Approver for AnnotateInstance {
             .patch(&self.name, &PatchParams::default(), &patch)
             .await
             .map(|_| ())
-            .map_err(|e| format!("approving {hash}: {e}"))
+            .map_err(|e| KubernetesError::new(format!("approving {hash}"), e))
     }
 }
 
