@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## [v0.3.2](https://github.com/batleforc/weebo-batlehub/compare/2399b3fa30a51edfb825c4e26d0cdac958d6842a..v0.3.2) - 2026-10-21
+#### Miscellaneous Chores
+- (**kit**) weebo-operator-kit v0.22.1 (#17) - ([2399b3f](https://github.com/batleforc/weebo-batlehub/commit/2399b3fa30a51edfb825c4e26d0cdac958d6842a)) - Maxime, Claude Opus 5.5 (1M context), Claude Opus 5.5 (1M context), Claude Opus 5.5 (1M context), Claude Opus 5.5 (1M context)
+
+- - -
+
 ## [v0.3.1](https://github.com/batleforc/weebo-batlehub/compare/2cde42a9da1d5b6293f94af5d4d0b1023d2a8781..v0.3.1) - 2026-10-19
 #### Miscellaneous Chores
 - (**kit**) weebo-operator-kit v0.21.0 (#16) - ([2cde42a](https://github.com/batleforc/weebo-batlehub/commit/2cde42a9da1d5b6293f94af5d4d0b1023d2a8781)) - Maxime, Claude Opus 5.5 (1M context)
