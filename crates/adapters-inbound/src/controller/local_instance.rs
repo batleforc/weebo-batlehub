@@ -436,6 +436,7 @@ async fn apply(
         .await?;
     }
     Ok(weebo_kit_runtime::controller::requeue_after(
+        obj.as_ref(),
         outcome.steady(),
         report.due_in,
     ))
