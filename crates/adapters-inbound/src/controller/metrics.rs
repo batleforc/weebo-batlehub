@@ -16,7 +16,7 @@
 //! deleted instance (`forget_instance`) all of its own.
 
 use std::collections::BTreeMap;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock, PoisonError};
 
 use application::ports::BoundInstance;
 use opentelemetry::KeyValue;
@@ -68,7 +68,11 @@ fn register() {
             .u64_observable_gauge(INSTANCE_READY)
             .with_description("1 when the BatleHubLocalInstance is Ready")
             .with_callback(|observer| {
-                for (key, s) in series().lock().expect("metrics lock").iter() {
+                for (key, s) in series()
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .iter()
+                {
                     observer.observe(u64::from(s.ready), &labels(key));
                 }
             })
@@ -77,7 +81,11 @@ fn register() {
             .u64_observable_gauge(INSTANCE_RESTART_REQUIRED)
             .with_description("Keys of the instance's configuration waiting for a restart")
             .with_callback(|observer| {
-                for (key, s) in series().lock().expect("metrics lock").iter() {
+                for (key, s) in series()
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .iter()
+                {
                     observer.observe(s.restart_keys as u64, &labels(key));
                 }
             })
@@ -86,7 +94,11 @@ fn register() {
             .u64_observable_gauge(INSTANCE_CONFIG_WARNINGS)
             .with_description("BatleHub's warnings on the instance's configuration, by code")
             .with_callback(|observer| {
-                for (key, s) in series().lock().expect("metrics lock").iter() {
+                for (key, s) in series()
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .iter()
+                {
                     for (code, count) in &s.warnings {
                         let [namespace, name] = labels(key);
                         observer.observe(
@@ -105,7 +117,7 @@ pub fn record_instance(instance: &BoundInstance, value: InstanceSeries) {
     register();
     series()
         .lock()
-        .expect("metrics lock")
+        .unwrap_or_else(PoisonError::into_inner)
         .insert(key(instance), value);
 }
 
@@ -113,7 +125,7 @@ pub fn record_instance(instance: &BoundInstance, value: InstanceSeries) {
 pub fn forget_instance(instance: &BoundInstance) {
     series()
         .lock()
-        .expect("metrics lock")
+        .unwrap_or_else(PoisonError::into_inner)
         .remove(&key(instance));
 }
 
@@ -121,7 +133,7 @@ pub fn forget_instance(instance: &BoundInstance) {
 pub fn instance_series(instance: &BoundInstance) -> Option<InstanceSeries> {
     series()
         .lock()
-        .expect("metrics lock")
+        .unwrap_or_else(PoisonError::into_inner)
         .get(&key(instance))
         .cloned()
 }

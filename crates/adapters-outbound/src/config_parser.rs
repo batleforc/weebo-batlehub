@@ -9,7 +9,7 @@
 //! parse error prints the offending line, [`crate::redact`] drops it).
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Mutex, PoisonError};
 
 use application::ports::{ConfigError, ConfigParser, ConfigVerdict, KeyChanges, TokenCheck};
 use argon2::password_hash::phc::PasswordHash;
@@ -37,7 +37,12 @@ pub struct BatleHubConfigParser {
 impl BatleHubConfigParser {
     fn verify_hash(&self, hash: &str, token: &str) -> bool {
         let key = (hash.to_string(), token.to_string());
-        if let Some(known) = self.verified.lock().expect("cache lock").get(&key) {
+        if let Some(known) = self
+            .verified
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&key)
+        {
             return *known;
         }
         let ok = PasswordHash::new(hash)
@@ -47,7 +52,7 @@ impl BatleHubConfigParser {
                     .is_ok()
             })
             .unwrap_or(false);
-        let mut verified = self.verified.lock().expect("cache lock");
+        let mut verified = self.verified.lock().unwrap_or_else(PoisonError::into_inner);
         if verified.len() >= VERIFIED_CAPACITY {
             verified.clear();
         }
@@ -98,7 +103,12 @@ impl ConfigParser for BatleHubConfigParser {
 
     fn hash_token(&self, token: &str) -> String {
         use argon2::PasswordHasher;
-        if let Some(hash) = self.hashed.lock().expect("cache lock").get(token) {
+        if let Some(hash) = self
+            .hashed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(token)
+        {
             return hash.clone();
         }
         use sha2::{Digest, Sha256};
@@ -110,12 +120,12 @@ impl ConfigParser for BatleHubConfigParser {
             .expect("Argon2 hashes any token with a 16-byte salt")
             .to_string();
         // Verified once already: it is the operator's own.
-        let mut verified = self.verified.lock().expect("cache lock");
+        let mut verified = self.verified.lock().unwrap_or_else(PoisonError::into_inner);
         if verified.len() >= VERIFIED_CAPACITY {
             verified.clear();
         }
         verified.insert((hash.clone(), token.to_string()), true);
-        let mut hashed = self.hashed.lock().expect("cache lock");
+        let mut hashed = self.hashed.lock().unwrap_or_else(PoisonError::into_inner);
         if hashed.len() >= VERIFIED_CAPACITY {
             hashed.clear();
         }
