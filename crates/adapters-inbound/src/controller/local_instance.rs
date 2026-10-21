@@ -435,12 +435,9 @@ async fn apply(
         )
         .await?;
     }
-    // A wait the pass schedules itself (a rollout, a reload propagating, a
-    // rejection's backoff) is no failure of the kit's backoff: counted, the
-    // pod events of one rollout would push the next real retry to ~5 min.
     Ok(weebo_kit_runtime::controller::requeue_after(
         obj.as_ref(),
-        outcome.steady() || report.due_in.is_some(),
+        outcome.steady(),
         report.due_in,
     ))
 }
