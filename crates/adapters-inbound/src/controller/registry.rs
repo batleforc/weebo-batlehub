@@ -65,7 +65,11 @@ async fn reconcile(obj: Arc<Registry>, ctx: Arc<Ctx>) -> Result<Action, Error> {
     };
     let Some(outcome) = unrendered_outcome(resolved, instance.as_ref()) else {
         // Its instance renders it, and publishes its status.
-        return Ok(weebo_kit_runtime::controller::requeue_after(true, None));
+        return Ok(weebo_kit_runtime::controller::requeue_after(
+            obj.as_ref(),
+            true,
+            None,
+        ));
     };
     let started = Instant::now();
     super::record_reconcile(KIND, started, &outcome);
@@ -77,5 +81,5 @@ async fn reconcile(obj: Arc<Registry>, ctx: Arc<Ctx>) -> Result<Action, Error> {
     );
     fields.insert("instanceConfigHash".into(), serde_json::Value::Null);
     super::publish(&api, &ctx.recorder, obj.as_ref(), &outcome, fields).await?;
-    Ok(super::requeue_after(&outcome))
+    Ok(super::requeue_after(obj.as_ref(), &outcome))
 }

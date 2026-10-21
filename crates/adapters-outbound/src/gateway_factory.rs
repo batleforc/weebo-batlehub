@@ -95,7 +95,7 @@ impl HttpGatewayFactory {
         self.instances
             .get(bound)
             .await
-            .map_err(GatewayFactoryError::Kubernetes)?
+            .map_err(|e| GatewayFactoryError::Kubernetes(e.to_string()))?
             .ok_or_else(|| GatewayFactoryError::InstanceNotFound(bound.clone()))
     }
 

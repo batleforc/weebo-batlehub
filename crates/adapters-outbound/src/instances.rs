@@ -48,13 +48,16 @@ impl LocalInstanceDirectory {
 
     /// The instances of `namespace` in scope.
     pub async fn instances(&self, namespace: &str) -> Result<Vec<LocalInstance>, String> {
-        self.instances.instances(namespace).await
+        self.instances
+            .instances(namespace)
+            .await
+            .map_err(|e| e.to_string())
     }
 
     /// The instance `bound` designates, `None` when it is gone (or out of
     /// scope, or not a local instance).
     pub async fn get(&self, bound: &BoundInstance) -> Result<Option<LocalInstance>, String> {
-        self.instances.get(bound).await
+        self.instances.get(bound).await.map_err(|e| e.to_string())
     }
 }
 

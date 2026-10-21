@@ -242,13 +242,13 @@ async fn reconcile(obj: Arc<Maintenance>, ctx: Arc<Ctx>) -> Result<Action, Error
     };
     super::record_reconcile(KIND, started, &outcome);
     super::publish(&api, &ctx.recorder, &m, &outcome, fields(&status)).await?;
-    Ok(next(&outcome, wake, now))
+    Ok(next(&m, &outcome, wake, now))
 }
 
 /// The steady requeue, or sooner when the schedule (or a TTL) is due.
-fn next(outcome: &Outcome, wake: Option<Timestamp>, now: Timestamp) -> Action {
+fn next(m: &Maintenance, outcome: &Outcome, wake: Option<Timestamp>, now: Timestamp) -> Action {
     let due_in = wake.map(|w| w.as_second().saturating_sub(now.as_second()).max(1) as u64);
-    weebo_kit_runtime::controller::requeue_after(outcome.steady(), due_in)
+    weebo_kit_runtime::controller::requeue_after(m, outcome.steady(), due_in)
 }
 
 /// A run: the instance resolved, the run recorded, the action called.

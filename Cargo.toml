@@ -32,13 +32,13 @@ batlehub-client = { path = "crates/batlehub-client" }
 # Shared operator kit. To iterate on it locally, temporarily swap the
 # `git`/`tag` pair for `path = "../weebo-operator-kit/crates/<crate>"` —
 # never push with a path dependency (CI and container builds don't see it).
-weebo-kit-domain = { git = "https://github.com/batleforc/weebo-operator-kit", tag = "v0.21.0" }
-weebo-kit-api = { git = "https://github.com/batleforc/weebo-operator-kit", tag = "v0.21.0" }
-weebo-kit-application = { git = "https://github.com/batleforc/weebo-operator-kit", tag = "v0.21.0" }
-weebo-kit-adapters = { git = "https://github.com/batleforc/weebo-operator-kit", tag = "v0.21.0" }
-weebo-kit-runtime = { git = "https://github.com/batleforc/weebo-operator-kit", tag = "v0.21.0" }
-weebo-kit-testkit = { git = "https://github.com/batleforc/weebo-operator-kit", tag = "v0.21.0" }
-weebo-kit-perf = { git = "https://github.com/batleforc/weebo-operator-kit", tag = "v0.21.0" }
+weebo-kit-domain = { git = "https://github.com/batleforc/weebo-operator-kit", tag = "v0.22.0" }
+weebo-kit-api = { git = "https://github.com/batleforc/weebo-operator-kit", tag = "v0.22.0" }
+weebo-kit-application = { git = "https://github.com/batleforc/weebo-operator-kit", tag = "v0.22.0" }
+weebo-kit-adapters = { git = "https://github.com/batleforc/weebo-operator-kit", tag = "v0.22.0" }
+weebo-kit-runtime = { git = "https://github.com/batleforc/weebo-operator-kit", tag = "v0.22.0" }
+weebo-kit-testkit = { git = "https://github.com/batleforc/weebo-operator-kit", tag = "v0.22.0" }
+weebo-kit-perf = { git = "https://github.com/batleforc/weebo-operator-kit", tag = "v0.22.0" }
 
 # BatleHub's own configuration parser (merge, validation, reload tiers —
 # its RFC 0037), never a copy. Moved with the generated client and the

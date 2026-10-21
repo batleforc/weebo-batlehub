@@ -134,7 +134,7 @@ async fn apply(
     };
     super::record_reconcile(KIND, started, &outcome);
     super::publish(api, &ctx.recorder, &policy, &outcome, fields).await?;
-    Ok(super::requeue_after(&outcome))
+    Ok(super::requeue_after(&policy, &outcome))
 }
 
 /// Clears what the object wrote (its status, read fresh).

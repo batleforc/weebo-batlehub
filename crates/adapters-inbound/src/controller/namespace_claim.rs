@@ -113,7 +113,7 @@ async fn apply(
     };
     super::record_reconcile(KIND, started, &outcome);
     super::publish(api, &ctx.recorder, claim, &outcome, fields).await?;
-    Ok(super::requeue_after(&outcome))
+    Ok(super::requeue_after(claim, &outcome))
 }
 
 /// Releases the prefix when the claim in place is this CR's. An instance

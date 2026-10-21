@@ -120,7 +120,7 @@ async fn apply(api: &Api<PackageGrant>, grant: &PackageGrant, ctx: &Ctx) -> Resu
     };
     super::record_reconcile(KIND, started, &outcome);
     super::publish(api, &ctx.recorder, &grant, &outcome, fields).await?;
-    Ok(super::requeue_after(&outcome))
+    Ok(super::requeue_after(&grant, &outcome))
 }
 
 /// Revokes what the object wrote (`status.applied`, read fresh).

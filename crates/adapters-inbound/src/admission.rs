@@ -46,7 +46,7 @@ use application::use_cases::render_config::{base_layers, instance_env, render_co
 use domain::error::ReasonCode;
 use kube::api::{Api, ListParams};
 use kube::core::DynamicObject;
-use weebo_kit_runtime::admission::{Admission, Denial, typed};
+use weebo_kit_runtime::admission::{Admission, Denial, NotTheCrd, typed};
 
 pub struct BatleHubAdmission {
     pub sources: Arc<dyn ConfigSources>,
@@ -500,7 +500,7 @@ impl Admission for BatleHubAdmission {
         namespace: &str,
         object: &DynamicObject,
     ) -> Result<(), Denial<ReasonCode>> {
-        let invalid = |e: String| Denial::new(ReasonCode::InvalidSpec, e);
+        let invalid = |e: NotTheCrd| Denial::new(ReasonCode::InvalidSpec, e.to_string());
         match kind {
             "BatleHubLocalInstance" => {
                 self.instance(namespace, typed(object).map_err(invalid)?)
