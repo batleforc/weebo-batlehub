@@ -117,8 +117,11 @@ impl HttpAdminGateway {
     /// Built once per settings and reused (its connection pool and TLS
     /// sessions with it): keyed by what the client is made of — the CA's
     /// digest, `insecure_skip_verify`, `resolve` — so a rotated CA gets a
-    /// new one; the token and URL are per request. At most
-    /// [`CLIENTS_CAPACITY`] are kept, one goes when full.
+    /// new one; the token and URL are per request. And by the tokio
+    /// runtime: a client's pooled connections die with the runtime that
+    /// opened them, and another runtime (each `#[tokio::test]` has its own)
+    /// would be handed a dead one. At most [`CLIENTS_CAPACITY`] are kept,
+    /// one goes when full.
     pub fn client_resolving(
         ca_pem: Option<&[u8]>,
         insecure_skip_verify: bool,
@@ -126,6 +129,7 @@ impl HttpAdminGateway {
     ) -> Result<Client, String> {
         use sha2::{Digest, Sha256};
         type Key = (
+            Option<tokio::runtime::Id>,
             Option<[u8; 32]>,
             bool,
             Option<(String, std::net::SocketAddr)>,
@@ -133,6 +137,7 @@ impl HttpAdminGateway {
         static CLIENTS: std::sync::OnceLock<std::sync::Mutex<HashMap<Key, Client>>> =
             std::sync::OnceLock::new();
         let key: Key = (
+            tokio::runtime::Handle::try_current().ok().map(|h| h.id()),
             ca_pem.map(|pem| Sha256::digest(pem).into()),
             insecure_skip_verify,
             resolve.map(|(host, addr)| (host.to_string(), addr)),
