@@ -6,6 +6,8 @@
 //! [`GatewayError`]: a status code means different things on different
 //! endpoints of BatleHub (the spec's §2.10).
 
+use std::collections::HashMap;
+use std::sync::PoisonError;
 use std::time::Duration;
 
 use application::ports::{
@@ -40,6 +42,10 @@ pub fn set_request_timeout(timeout: Duration) -> bool {
 pub fn request_timeout() -> Duration {
     DEFAULT_TIMEOUT.get().copied().unwrap_or(REQUEST_TIMEOUT)
 }
+
+/// How many HTTP clients [`HttpAdminGateway::client_resolving`] keeps: one
+/// per instance URL's TLS settings, plus one per pod called over https.
+const CLIENTS_CAPACITY: usize = 64;
 
 /// How much of an unexpected answer's body a message keeps.
 const BODY_EXCERPT: usize = 200;
@@ -107,7 +113,51 @@ impl HttpAdminGateway {
     /// [`Self::client`], `resolve`'s host name reaching its address: a pod
     /// called on its IP while its certificate is verified against the
     /// instance's host name.
+    ///
+    /// Built once per settings and reused (its connection pool and TLS
+    /// sessions with it): keyed by what the client is made of — the CA's
+    /// digest, `insecure_skip_verify`, `resolve` — so a rotated CA gets a
+    /// new one; the token and URL are per request. At most
+    /// [`CLIENTS_CAPACITY`] are kept, one goes when full.
     pub fn client_resolving(
+        ca_pem: Option<&[u8]>,
+        insecure_skip_verify: bool,
+        resolve: Option<(&str, std::net::SocketAddr)>,
+    ) -> Result<Client, String> {
+        use sha2::{Digest, Sha256};
+        type Key = (
+            Option<[u8; 32]>,
+            bool,
+            Option<(String, std::net::SocketAddr)>,
+        );
+        static CLIENTS: std::sync::OnceLock<std::sync::Mutex<HashMap<Key, Client>>> =
+            std::sync::OnceLock::new();
+        let key: Key = (
+            ca_pem.map(|pem| Sha256::digest(pem).into()),
+            insecure_skip_verify,
+            resolve.map(|(host, addr)| (host.to_string(), addr)),
+        );
+        let clients = CLIENTS.get_or_init(Default::default);
+        let cached = clients
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&key)
+            .cloned();
+        if let Some(client) = cached {
+            return Ok(client);
+        }
+        let client = Self::build_client(ca_pem, insecure_skip_verify, resolve)?;
+        let mut clients = clients.lock().unwrap_or_else(PoisonError::into_inner);
+        if clients.len() >= CLIENTS_CAPACITY
+            && let Some(old) = clients.keys().next().cloned()
+        {
+            clients.remove(&old);
+        }
+        clients.insert(key, client.clone());
+        Ok(client)
+    }
+
+    fn build_client(
         ca_pem: Option<&[u8]>,
         insecure_skip_verify: bool,
         resolve: Option<(&str, std::net::SocketAddr)>,
@@ -851,7 +901,8 @@ impl AdminGateway for HttpAdminGateway {
     async fn packages(
         &self,
         registry: &str,
-    ) -> Result<std::collections::BTreeMap<String, Vec<String>>, GatewayError> {
+    ) -> Result<std::collections::BTreeMap<String, std::collections::BTreeSet<String>>, GatewayError>
+    {
         const ENDPOINT: &str = "/api/v1/admin/packages";
         const PER_PAGE: u64 = 200;
         /// 200 000 versions: past it the listing is refused, not walked
@@ -872,7 +923,8 @@ impl AdminGateway for HttpAdminGateway {
             items: Vec<Item>,
             total: u64,
         }
-        let mut packages: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+        let mut packages: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> =
+            Default::default();
         let mut seen = 0u64;
         for page in 1..=MAX_PAGES {
             let (status, body) = self
@@ -895,8 +947,8 @@ impl AdminGateway for HttpAdminGateway {
             for item in page.items {
                 let versions = packages.entry(item.package_id.name).or_default();
                 let version = item.package_id.version;
-                if !version.is_empty() && !versions.contains(&version) {
-                    versions.push(version);
+                if !version.is_empty() {
+                    versions.insert(version);
                 }
             }
             seen = seen.saturating_add(count);

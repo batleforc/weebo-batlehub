@@ -244,6 +244,9 @@ impl HttpGatewayFactory {
             (None, None) => return Ok(None),
         };
         let namespace = instance.namespace().unwrap_or_default();
+        // Read from the API: the operator watches no Pod, ReplicaSet nor
+        // StatefulSet (a cluster-wide watch of them would cost more than
+        // one labelled LIST per reconcile of an instance with pods).
         let mut pods = Api::<Pod>::namespaced(self.client.clone(), &namespace)
             .list(&ListParams::default().labels_from(&selector))
             .await

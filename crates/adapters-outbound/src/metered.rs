@@ -165,7 +165,8 @@ impl AdminGateway for MeteredGateway {
     async fn packages(
         &self,
         registry: &str,
-    ) -> Result<std::collections::BTreeMap<String, Vec<String>>, GatewayError> {
+    ) -> Result<std::collections::BTreeMap<String, std::collections::BTreeSet<String>>, GatewayError>
+    {
         counted("packages", self.inner.packages(registry)).await
     }
     async fn package_grants(

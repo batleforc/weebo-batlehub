@@ -47,6 +47,7 @@ use domain::error::ReasonCode;
 use kube::api::{Api, ListParams};
 use kube::core::DynamicObject;
 use weebo_kit_runtime::admission::{Admission, Denial, NotTheCrd, typed};
+use weebo_kit_runtime::shared::SharedWatches;
 
 pub struct BatleHubAdmission {
     pub sources: Arc<dyn ConfigSources>,
@@ -61,38 +62,79 @@ pub struct BatleHubAdmission {
 /// collide with.
 #[async_trait::async_trait]
 pub trait Siblings: Send + Sync {
-    async fn grants(&self, namespace: &str) -> Result<Vec<PackageGrant>, String>;
-    async fn policies(&self, namespace: &str) -> Result<Vec<PackagePolicy>, String>;
-    async fn instances(&self, namespace: &str) -> Result<Vec<LocalInstance>, String>;
+    async fn grants(&self, namespace: &str) -> Result<Vec<PackageGrant>, SiblingsError>;
+    async fn policies(&self, namespace: &str) -> Result<Vec<PackagePolicy>, SiblingsError>;
+    async fn instances(&self, namespace: &str) -> Result<Vec<LocalInstance>, SiblingsError>;
 }
 
-/// [`Siblings`] read from the API server.
-pub struct KubeSiblings(pub kube::Client);
+/// The namespace's objects of a kind couldn't be listed.
+#[derive(Debug, thiserror::Error)]
+#[error("listing {kind}s: {source}")]
+pub struct SiblingsError {
+    kind: String,
+    #[source]
+    source: Box<kube::Error>,
+}
+
+/// How long a review waits for a watch that hasn't listed yet before
+/// asking the API: well under the webhook's own timeout.
+const SIBLINGS_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// [`Siblings`] from the operator's shared watches once they have listed
+/// — its watch scope, the objects it reconciles and could see collide —
+/// the API server otherwise (a watch not spawned, or not listed yet).
+pub struct KubeSiblings {
+    pub client: kube::Client,
+    pub watches: SharedWatches,
+}
+
+impl KubeSiblings {
+    async fn list<K>(&self, namespace: &str) -> Result<Vec<K>, SiblingsError>
+    where
+        K: kube::Resource<DynamicType = (), Scope = kube::core::NamespaceResourceScope>
+            + Clone
+            + std::fmt::Debug
+            + serde::de::DeserializeOwned
+            + Send
+            + Sync
+            + 'static,
+    {
+        if let Some(watch) = self.watches.get::<K>() {
+            let store = watch.store();
+            if weebo_kit_adapters::wait_synced(&store, SIBLINGS_READY_TIMEOUT).await {
+                let mut objects: Vec<K> = store
+                    .state()
+                    .iter()
+                    .filter(|o| o.meta().namespace.as_deref() == Some(namespace))
+                    .map(|o| K::clone(o))
+                    .collect();
+                objects.sort_by_key(kube::ResourceExt::name_any);
+                return Ok(objects);
+            }
+        }
+        Api::<K>::namespaced(self.client.clone(), namespace)
+            .list(&ListParams::default())
+            .await
+            .map(|l| l.items)
+            .map_err(|source| SiblingsError {
+                kind: K::kind(&()).into_owned(),
+                source: Box::new(source),
+            })
+    }
+}
 
 #[async_trait::async_trait]
 impl Siblings for KubeSiblings {
-    async fn grants(&self, namespace: &str) -> Result<Vec<PackageGrant>, String> {
-        Api::<PackageGrant>::namespaced(self.0.clone(), namespace)
-            .list(&ListParams::default())
-            .await
-            .map(|l| l.items)
-            .map_err(|e| e.to_string())
+    async fn grants(&self, namespace: &str) -> Result<Vec<PackageGrant>, SiblingsError> {
+        self.list(namespace).await
     }
 
-    async fn policies(&self, namespace: &str) -> Result<Vec<PackagePolicy>, String> {
-        Api::<PackagePolicy>::namespaced(self.0.clone(), namespace)
-            .list(&ListParams::default())
-            .await
-            .map(|l| l.items)
-            .map_err(|e| e.to_string())
+    async fn policies(&self, namespace: &str) -> Result<Vec<PackagePolicy>, SiblingsError> {
+        self.list(namespace).await
     }
 
-    async fn instances(&self, namespace: &str) -> Result<Vec<LocalInstance>, String> {
-        Api::<LocalInstance>::namespaced(self.0.clone(), namespace)
-            .list(&ListParams::default())
-            .await
-            .map(|l| l.items)
-            .map_err(|e| e.to_string())
+    async fn instances(&self, namespace: &str) -> Result<Vec<LocalInstance>, SiblingsError> {
+        self.list(namespace).await
     }
 }
 
@@ -588,15 +630,15 @@ mod tests {
 
     #[async_trait::async_trait]
     impl Siblings for FakeSiblings {
-        async fn grants(&self, _: &str) -> Result<Vec<PackageGrant>, String> {
+        async fn grants(&self, _: &str) -> Result<Vec<PackageGrant>, SiblingsError> {
             Ok(self.grants.lock().unwrap().clone())
         }
 
-        async fn policies(&self, _: &str) -> Result<Vec<PackagePolicy>, String> {
+        async fn policies(&self, _: &str) -> Result<Vec<PackagePolicy>, SiblingsError> {
             Ok(self.policies.lock().unwrap().clone())
         }
 
-        async fn instances(&self, _: &str) -> Result<Vec<LocalInstance>, String> {
+        async fn instances(&self, _: &str) -> Result<Vec<LocalInstance>, SiblingsError> {
             Ok(self.instances.lock().unwrap().clone())
         }
     }

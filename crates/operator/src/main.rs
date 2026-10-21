@@ -166,7 +166,10 @@ async fn run(telemetry: &telemetry::Telemetry) -> anyhow::Result<()> {
     let admission = Arc::new(BatleHubAdmission {
         sources,
         config: parser,
-        siblings: Arc::new(KubeSiblings(client.clone())),
+        siblings: Arc::new(KubeSiblings {
+            client: client.clone(),
+            watches: ctx.watches.clone(),
+        }),
         allowed_images,
     });
     let server = webhook_server::spawn(

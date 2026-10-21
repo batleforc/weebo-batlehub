@@ -494,12 +494,12 @@ pub fn render_config(
 
 /// Whether the rendered configuration still lets the operator in with
 /// `token`: `OperatorTokenShadowed` otherwise.
-pub fn check_token(
+pub async fn check_token(
     rendered: &Rendered,
     token: &str,
     parser: &dyn ConfigParser,
 ) -> Result<(), Failure> {
-    match parser.token_check(&rendered.document, token) {
+    match parser.token_check(&rendered.document, token).await {
         TokenCheck::Accepted | TokenCheck::Unverifiable => Ok(()),
         TokenCheck::Refused => Err(Failure::new(
             ReasonCode::OperatorTokenShadowed,
@@ -575,7 +575,7 @@ mod tests {
         let base = base_layers(hub, "ns", sources, parser).await?;
         let rendered = render_config(hub, &base, vec![], false, &InstanceEnv::default(), parser)?;
         if let Some(token) = token {
-            check_token(&rendered, token, parser)?;
+            check_token(&rendered, token, parser).await?;
         }
         Ok(rendered)
     }

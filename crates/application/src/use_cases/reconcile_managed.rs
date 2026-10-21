@@ -290,12 +290,13 @@ async fn run(
     };
     let mut document = rendered.document.clone();
     if let Some(token) = &token {
-        document = with_operator_token(
-            &document,
-            &parser.hash_token(token),
-            &spec.operator_access.user_id,
-            parser,
-        )?;
+        let hash = parser.hash_token(token).await.map_err(|e| {
+            Failure::new(
+                ReasonCode::ConfigInvalid,
+                format!("hashing the operator's token: {e}"),
+            )
+        })?;
+        document = with_operator_token(&document, &hash, &spec.operator_access.user_id, parser)?;
     }
     let credentials = match &pass.credentials {
         Some(text) => Some(text.clone()?),
@@ -318,7 +319,7 @@ async fn run(
             })?,
             None => document.clone(),
         };
-        if parser.token_check(&effective, &token) == TokenCheck::Refused {
+        if parser.token_check(&effective, &token).await == TokenCheck::Refused {
             return Err(Failure::new(
                 ReasonCode::OperatorTokenShadowed,
                 if generated {

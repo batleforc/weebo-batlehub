@@ -180,7 +180,7 @@ pub trait AdminGateway: Send + Sync {
     async fn packages(
         &self,
         registry: &str,
-    ) -> Result<std::collections::BTreeMap<String, Vec<String>>, GatewayError>;
+    ) -> Result<std::collections::BTreeMap<String, std::collections::BTreeSet<String>>, GatewayError>;
     /// Every grant of `package` in `registry`: the package node's (`None`)
     /// and each version's.
     async fn package_grants(
@@ -530,6 +530,10 @@ pub enum TokenCheck {
 /// merges them, validated with the instance's environment (`env` answers
 /// the `${VAR}` placeholders and the `PROXY_CACHE__*` overrides), never
 /// the operator's.
+///
+/// Async for the two token methods only: Argon2 at BatleHub's parameters
+/// is CPU work an implementation runs off the async workers.
+#[async_trait::async_trait]
 pub trait ConfigParser: Send + Sync {
     /// A configuration written in YAML (as JSON) as a TOML layer.
     fn layer(&self, object: &serde_json::Value) -> Result<String, ConfigError>;
@@ -545,7 +549,7 @@ pub trait ConfigParser: Send + Sync {
     ) -> Result<ConfigVerdict, ConfigError>;
     /// Whether `document` (as [`Self::merge`] returns it) accepts `token`
     /// with the admin role.
-    fn token_check(&self, document: &str, token: &str) -> TokenCheck;
+    async fn token_check(&self, document: &str, token: &str) -> TokenCheck;
     /// The changed keys between two documents (as [`Self::merge`] returns
     /// them) that a reload doesn't fully apply: BatleHub's own
     /// `reload_keys::classify`.
@@ -553,7 +557,7 @@ pub trait ConfigParser: Send + Sync {
     /// `token` as BatleHub's `hash-token` writes it (Argon2id, its
     /// parameters), salted from the token itself: the same token, the same
     /// hash, the same rendered file.
-    fn hash_token(&self, token: &str) -> String;
+    async fn hash_token(&self, token: &str) -> Result<String, ConfigError>;
 }
 
 /// Why a configuration source couldn't be read.

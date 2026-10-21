@@ -9,6 +9,7 @@
 //! parse error prints the offending line, [`crate::redact`] drops it).
 
 use std::collections::HashMap;
+use std::hash::Hash;
 use std::sync::{Mutex, PoisonError};
 
 use application::ports::{ConfigError, ConfigParser, ConfigVerdict, KeyChanges, TokenCheck};
@@ -19,8 +20,8 @@ use toml::Value as Toml;
 
 use crate::redact::without_source;
 
-/// How many `(hash, token)` verdicts are kept: a token rotation or a new
-/// hash adds one, never removes the old.
+/// How many `(hash, token)` verdicts are kept (and as many hashes): a
+/// token rotation or a new hash adds one, never removes the old.
 const VERIFIED_CAPACITY: usize = 64;
 
 #[derive(Default)]
@@ -28,43 +29,90 @@ pub struct BatleHubConfigParser {
     /// `(PHC hash, token) → verified`: Argon2id at BatleHub's parameters
     /// (19 MiB, 2 passes) is deliberately slow, and the same pair comes
     /// back on every reconcile — verified once. Keyed by the token's own
-    /// text: the map never leaves the process. Emptied when full.
+    /// text: the map never leaves the process. Full, one entry makes room.
     verified: Mutex<HashMap<(String, String), bool>>,
     /// `token → its hash`, computed once per token for the same reason.
     hashed: Mutex<HashMap<String, String>>,
 }
 
+/// `key → value` into `cache`, which holds at most [`VERIFIED_CAPACITY`]
+/// entries: when full, one goes (any: a verdict lost is only computed
+/// again, where emptying the map would recompute every one).
+fn remember<K: Eq + Hash + Clone, V>(cache: &Mutex<HashMap<K, V>>, key: K, value: V) {
+    let mut map = cache.lock().unwrap_or_else(PoisonError::into_inner);
+    if map.len() >= VERIFIED_CAPACITY
+        && !map.contains_key(&key)
+        && let Some(old) = map.keys().next().cloned()
+    {
+        map.remove(&old);
+    }
+    map.insert(key, value);
+}
+
+/// `work` (Argon2: tens of milliseconds of CPU, 19 MiB) on the blocking
+/// pool rather than an async worker, which other reconciles share.
+async fn off_runtime<T: Send + 'static>(
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, tokio::task::JoinError> {
+    tokio::task::spawn_blocking(work).await
+}
+
+/// `token` hashed as BatleHub's `hash-token` does, salted from the token.
+fn hash_with_own_salt(token: &str) -> Result<String, ConfigError> {
+    use argon2::PasswordHasher;
+    use sha2::{Digest, Sha256};
+    // 16 bytes of a digest of the token, under a label of ours: a salt
+    // nobody else derives the same way.
+    let salt = Sha256::digest(format!("weebo-batlehub operator token:{token}"));
+    Argon2::default()
+        .hash_password_with_salt(token.as_bytes(), &salt[..16])
+        .map(|hash| hash.to_string())
+        .map_err(|e| ConfigError::Invalid(format!("hashing the operator's token: {e}")))
+}
+
 impl BatleHubConfigParser {
-    fn verify_hash(&self, hash: &str, token: &str) -> bool {
+    /// Whether `token` matches the PHC `hash`; `None` when the check
+    /// couldn't run.
+    async fn verify_hash(&self, hash: &str, token: &str) -> Option<bool> {
         let key = (hash.to_string(), token.to_string());
-        if let Some(known) = self
+        let known = self
             .verified
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .get(&key)
-        {
-            return *known;
+            .copied();
+        if known.is_some() {
+            return known;
         }
-        let ok = PasswordHash::new(hash)
-            .map(|parsed| {
-                Argon2::default()
-                    .verify_password(token.as_bytes(), &parsed)
-                    .is_ok()
-            })
-            .unwrap_or(false);
-        let mut verified = self.verified.lock().unwrap_or_else(PoisonError::into_inner);
-        if verified.len() >= VERIFIED_CAPACITY {
-            verified.clear();
+        let (phc, text) = key.clone();
+        let verified = off_runtime(move || {
+            PasswordHash::new(&phc)
+                .map(|parsed| {
+                    Argon2::default()
+                        .verify_password(text.as_bytes(), &parsed)
+                        .is_ok()
+                })
+                .unwrap_or(false)
+        })
+        .await;
+        match verified {
+            Ok(ok) => {
+                remember(&self.verified, key, ok);
+                Some(ok)
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "verifying a token hash didn't finish");
+                None
+            }
         }
-        verified.insert(key, ok);
-        ok
     }
 
     /// How one `[[auth]] type = "token"` provider answers `token`, as
     /// BatleHub's `StaticTokenAuthProvider` does: a plain value first (the
     /// last entry of a value wins, a map insert), then the first hash that
-    /// verifies. `Err(())`: a `${VAR}` value, unknowable here.
-    fn provider_role(&self, tokens: &[Toml], token: &str) -> Result<Option<String>, ()> {
+    /// verifies. `Err(())`: a `${VAR}` value, or a hash not checked,
+    /// unknowable here.
+    async fn provider_role(&self, tokens: &[Toml], token: &str) -> Result<Option<String>, ()> {
         let entries: Vec<(&str, &str)> = tokens
             .iter()
             .filter_map(|t| {
@@ -84,13 +132,18 @@ impl BatleHubConfigParser {
         if let Some((_, role)) = plain {
             return Ok(Some(role.to_string()));
         }
-        Ok(entries
-            .iter()
-            .find(|(value, _)| is_argon2(value) && self.verify_hash(value, token))
-            .map(|(_, role)| role.to_string()))
+        for (value, role) in entries.iter().filter(|(value, _)| is_argon2(value)) {
+            match self.verify_hash(value, token).await {
+                Some(true) => return Ok(Some(role.to_string())),
+                Some(false) => {}
+                None => return Err(()),
+            }
+        }
+        Ok(None)
     }
 }
 
+#[async_trait::async_trait]
 impl ConfigParser for BatleHubConfigParser {
     fn classify(&self, before: &str, after: &str) -> Result<KeyChanges, ConfigError> {
         batlehub_config::reload_keys::classify(before, after)
@@ -101,36 +154,24 @@ impl ConfigParser for BatleHubConfigParser {
             .map_err(|e| ConfigError::Invalid(without_source(&format!("{e:#}"))))
     }
 
-    fn hash_token(&self, token: &str) -> String {
-        use argon2::PasswordHasher;
-        if let Some(hash) = self
+    async fn hash_token(&self, token: &str) -> Result<String, ConfigError> {
+        let known = self
             .hashed
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .get(token)
-        {
-            return hash.clone();
+            .cloned();
+        if let Some(hash) = known {
+            return Ok(hash);
         }
-        use sha2::{Digest, Sha256};
-        // 16 bytes of a digest of the token, under a label of ours: a salt
-        // nobody else derives the same way.
-        let salt = Sha256::digest(format!("weebo-batlehub operator token:{token}"));
-        let hash = Argon2::default()
-            .hash_password_with_salt(token.as_bytes(), &salt[..16])
-            .expect("Argon2 hashes any token with a 16-byte salt")
-            .to_string();
+        let text = token.to_string();
+        let hash = off_runtime(move || hash_with_own_salt(&text))
+            .await
+            .map_err(|e| ConfigError::Invalid(format!("hashing the operator's token: {e}")))??;
         // Verified once already: it is the operator's own.
-        let mut verified = self.verified.lock().unwrap_or_else(PoisonError::into_inner);
-        if verified.len() >= VERIFIED_CAPACITY {
-            verified.clear();
-        }
-        verified.insert((hash.clone(), token.to_string()), true);
-        let mut hashed = self.hashed.lock().unwrap_or_else(PoisonError::into_inner);
-        if hashed.len() >= VERIFIED_CAPACITY {
-            hashed.clear();
-        }
-        hashed.insert(token.to_string(), hash.clone());
-        hash
+        remember(&self.verified, (hash.clone(), token.to_string()), true);
+        remember(&self.hashed, token.to_string(), hash.clone());
+        Ok(hash)
     }
 
     fn layer(&self, object: &Json) -> Result<String, ConfigError> {
@@ -178,7 +219,7 @@ impl ConfigParser for BatleHubConfigParser {
     /// `admin`. A provider whose answer depends on a `${VAR}` makes the
     /// verdict unknowable, which is not a refusal. The other provider
     /// types don't take a static token.
-    fn token_check(&self, document: &str, token: &str) -> TokenCheck {
+    async fn token_check(&self, document: &str, token: &str) -> TokenCheck {
         let Ok(doc) = toml::from_str::<toml::Table>(document) else {
             return TokenCheck::Unverifiable;
         };
@@ -194,7 +235,7 @@ impl ConfigParser for BatleHubConfigParser {
                 .and_then(Toml::as_array)
                 .map(Vec::as_slice)
                 .unwrap_or_default();
-            match self.provider_role(tokens, token) {
+            match self.provider_role(tokens, token).await {
                 Err(()) => return TokenCheck::Unverifiable,
                 Ok(Some(role)) if role.eq_ignore_ascii_case("admin") => {
                     return TokenCheck::Accepted;
@@ -308,22 +349,39 @@ path = "/var/cache/batlehub"
         BatleHubConfigParser::default()
     }
 
-    #[test]
-    fn the_operator_token_hashes_the_same_and_verifies() {
+    #[tokio::test]
+    async fn the_operator_token_hashes_the_same_and_verifies() {
         let parser = parser();
-        let hash = parser.hash_token("s3cr3t");
+        let hash = parser.hash_token("s3cr3t").await.unwrap();
         assert!(
             hash.starts_with("$argon2id$v=19$m=19456,t=2,p=1$"),
             "{hash}"
         );
-        assert_eq!(BatleHubConfigParser::default().hash_token("s3cr3t"), hash);
-        assert_ne!(parser.hash_token("other"), hash);
+        assert_eq!(
+            BatleHubConfigParser::default()
+                .hash_token("s3cr3t")
+                .await
+                .unwrap(),
+            hash
+        );
+        assert_ne!(parser.hash_token("other").await.unwrap(), hash);
         let parsed = PasswordHash::new(&hash).unwrap();
         assert!(
             Argon2::default()
                 .verify_password(b"s3cr3t", &parsed)
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn a_full_cache_makes_room_for_one_entry_not_all() {
+        let cache = Mutex::new(HashMap::new());
+        for i in 0..VERIFIED_CAPACITY + 10 {
+            remember(&cache, i, ());
+        }
+        let cache = cache.into_inner().unwrap();
+        assert_eq!(cache.len(), VERIFIED_CAPACITY);
+        assert!(cache.contains_key(&(VERIFIED_CAPACITY + 9)));
     }
 
     #[test]
@@ -475,8 +533,8 @@ path = "/var/cache/batlehub"
         )
     }
 
-    #[test]
-    fn the_first_provider_knowing_the_token_decides_as_in_batlehub() {
+    #[tokio::test]
+    async fn the_first_provider_knowing_the_token_decides_as_in_batlehub() {
         let p = parser();
         let doc = |providers: &str| format!("{BASE}\n{providers}");
         let provider = |tokens: &[(&str, &str)]| {
@@ -490,29 +548,29 @@ path = "/var/cache/batlehub"
         };
         // A later plain entry of the same value wins (a map insert).
         let shadowed = doc(&provider(&[("t", "admin"), ("t", "user")]));
-        assert_eq!(p.token_check(&shadowed, "t"), TokenCheck::Refused);
+        assert_eq!(p.token_check(&shadowed, "t").await, TokenCheck::Refused);
         // An earlier provider answering `user` hides a later admin one.
         let earlier = doc(&(provider(&[("t", "user")]) + &provider(&[("t", "admin")])));
-        assert_eq!(p.token_check(&earlier, "t"), TokenCheck::Refused);
+        assert_eq!(p.token_check(&earlier, "t").await, TokenCheck::Refused);
         // A provider that doesn't know it lets the next one answer.
         let next = doc(&(provider(&[("other", "user")]) + &provider(&[("t", "Admin")])));
-        assert_eq!(p.token_check(&next, "t"), TokenCheck::Accepted);
+        assert_eq!(p.token_check(&next, "t").await, TokenCheck::Accepted);
     }
 
-    #[test]
-    fn the_operator_token_must_stay_declared() {
+    #[tokio::test]
+    async fn the_operator_token_must_stay_declared() {
         let p = parser();
         assert_eq!(
-            p.token_check(&with_admin("secret"), "secret"),
+            p.token_check(&with_admin("secret"), "secret").await,
             TokenCheck::Accepted
         );
         assert_eq!(
-            p.token_check(&with_admin("secret"), "other"),
+            p.token_check(&with_admin("secret"), "other").await,
             TokenCheck::Refused
         );
-        assert_eq!(p.token_check(BASE, "secret"), TokenCheck::Refused);
+        assert_eq!(p.token_check(BASE, "secret").await, TokenCheck::Refused);
         assert_eq!(
-            p.token_check(&with_admin("${ADMIN_TOKEN}"), "secret"),
+            p.token_check(&with_admin("${ADMIN_TOKEN}"), "secret").await,
             TokenCheck::Unverifiable
         );
         let hash = Argon2::default()
@@ -520,18 +578,18 @@ path = "/var/cache/batlehub"
             .unwrap()
             .to_string();
         assert_eq!(
-            p.token_check(&with_admin(&hash), "secret"),
+            p.token_check(&with_admin(&hash), "secret").await,
             TokenCheck::Accepted
         );
         assert_eq!(
-            p.token_check(&with_admin(&hash), "nope"),
+            p.token_check(&with_admin(&hash), "nope").await,
             TokenCheck::Refused
         );
         // Cached both ways.
         assert_eq!(p.verified.lock().unwrap().len(), 2);
         // The user-role entry knows "other": refused, not admin.
         assert_eq!(
-            p.token_check(&with_admin("x"), "other"),
+            p.token_check(&with_admin("x"), "other").await,
             TokenCheck::Refused
         );
     }

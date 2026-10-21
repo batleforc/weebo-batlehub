@@ -562,9 +562,9 @@ impl AdminGateway for FakeGateway {
     async fn packages(
         &self,
         registry: &str,
-    ) -> Result<BTreeMap<String, Vec<String>>, GatewayError> {
+    ) -> Result<BTreeMap<String, std::collections::BTreeSet<String>>, GatewayError> {
         self.check()?;
-        let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let mut out: BTreeMap<String, std::collections::BTreeSet<String>> = BTreeMap::new();
         let grants = self.grants.lock().unwrap();
         let policies = self.policies.lock().unwrap();
         for node in grants.keys().chain(policies.keys()) {
@@ -572,10 +572,8 @@ impl AdminGateway for FakeGateway {
                 continue;
             }
             let versions = out.entry(node.package.clone()).or_default();
-            if let Some(v) = &node.version
-                && !versions.contains(v)
-            {
-                versions.push(v.clone());
+            if let Some(v) = &node.version {
+                versions.insert(v.clone());
             }
         }
         Ok(out)
@@ -715,6 +713,7 @@ fn merge_json(base: &mut Value, over: Value) {
     }
 }
 
+#[async_trait::async_trait]
 impl ConfigParser for FakeConfigParser {
     fn layer(&self, object: &Value) -> Result<String, ConfigError> {
         match object {
@@ -782,11 +781,11 @@ impl ConfigParser for FakeConfigParser {
         })
     }
 
-    fn hash_token(&self, token: &str) -> String {
-        format!("hashed:{token}")
+    async fn hash_token(&self, token: &str) -> Result<String, ConfigError> {
+        Ok(format!("hashed:{token}"))
     }
 
-    fn token_check(&self, document: &str, token: &str) -> TokenCheck {
+    async fn token_check(&self, document: &str, token: &str) -> TokenCheck {
         if document.contains(token) {
             TokenCheck::Accepted
         } else {

@@ -111,7 +111,11 @@ pub async fn run(client: Client, ctx: Arc<Ctx>) {
         }
     };
 
-    // Metadata only: no ConfigMap data in memory.
+    // Metadata only: no ConfigMap data in memory. Every ConfigMap in the
+    // scope: a layer names its ConfigMap, nothing labels it, so the watch
+    // can't be narrowed. Each event scans the two stores (in memory, no
+    // allocation but the matches): an index would have to follow both
+    // stores' changes for less than what the event itself costs.
     let configmaps: Api<PartialObjectMeta<ConfigMap>> = match ctx.scope.watched_namespace() {
         Some(namespace) => Api::namespaced(client.clone(), namespace),
         None => Api::all(client.clone()),
@@ -310,9 +314,12 @@ async fn managed_config(
     rendered: Result<Rendered, Failure>,
     ctx: &Ctx,
 ) -> ManagedConfig {
-    let rendered = rendered.and_then(|rendered| {
-        check_token(&rendered, &access.token, ctx.config.as_ref()).map(|()| rendered)
-    });
+    let rendered = match rendered {
+        Ok(rendered) => check_token(&rendered, &access.token, ctx.config.as_ref())
+            .await
+            .map(|()| rendered),
+        Err(e) => Err(e),
+    };
     let targets = match ctx.gateways.pod_gateways(bound).await {
         Ok(None) => Targets::Url,
         Ok(Some(pods)) => {
