@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## [v0.3.3](https://github.com/batleforc/weebo-batlehub/compare/93fb5266e72693ac2a22a401fe52bc8fb71907ad..v0.3.3) - 2026-10-21
+#### Bug Fixes
+- weebo-good-practice review: house lints, bounded I/O, typed errors (#18) - ([93fb526](https://github.com/batleforc/weebo-batlehub/commit/93fb5266e72693ac2a22a401fe52bc8fb71907ad)) - Maxime, Claude Opus 5.5 (1M context), Claude Opus 5.5 (1M context), Claude Opus 5.5 (1M context), Claude Opus 5.5 (1M context), Claude Opus 5.5 (1M context), Claude Opus 5.5 (1M context), Claude Opus 5.5 (1M context)
+
+- - -
+
 ## [v0.3.2](https://github.com/batleforc/weebo-batlehub/compare/2399b3fa30a51edfb825c4e26d0cdac958d6842a..v0.3.2) - 2026-10-21
 #### Miscellaneous Chores
 - (**kit**) weebo-operator-kit v0.22.1 (#17) - ([2399b3f](https://github.com/batleforc/weebo-batlehub/commit/2399b3fa30a51edfb825c4e26d0cdac958d6842a)) - Maxime, Claude Opus 5.5 (1M context), Claude Opus 5.5 (1M context), Claude Opus 5.5 (1M context), Claude Opus 5.5 (1M context)
