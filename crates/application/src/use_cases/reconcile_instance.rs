@@ -236,7 +236,7 @@ pub fn without_nonce(content: &str) -> &str {
     match content.rfind(NONCE_COMMENT) {
         Some(at)
             if (at == 0 || content[..at].ends_with('\n'))
-                && content[at + NONCE_COMMENT.len()..]
+                && content[at.saturating_add(NONCE_COMMENT.len())..]
                     .trim_end()
                     .bytes()
                     .all(|b| b.is_ascii_digit()) =>
@@ -368,7 +368,7 @@ fn backoff(state: &ConfigState, hash: &str, status: &mut ConfigStatus) -> Option
     if state.rejected_hash.as_deref() != Some(hash) {
         return None;
     }
-    let wait = REJECTION_BACKOFF_SECS - (state.now - state.rejected_at?);
+    let wait = REJECTION_BACKOFF_SECS.saturating_sub(state.now.saturating_sub(state.rejected_at?));
     if wait <= 0 {
         return None;
     }
@@ -390,7 +390,7 @@ fn backoff(state: &ConfigState, hash: &str, status: &mut ConfigStatus) -> Option
             format!("configuration {}: {said} ({retry})", short(hash)),
         )
     };
-    Some((failure, Some(wait as u64)))
+    Some((failure, u64::try_from(wait).ok()))
 }
 
 fn read_only_message(name: &str, then: &str) -> String {
@@ -443,9 +443,9 @@ async fn push_to(
             behind.push((name, target));
         }
     }
-    if behind.is_empty() {
+    let Some((_, first)) = behind.first() else {
         return Ok(());
-    }
+    };
     if let Some(stop) = backoff(state, &rendered.hash, status) {
         return Err(stop);
     }
@@ -469,7 +469,7 @@ async fn push_to(
     };
 
     // One dry run for all: a configuration they'd all refuse reaches none.
-    let check = match behind[0].1.validate_config(&rendered.document).await {
+    let check = match first.validate_config(&rendered.document).await {
         Ok(check) => check,
         Err(GatewayError::Rejected(message)) => {
             return Err(rejected(
@@ -506,7 +506,7 @@ async fn push_to(
             .await;
         if staged == Ok(false) {
             // Bytes BatleHub already tried once: new ones.
-            status.nonce += 1;
+            status.nonce = status.nonce.wrapping_add(1);
             staged = target
                 .stage_config(&with_nonce(&rendered.document, status.nonce))
                 .await;
@@ -531,7 +531,7 @@ async fn push_to(
             Err(e) => return Err(fail(e)),
         }
         match target.apply_pending().await {
-            Ok(()) => *loaded += 1,
+            Ok(()) => *loaded = loaded.saturating_add(1),
             Err(GatewayError::NoPending(why)) => {
                 return Err((
                     Failure::new(
@@ -811,7 +811,7 @@ mod tests {
         assert_eq!(gateway.calls(), ["content", "validate"]);
         assert!(report.outcome.writes.is_empty());
         let Err(first) = report.outcome.ready.clone() else {
-            unreachable!()
+            panic!()
         };
         assert!(first.message.contains("refused: 8080"), "{}", first.message);
 
@@ -876,7 +876,7 @@ mod tests {
         let report = reconcile_instance(&gateway, managed(now())).await;
         assert_eq!(report.outcome.reason(), ReasonCode::RestartForbidden);
         let Err(failure) = &report.outcome.ready else {
-            unreachable!()
+            panic!()
         };
         assert!(failure.message.contains("database.url, server.port"));
         assert_eq!(
@@ -1045,7 +1045,7 @@ mod tests {
         let report = reconcile_instance(&url, config).await;
         assert_eq!(report.outcome.reason(), ReasonCode::ConfigRejected);
         let Err(failure) = &report.outcome.ready else {
-            unreachable!()
+            panic!()
         };
         assert!(
             failure.message.contains("(hub-0, hub-1 already loaded it)"),

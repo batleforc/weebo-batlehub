@@ -3,6 +3,12 @@
 //! admin API (as the console would) are imported, adopted on envtest, and
 //! the controllers — on that same BatleHub — find them theirs.
 
+#![expect(
+    clippy::unwrap_used,
+    clippy::panic,
+    reason = "an integration test: a failure panics with its message, fixtures are known"
+)]
+
 use std::sync::Arc;
 use std::time::Duration;
 

@@ -2,6 +2,14 @@
 //! real BatleHub (`task test:live-batlehub`, ignored by default; see
 //! `adapters-outbound/tests/live_batlehub.rs` for the variables).
 
+#![expect(
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    reason = "an integration test: a failure panics with its message, fixtures are known"
+)]
+
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -132,7 +140,8 @@ fn ready(instance: &LocalInstance) -> Option<(String, String, String)> {
 #[tokio::test]
 #[ignore = "needs a real BatleHub (task test:live-batlehub)"]
 async fn a_real_instance_is_ready_with_the_admin_token_only() {
-    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+    // Once per test binary: a later test finds it installed.
+    tracing_subscriber::fmt().with_test_writer().try_init().ok();
     let cluster = testkit::envtest::start().await;
     let client = cluster.client();
     Api::<Namespace>::all(client.clone())
@@ -201,7 +210,8 @@ fn reason(instance: &LocalInstance) -> Option<String> {
 #[tokio::test]
 #[ignore = "needs a real BatleHub (task test:live-batlehub)"]
 async fn a_real_instance_runs_the_configuration_and_registries_pushed() {
-    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+    // Once per test binary: a later test finds it installed.
+    tracing_subscriber::fmt().with_test_writer().try_init().ok();
     let cluster = testkit::envtest::start().await;
     let client = cluster.client();
     Api::<Namespace>::all(client.clone())
@@ -440,7 +450,7 @@ async fn governance(client: &Client, batlehub: &adapters_outbound::HttpAdminGate
         .await
         .unwrap();
     // An owner already added by a previous run answers 409: the same.
-    let _ = batlehub
+    let added = batlehub
         .call(&AdminRequest {
             method: Method::Post,
             path: [
@@ -460,6 +470,9 @@ async fn governance(client: &Client, batlehub: &adapters_outbound::HttpAdminGate
             timeout: None,
         })
         .await;
+    if let Err(e) = added {
+        eprintln!("adding the owner: {e} (a previous run's answers 409)");
+    }
 
     // Partial failure: bob is a conflict, alice and the operator's own
     // `gates:exempt` written and recorded.

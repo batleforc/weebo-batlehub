@@ -3,6 +3,12 @@
 //! instance is in memory (`FakeGateway`, which keeps claims as BatleHub
 //! does: one per prefix, 409 on a second).
 
+#![expect(
+    clippy::unwrap_used,
+    clippy::arithmetic_side_effects,
+    reason = "an integration test: a failure panics with its message, fixtures are known"
+)]
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -139,7 +145,8 @@ async fn until(gateway: &FakeGateway, condition: impl Fn(&FakeGateway) -> bool) 
 
 #[tokio::test]
 async fn a_claim_is_made_moved_released_and_never_taken_over() {
-    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+    // Once per test binary: a later test finds it installed.
+    tracing_subscriber::fmt().with_test_writer().try_init().ok();
     let cluster = testkit::envtest::start().await;
     let client = cluster.client();
     Api::<Namespace>::all(client.clone())

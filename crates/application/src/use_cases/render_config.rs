@@ -200,8 +200,13 @@ async fn registry_entry(
                 format!("spec.configFrom[{i}] is not TOML: {e}"),
             )
         })?;
+        // A TOML document is a table: anything else is a parser's bug,
+        // refused rather than trusted.
         let Value::Object(fragment) = fragment else {
-            unreachable!("a TOML document is a table");
+            return Err(Failure::new(
+                ReasonCode::ConfigInvalid,
+                format!("spec.configFrom[{i}] is not a table"),
+            ));
         };
         if let Some(key) = ["type", "name"].iter().find(|k| fragment.contains_key(**k)) {
             return Err(Failure::new(

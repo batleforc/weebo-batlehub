@@ -450,10 +450,10 @@ pub async fn clear_package_policy(
     record: &PolicyRecord,
     gateway: &dyn AdminGateway,
 ) -> Result<usize, Failure> {
-    let mut removed = 0;
+    let mut removed: usize = 0;
     for exemption in &record.applied_exemptions {
         gateway.delete_exemption(node, &exemption.gate).await?;
-        removed += 1;
+        removed = removed.saturating_add(1);
     }
     if record.applied_policy_hash.is_some() {
         let (current, exempt_rules) = split(gateway.policy(node).await?);
@@ -465,7 +465,7 @@ pub async fn clear_package_policy(
                     .put_policy(node, &with_exemptions(None, &exempt_rules))
                     .await?;
             }
-            removed += 1;
+            removed = removed.saturating_add(1);
         }
     }
     Ok(removed)

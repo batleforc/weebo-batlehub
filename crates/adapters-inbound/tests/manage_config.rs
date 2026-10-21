@@ -5,6 +5,11 @@
 //! in memory (`FakeGateway`, which behaves like BatleHub's reload
 //! service).
 
+#![expect(
+    clippy::unwrap_used,
+    reason = "an integration test: a failure panics with its message, fixtures are known"
+)]
+
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -177,7 +182,8 @@ fn ready_on<K: HasConditions>(reason: &'static str) -> impl Fn(&K) -> Option<Str
 
 #[tokio::test]
 async fn an_instance_pushes_its_configuration_and_renders_its_registries() {
-    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+    // Once per test binary: a later test finds it installed.
+    tracing_subscriber::fmt().with_test_writer().try_init().ok();
     let cluster = testkit::envtest::start().await;
     let client = cluster.client();
     namespaces(&client, &["infra", "team-a", "team-b"]).await;
@@ -296,7 +302,8 @@ async fn an_instance_pushes_its_configuration_and_renders_its_registries() {
 
 #[tokio::test]
 async fn configurations_that_cannot_be_pushed_say_why() {
-    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+    // Once per test binary: a later test finds it installed.
+    tracing_subscriber::fmt().with_test_writer().try_init().ok();
     let cluster = testkit::envtest::start().await;
     let client = cluster.client();
     namespaces(&client, &["infra"]).await;
@@ -356,7 +363,8 @@ async fn configurations_that_cannot_be_pushed_say_why() {
 
 #[tokio::test]
 async fn registries_get_a_status_when_their_instance_s_token_cannot_be_read() {
-    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+    // Once per test binary: a later test finds it installed.
+    tracing_subscriber::fmt().with_test_writer().try_init().ok();
     let cluster = testkit::envtest::start().await;
     let client = cluster.client();
     namespaces(&client, &["infra"]).await;

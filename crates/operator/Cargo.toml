@@ -32,3 +32,6 @@ serde_json = { workspace = true }
 testkit = { workspace = true }
 weebo-kit-perf = { workspace = true }
 wiremock = { workspace = true }
+
+[lints]
+workspace = true

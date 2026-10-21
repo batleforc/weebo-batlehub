@@ -80,7 +80,11 @@ fn split(node: &PackageNode, read: Value, warnings: &mut Vec<String>) -> Importe
             kept.push(rule);
             continue;
         }
-        let name = rule["gate"].as_str().unwrap_or_default().to_string();
+        let name = rule
+            .get("gate")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
         let until = rule
             .pointer("/settings/exempt_until")
             .and_then(Value::as_str)

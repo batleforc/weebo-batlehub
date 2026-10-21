@@ -221,6 +221,10 @@ impl MaintenanceAction {
         ]
     };
 
+    #[expect(
+        clippy::expect_used,
+        reason = "RULES is a constant table, test `every_action_has_one_rule_and_a_name` checks every action is in it"
+    )]
     pub fn rule(self) -> &'static ActionRule {
         Self::RULES
             .iter()

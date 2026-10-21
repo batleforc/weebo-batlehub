@@ -29,3 +29,6 @@ weebo-kit-api = { workspace = true }
 tokio = { workspace = true }
 tracing-subscriber = { workspace = true }
 wiremock = { workspace = true }
+
+[lints]
+workspace = true

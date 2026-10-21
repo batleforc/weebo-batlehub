@@ -81,10 +81,10 @@ pub async fn record_start(
     run: &LastRun,
     run_now: Option<&str>,
 ) -> Result<bool, KubernetesError> {
-    let mut status = json!({ "lastRun": run });
-    if let Some(token) = run_now {
-        status["runNow"] = json!(token);
-    }
+    let status = match run_now {
+        Some(token) => json!({ "lastRun": run, "runNow": token }),
+        None => json!({ "lastRun": run }),
+    };
     let patch = Patch::Merge(json!({
         "metadata": { "resourceVersion": resource_version },
         "status": status,
@@ -184,7 +184,7 @@ fn plan<'a>(m: &'a Maintenance) -> Plan<'a> {
         schedule: m.spec.schedule.as_deref(),
         suspend: m.spec.suspend,
         ttl_seconds_after_finished: m.spec.ttl_seconds_after_finished,
-        timeout: Duration::from_secs(m.spec.timeout_seconds.max(1) as u64),
+        timeout: Duration::from_secs(m.spec.timeout_seconds.max(1).unsigned_abs()),
         generation: m.metadata.generation.unwrap_or_default(),
         created,
         run_now: m.annotations().get(api::RUN_NOW).map(String::as_str),
@@ -247,7 +247,12 @@ async fn reconcile(obj: Arc<Maintenance>, ctx: Arc<Ctx>) -> Result<Action, Error
 
 /// The steady requeue, or sooner when the schedule (or a TTL) is due.
 fn next(m: &Maintenance, outcome: &Outcome, wake: Option<Timestamp>, now: Timestamp) -> Action {
-    let due_in = wake.map(|w| w.as_second().saturating_sub(now.as_second()).max(1) as u64);
+    let due_in = wake.map(|w| {
+        w.as_second()
+            .saturating_sub(now.as_second())
+            .max(1)
+            .unsigned_abs()
+    });
     weebo_kit_runtime::controller::requeue_after(m, outcome.steady(), due_in)
 }
 

@@ -119,9 +119,24 @@ fn read(path: &PathBuf) -> anyhow::Result<String> {
     std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))
 }
 
+/// The instance's JSON with its `apiVersion` and `kind`.
+fn with_kind(mut body: serde_json::Value) -> serde_json::Value {
+    if let Some(object) = body.as_object_mut() {
+        object.insert("apiVersion".into(), "batlehub.weebo.io/v1alpha1".into());
+        object.insert("kind".into(), "BatleHubLocalInstance".into());
+    }
+    body
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    // Err: a provider is installed already, which is all this asks.
+    if rustls::crypto::ring::default_provider()
+        .install_default()
+        .is_err()
+    {
+        eprintln!("note: a rustls crypto provider was installed already: kept");
+    }
     match Args::parse().command {
         Command::Instance {
             values,
@@ -179,9 +194,7 @@ async fn main() -> anyhow::Result<()> {
                         copy.from, copy.to
                     );
                 }
-                let mut body = serde_json::to_value(&instance)?;
-                body["apiVersion"] = "batlehub.weebo.io/v1alpha1".into();
-                body["kind"] = "BatleHubLocalInstance".into();
+                let body = with_kind(serde_json::to_value(&instance)?);
                 api.patch(
                     &name,
                     &PatchParams::apply(FIELD_MANAGER),
@@ -191,9 +204,7 @@ async fn main() -> anyhow::Result<()> {
                 .context("creating the instance")?;
                 eprintln!("created BatleHubLocalInstance {namespace}/{name}");
             } else {
-                let mut body = serde_json::to_value(&instance)?;
-                body["apiVersion"] = "batlehub.weebo.io/v1alpha1".into();
-                body["kind"] = "BatleHubLocalInstance".into();
+                let body = with_kind(serde_json::to_value(&instance)?);
                 print!("{}", to_yaml(&[sorted(body)]).map_err(anyhow::Error::msg)?);
                 if let Some(copy) = &credentials {
                     eprintln!(

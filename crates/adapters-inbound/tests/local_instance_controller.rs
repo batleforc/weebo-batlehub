@@ -5,6 +5,13 @@
 //! The CRs bound to an instance are a fake here (`manage_config.rs` has
 //! the real ones).
 
+#![expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::arithmetic_side_effects,
+    reason = "an integration test: a failure panics with its message, fixtures are known"
+)]
+
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -192,7 +199,8 @@ async fn namespace(client: &Client) {
 
 #[tokio::test]
 async fn an_instance_is_ready_only_with_a_labelled_admin_token() {
-    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+    // Once per test binary: a later test finds it installed.
+    tracing_subscriber::fmt().with_test_writer().try_init().ok();
     let cluster = testkit::envtest::start().await;
     let client = cluster.client();
     namespace(&client).await;
@@ -281,7 +289,8 @@ async fn an_instance_is_ready_only_with_a_labelled_admin_token() {
 
 #[tokio::test]
 async fn an_instance_in_use_waits_for_its_dependents_or_force_orphan() {
-    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+    // Once per test binary: a later test finds it installed.
+    tracing_subscriber::fmt().with_test_writer().try_init().ok();
     let cluster = testkit::envtest::start().await;
     let client = cluster.client();
     namespace(&client).await;

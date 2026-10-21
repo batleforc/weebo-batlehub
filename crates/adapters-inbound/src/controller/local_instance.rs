@@ -466,7 +466,8 @@ fn series(
     };
     let mut by_code = std::collections::BTreeMap::new();
     for warning in warnings {
-        *by_code.entry(warning.code).or_insert(0) += 1;
+        let count = by_code.entry(warning.code).or_insert(0_u64);
+        *count = count.saturating_add(1);
     }
     super::metrics::InstanceSeries {
         ready: outcome.ready.is_ok(),
@@ -590,10 +591,12 @@ fn fields(obj: &LocalInstance, report: &InstanceReport) -> Map<String, Value> {
     fields.insert("endpoint".into(), json!(api::local_instance::endpoint(obj)));
     if let Some(observed) = &report.observed {
         fields.insert("version".into(), json!(observed.version));
-        fields.insert(
-            "warnings".into(),
-            serde_json::to_value(&observed.warnings).expect("warnings serialize"),
-        );
+        #[expect(
+            clippy::expect_used,
+            reason = "plain structs and string-keyed maps: serde_json has nothing to refuse in them"
+        )]
+        let warnings = serde_json::to_value(&observed.warnings).expect("warnings serialize");
+        fields.insert("warnings".into(), warnings);
     }
     let config = match (&report.config, obj.spec.manages_config()) {
         (Some(config), true) => {
@@ -639,10 +642,12 @@ fn fields(obj: &LocalInstance, report: &InstanceReport) -> Map<String, Value> {
         "partialKeys".into(),
         list_or_null(json!(config.partial_keys)),
     );
-    fields.insert(
-        "pods".into(),
-        list_or_null(serde_json::to_value(&config.pods).expect("pods serialize")),
-    );
+    #[expect(
+        clippy::expect_used,
+        reason = "plain structs and string-keyed maps: serde_json has nothing to refuse in them"
+    )]
+    let pods = serde_json::to_value(&config.pods).expect("pods serialize");
+    fields.insert("pods".into(), list_or_null(pods));
     fields.insert("lastReloadTime".into(), rfc3339(config.reloaded_at));
     fields
 }

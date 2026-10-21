@@ -63,9 +63,11 @@ fn hash_with_own_salt(token: &str) -> Result<String, ConfigError> {
     use sha2::{Digest, Sha256};
     // 16 bytes of a digest of the token, under a label of ours: a salt
     // nobody else derives the same way.
-    let salt = Sha256::digest(format!("weebo-batlehub operator token:{token}"));
+    let digest = Sha256::digest(format!("weebo-batlehub operator token:{token}"));
+    #[expect(clippy::indexing_slicing, reason = "a SHA-256 digest is 32 bytes")]
+    let salt = &digest[..16];
     Argon2::default()
-        .hash_password_with_salt(token.as_bytes(), &salt[..16])
+        .hash_password_with_salt(token.as_bytes(), salt)
         .map(|hash| hash.to_string())
         .map_err(|e| ConfigError::Invalid(format!("hashing the operator's token: {e}")))
 }
@@ -257,7 +259,7 @@ fn is_argon2(value: &str) -> bool {
 /// A TOML basic string on one line: `merge_layers` refuses a `${VAR}` in a
 /// multi-line one, and a YAML block scalar is one line with `\n` here.
 fn basic(text: &str) -> String {
-    let mut out = String::with_capacity(text.len() + 2);
+    let mut out = String::with_capacity(text.len().saturating_add(2));
     out.push('"');
     for c in text.chars() {
         match c {

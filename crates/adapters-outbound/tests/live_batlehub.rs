@@ -3,6 +3,12 @@
 //! (`BATLEHUB_ADMIN_TOKEN`) and a user one (`BATLEHUB_USER_TOKEN`) —
 //! `task batlehub:container:start` provides all three.
 
+#![expect(
+    clippy::unwrap_used,
+    clippy::panic,
+    reason = "an integration test: a failure panics with its message, fixtures are known"
+)]
+
 use adapters_outbound::HttpAdminGateway;
 use application::ports::{AdminGateway, GatewayError};
 

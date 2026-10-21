@@ -32,3 +32,6 @@ weebo-kit-runtime = { workspace = true }
 application = { workspace = true, features = ["test-support"] }
 testkit = { workspace = true }
 wiremock = { workspace = true }
+
+[lints]
+workspace = true

@@ -11,6 +11,13 @@
 //! without failing; `WEEBO_PERF_BASELINE=<previous json>` adds the change
 //! from a previous run. The report lands in `target/perf/`.
 
+#![expect(
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    clippy::cast_possible_truncation,
+    reason = "an integration test: a failure panics with its message, fixtures are known"
+)]
+
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};

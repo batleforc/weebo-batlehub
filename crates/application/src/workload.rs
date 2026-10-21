@@ -64,7 +64,8 @@ impl DocumentFacts {
         let port = config
             .pointer("/server/port")
             .and_then(Value::as_i64)
-            .unwrap_or(8080) as i32;
+            .and_then(|port| i32::try_from(port).ok())
+            .unwrap_or(8080);
         let storage = config.get("storage");
         let filesystem = storage
             .and_then(|s| s.get("type"))

@@ -2,6 +2,15 @@
 //! and [`ConfigSources`] for use-case and controller tests (exposed to
 //! other crates by the `test-support` feature).
 
+// Test doubles, only compiled for tests: a poisoned lock or a missing
+// fixture is a failed test, with its message.
+#![expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "test doubles: a panic is a failed test, with its message"
+)]
+
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 

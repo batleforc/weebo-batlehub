@@ -196,8 +196,8 @@ impl HttpAdminGateway {
         }
         let mut url = self.base.clone();
         url.path_segments_mut()
-            // Checked in `new`.
-            .expect("an http(s) URL is a base")
+            // Checked in `new`: never refused.
+            .map_err(|()| GatewayError::InvalidPath("the instance's URL can't be a base".into()))?
             .pop_if_empty()
             .extend(segments);
         Ok(url)

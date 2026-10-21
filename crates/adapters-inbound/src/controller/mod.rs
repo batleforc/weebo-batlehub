@@ -439,6 +439,10 @@ where
 {
     let previous = obj.conditions();
     if let Some(instance) = &outcome.instance {
+        #[expect(
+            clippy::expect_used,
+            reason = "plain structs and string-keyed maps: serde_json has nothing to refuse in them"
+        )]
         let instance = serde_json::to_value(instance).expect("a BoundInstance serializes");
         fields.insert("instance".into(), instance);
     }

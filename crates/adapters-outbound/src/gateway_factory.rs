@@ -300,11 +300,14 @@ impl HttpGatewayFactory {
             let workload = match controller_of(&pod.metadata) {
                 Some(reference) => {
                     let key = (reference.kind.clone(), reference.name.clone());
-                    if !workloads.contains_key(&key) {
-                        let read = self.workload(&namespace, reference).await?;
-                        workloads.insert(key.clone(), read);
+                    match workloads.get(&key) {
+                        Some(known) => known.clone(),
+                        None => {
+                            let read = self.workload(&namespace, reference).await?;
+                            workloads.insert(key, read.clone());
+                            read
+                        }
                     }
-                    workloads[&key].clone()
                 }
                 None => None,
             };

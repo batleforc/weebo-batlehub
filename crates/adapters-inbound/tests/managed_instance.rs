@@ -100,7 +100,8 @@ async fn until(api: &Api<LocalInstance>, name: &str, want: &'static str) -> Loca
 
 #[tokio::test]
 async fn a_managed_instance_deploys_its_objects_and_never_takes_one_over() {
-    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+    // Once per test binary: a later test finds it installed.
+    tracing_subscriber::fmt().with_test_writer().try_init().ok();
     let cluster = testkit::envtest::start().await;
     let client = cluster.client();
     Api::<Namespace>::all(client.clone())

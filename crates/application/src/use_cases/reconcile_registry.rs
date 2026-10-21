@@ -172,7 +172,7 @@ mod tests {
         let outcome = rendered_outcome(&rendered, &down, false);
         assert_eq!(outcome.reason(), ReasonCode::InstanceNotReady);
         let Err(failure) = &outcome.ready else {
-            unreachable!()
+            panic!()
         };
         assert!(failure.message.contains("InstanceUnreachable: dns"));
 

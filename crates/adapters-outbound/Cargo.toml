@@ -33,3 +33,6 @@ weebo-kit-runtime = { workspace = true }
 application = { workspace = true, features = ["test-support"] }
 argon2 = { workspace = true, features = ["getrandom"] }
 wiremock = { workspace = true }
+
+[lints]
+workspace = true

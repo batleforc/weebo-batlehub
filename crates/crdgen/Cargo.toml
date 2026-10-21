@@ -12,3 +12,6 @@ clap = { workspace = true }
 k8s-openapi = { workspace = true }
 kube = { workspace = true }
 serde_norway = { workspace = true }
+
+[lints]
+workspace = true
