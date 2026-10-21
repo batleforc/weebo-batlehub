@@ -2,31 +2,55 @@
   {
     "kind": "BatleHubLocalInstance",
     "singular": "batlehublocalinstance",
-    "scope": "Namespaced"
+    "scope": "Namespaced",
+    "apiVersion": "batlehub.weebo.io/v1alpha1",
+    "served": [
+      "v1alpha1"
+    ]
   },
   {
     "kind": "BatleHubRegistry",
     "singular": "batlehubregistry",
-    "scope": "Namespaced"
+    "scope": "Namespaced",
+    "apiVersion": "batlehub.weebo.io/v1alpha1",
+    "served": [
+      "v1alpha1"
+    ]
   },
   {
     "kind": "BatleHubNamespaceClaim",
     "singular": "batlehubnamespaceclaim",
-    "scope": "Namespaced"
+    "scope": "Namespaced",
+    "apiVersion": "batlehub.weebo.io/v1alpha1",
+    "served": [
+      "v1alpha1"
+    ]
   },
   {
     "kind": "BatleHubPackageGrant",
     "singular": "batlehubpackagegrant",
-    "scope": "Namespaced"
+    "scope": "Namespaced",
+    "apiVersion": "batlehub.weebo.io/v1alpha1",
+    "served": [
+      "v1alpha1"
+    ]
   },
   {
     "kind": "BatleHubPackagePolicy",
     "singular": "batlehubpackagepolicy",
-    "scope": "Namespaced"
+    "scope": "Namespaced",
+    "apiVersion": "batlehub.weebo.io/v1alpha1",
+    "served": [
+      "v1alpha1"
+    ]
   },
   {
     "kind": "BatleHubMaintenance",
     "singular": "batlehubmaintenance",
-    "scope": "Namespaced"
+    "scope": "Namespaced",
+    "apiVersion": "batlehub.weebo.io/v1alpha1",
+    "served": [
+      "v1alpha1"
+    ]
   }
 ]

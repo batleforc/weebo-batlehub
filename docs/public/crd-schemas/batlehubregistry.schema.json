@@ -2,6 +2,9 @@
   "apiVersion": "batlehub.weebo.io/v1alpha1",
   "kind": "BatleHubRegistry",
   "scope": "Namespaced",
+  "served": [
+    "v1alpha1"
+  ],
   "description": "One `[[registries]]` entry of an instance's configuration, as its own\nobject, so each team manages its registries. The instance renders\nevery registry it accepts after its `configLayers`, sorted by\nnamespace then name, and pushes the result (`external.manageConfig`);\n`Ready` tells whether that configuration was applied.\n\nA registry of another namespace than the instance's attaches only when\nthe instance accepts that namespace (`registrySelector.namespaces`),\nmay not contain a `${VAR}` placeholder (they resolve from the\ninstance's environment), and may not complete an entry of the\ninstance's own configuration.",
   "properties": {
     "config": {

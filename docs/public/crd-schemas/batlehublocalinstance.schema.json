@@ -2,6 +2,9 @@
   "apiVersion": "batlehub.weebo.io/v1alpha1",
   "kind": "BatleHubLocalInstance",
   "scope": "Namespaced",
+  "served": [
+    "v1alpha1"
+  ],
   "description": "One BatleHub instance, owned by a namespace: its token is that\nnamespace's, and only the objects of that namespace use it (plus the\n`BatleHubRegistry`s of the namespaces it accepts). `Ready` tells\nwhether the instance answers, accepts the operator's token with the\nadmin role and, with `external.manageConfig`, runs the configuration\nrendered from this object.\n\nWhile objects are bound to it, its deletion waits (`InstanceInUse`);\n`batlehub.weebo.io/force-orphan: \"true\"` releases it and leaves them\norphaned.",
   "properties": {
     "config": {

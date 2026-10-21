@@ -2,6 +2,9 @@
   "apiVersion": "batlehub.weebo.io/v1alpha1",
   "kind": "BatleHubPackageGrant",
   "scope": "Namespaced",
+  "served": [
+    "v1alpha1"
+  ],
   "description": "The grants of a package, or of one version of it, in a registry of the\ninstance: who may do what there, beyond what the instance's and the\nregistry's configuration grant (`grants`, `registries[].grants`).\n\nBatleHub keeps these grants in its database: the operator writes each\nsubject's grant through the admin API, reads them again on every pass\n(rewriting what drifted), and revokes what it wrote when this object\nis deleted (unless `deletionPolicy: Orphan`). It only ever touches the\ngrants it wrote: a subject already holding a grant on that node is a\nconflict, never taken over.",
   "properties": {
     "deletionPolicy": {
