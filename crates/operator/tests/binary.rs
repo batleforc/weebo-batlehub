@@ -2,6 +2,11 @@
 //! serves its HTTPS endpoints on every replica, takes the leader lease,
 //! reconciles, and exits as soon as the lease is lost.
 
+#![expect(
+    clippy::unwrap_used,
+    reason = "an integration test: a failure panics with its message, fixtures are known"
+)]
+
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -21,7 +26,9 @@ struct Operator(Child);
 
 impl Drop for Operator {
     fn drop(&mut self) {
-        let _ = self.0.kill();
+        if let Err(e) = self.0.kill() {
+            eprintln!("stopping the operator: {e}");
+        }
     }
 }
 

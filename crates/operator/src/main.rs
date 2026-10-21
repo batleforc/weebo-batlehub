@@ -55,7 +55,12 @@ async fn run(telemetry: &telemetry::Telemetry) -> anyhow::Result<()> {
     // `ring` and `aws-lc-rs` are both linked transitively (`kube`'s rustls
     // vs. reqwest's); rustls refuses to pick a default provider when more
     // than one is present.
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    if rustls::crypto::ring::default_provider()
+        .install_default()
+        .is_err()
+    {
+        tracing::debug!("a rustls crypto provider was installed already: kept");
+    }
 
     telemetry.serve_metrics().await?;
     leader::register_leader_gauge(controller::FIELD_MANAGER, controller::METRIC_PREFIX);
@@ -166,7 +171,10 @@ async fn run(telemetry: &telemetry::Telemetry) -> anyhow::Result<()> {
     let admission = Arc::new(BatleHubAdmission {
         sources,
         config: parser,
-        siblings: Arc::new(KubeSiblings(client.clone())),
+        siblings: Arc::new(KubeSiblings {
+            client: client.clone(),
+            watches: ctx.watches.clone(),
+        }),
         allowed_images,
     });
     let server = webhook_server::spawn(
@@ -208,7 +216,12 @@ async fn run(telemetry: &telemetry::Telemetry) -> anyhow::Result<()> {
     // instead of making the next leader wait out the TTL.
     leadership.release().await;
     // Bounded: the drain started with the signal, long before.
-    let _ = tokio::time::timeout(Duration::from_secs(30), server.stopped()).await;
+    if tokio::time::timeout(Duration::from_secs(30), server.stopped())
+        .await
+        .is_err()
+    {
+        tracing::warn!("the HTTPS server didn't stop within 30 s: exiting without it");
+    }
     Ok(())
 }
 

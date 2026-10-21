@@ -62,7 +62,7 @@ fn userinfo(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(at) = rest.find("://") {
-        let (head, tail) = rest.split_at(at + 3);
+        let (head, tail) = rest.split_at(at.saturating_add(3));
         out.push_str(head);
         let end = tail
             .find(|c: char| c.is_whitespace() || c == '/')

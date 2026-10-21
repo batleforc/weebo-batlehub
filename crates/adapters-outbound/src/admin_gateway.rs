@@ -6,6 +6,8 @@
 //! [`GatewayError`]: a status code means different things on different
 //! endpoints of BatleHub (the spec's §2.10).
 
+use std::collections::HashMap;
+use std::sync::PoisonError;
 use std::time::Duration;
 
 use application::ports::{
@@ -41,8 +43,36 @@ pub fn request_timeout() -> Duration {
     DEFAULT_TIMEOUT.get().copied().unwrap_or(REQUEST_TIMEOUT)
 }
 
+/// How many HTTP clients [`HttpAdminGateway::client_resolving`] keeps: one
+/// per instance URL's TLS settings, plus one per pod called over https.
+const CLIENTS_CAPACITY: usize = 64;
+
 /// How much of an unexpected answer's body a message keeps.
 const BODY_EXCERPT: usize = 200;
+
+/// The largest body read from an instance: a configuration, a page of the
+/// package listing, a grant listing — all well under it. A bigger answer
+/// is refused rather than held in memory.
+const MAX_BODY: usize = 16 * 1024 * 1024;
+
+/// `response`'s body as text, refused past [`MAX_BODY`].
+async fn body_text(mut response: reqwest::Response) -> Result<String, GatewayError> {
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|e| GatewayError::Unreachable(e.to_string()))?
+    {
+        if body.len().saturating_add(chunk.len()) > MAX_BODY {
+            return Err(GatewayError::Remote(format!(
+                "{}: an answer over {MAX_BODY} bytes",
+                response.url().path()
+            )));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(String::from_utf8_lossy(&body).into_owned())
+}
 
 pub struct HttpAdminGateway {
     base: Url,
@@ -83,7 +113,56 @@ impl HttpAdminGateway {
     /// [`Self::client`], `resolve`'s host name reaching its address: a pod
     /// called on its IP while its certificate is verified against the
     /// instance's host name.
+    ///
+    /// Built once per settings and reused (its connection pool and TLS
+    /// sessions with it): keyed by what the client is made of — the CA's
+    /// digest, `insecure_skip_verify`, `resolve` — so a rotated CA gets a
+    /// new one; the token and URL are per request. And by the tokio
+    /// runtime: a client's pooled connections die with the runtime that
+    /// opened them, and another runtime (each `#[tokio::test]` has its own)
+    /// would be handed a dead one. At most [`CLIENTS_CAPACITY`] are kept,
+    /// one goes when full.
     pub fn client_resolving(
+        ca_pem: Option<&[u8]>,
+        insecure_skip_verify: bool,
+        resolve: Option<(&str, std::net::SocketAddr)>,
+    ) -> Result<Client, String> {
+        use sha2::{Digest, Sha256};
+        type Key = (
+            Option<tokio::runtime::Id>,
+            Option<[u8; 32]>,
+            bool,
+            Option<(String, std::net::SocketAddr)>,
+        );
+        static CLIENTS: std::sync::OnceLock<std::sync::Mutex<HashMap<Key, Client>>> =
+            std::sync::OnceLock::new();
+        let key: Key = (
+            tokio::runtime::Handle::try_current().ok().map(|h| h.id()),
+            ca_pem.map(|pem| Sha256::digest(pem).into()),
+            insecure_skip_verify,
+            resolve.map(|(host, addr)| (host.to_string(), addr)),
+        );
+        let clients = CLIENTS.get_or_init(Default::default);
+        let cached = clients
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&key)
+            .cloned();
+        if let Some(client) = cached {
+            return Ok(client);
+        }
+        let client = Self::build_client(ca_pem, insecure_skip_verify, resolve)?;
+        let mut clients = clients.lock().unwrap_or_else(PoisonError::into_inner);
+        if clients.len() >= CLIENTS_CAPACITY
+            && let Some(old) = clients.keys().next().cloned()
+        {
+            clients.remove(&old);
+        }
+        clients.insert(key, client.clone());
+        Ok(client)
+    }
+
+    fn build_client(
         ca_pem: Option<&[u8]>,
         insecure_skip_verify: bool,
         resolve: Option<(&str, std::net::SocketAddr)>,
@@ -122,8 +201,8 @@ impl HttpAdminGateway {
         }
         let mut url = self.base.clone();
         url.path_segments_mut()
-            // Checked in `new`.
-            .expect("an http(s) URL is a base")
+            // Checked in `new`: never refused.
+            .map_err(|()| GatewayError::InvalidPath("the instance's URL can't be a base".into()))?
             .pop_if_empty()
             .extend(segments);
         Ok(url)
@@ -151,14 +230,10 @@ impl HttpAdminGateway {
             .map_err(|e| GatewayError::Unreachable(e.to_string()))?;
         let status = response.status();
         if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
+            let body = body_text(response).await.unwrap_or_default();
             return Err(unexpected_status(status, &body));
         }
-        response
-            .json::<Livez>()
-            .await
-            .map(|l| l.version)
-            .map_err(|e| GatewayError::Remote(format!("/livez: unexpected answer: {e}")))
+        decode::<Livez>("/livez", &body_text(response).await?).map(|l| l.version)
     }
 
     /// `GET /api/v1/me`: the token must be known and carry the admin role.
@@ -213,11 +288,7 @@ impl HttpAdminGateway {
             .await
             .map_err(|e| GatewayError::Unreachable(e.to_string()))?;
         let status = response.status();
-        let body = response
-            .text()
-            .await
-            .map_err(|e| GatewayError::Unreachable(e.to_string()))?;
-        Ok((status, body))
+        Ok((status, body_text(response).await?))
     }
 
     /// `/api/v1/admin/registries/{registry}/<rest…>`.
@@ -543,13 +614,10 @@ impl AdminGateway for HttpAdminGateway {
             .map_err(|e| GatewayError::Unreachable(e.to_string()))?;
         let status = response.status();
         if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
+            let body = body_text(response).await.unwrap_or_default();
             return Err(unexpected_status(status, &body));
         }
-        let entries = response
-            .json::<Vec<Entry>>()
-            .await
-            .map_err(|e| GatewayError::Remote(format!("{ENDPOINT}: unexpected answer: {e}")))?;
+        let entries: Vec<Entry> = decode(ENDPOINT, &body_text(response).await?)?;
         Ok(entries.into_iter().map(|e| e.registry).collect())
     }
 
@@ -633,7 +701,7 @@ impl AdminGateway for HttpAdminGateway {
         if status.is_success() {
             return Ok(());
         }
-        let body = response.text().await.unwrap_or_default();
+        let body = body_text(response).await.unwrap_or_default();
         Err(unexpected_status(status, &body))
     }
 
@@ -838,9 +906,13 @@ impl AdminGateway for HttpAdminGateway {
     async fn packages(
         &self,
         registry: &str,
-    ) -> Result<std::collections::BTreeMap<String, Vec<String>>, GatewayError> {
+    ) -> Result<std::collections::BTreeMap<String, std::collections::BTreeSet<String>>, GatewayError>
+    {
         const ENDPOINT: &str = "/api/v1/admin/packages";
         const PER_PAGE: u64 = 200;
+        /// 200 000 versions: past it the listing is refused, not walked
+        /// for as long as the instance says there is more.
+        const MAX_PAGES: u64 = 1000;
         #[derive(Deserialize)]
         struct Id {
             name: String,
@@ -856,9 +928,10 @@ impl AdminGateway for HttpAdminGateway {
             items: Vec<Item>,
             total: u64,
         }
-        let mut packages: std::collections::BTreeMap<String, Vec<String>> = Default::default();
-        let mut seen = 0;
-        for page in 1.. {
+        let mut packages: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> =
+            Default::default();
+        let mut seen = 0u64;
+        for page in 1..=MAX_PAGES {
             let (status, body) = self
                 .raw(
                     reqwest::Method::GET,
@@ -875,20 +948,22 @@ impl AdminGateway for HttpAdminGateway {
                 return Err(governance_error(ENDPOINT, status, &body));
             }
             let page: Page = decode(ENDPOINT, &body)?;
-            let count = page.items.len() as u64;
+            let count = u64::try_from(page.items.len()).unwrap_or(u64::MAX);
             for item in page.items {
                 let versions = packages.entry(item.package_id.name).or_default();
                 let version = item.package_id.version;
-                if !version.is_empty() && !versions.contains(&version) {
-                    versions.push(version);
+                if !version.is_empty() {
+                    versions.insert(version);
                 }
             }
-            seen += count;
+            seen = seen.saturating_add(count);
             if count == 0 || seen >= page.total {
-                break;
+                return Ok(packages);
             }
         }
-        Ok(packages)
+        Err(GatewayError::Remote(format!(
+            "{ENDPOINT}: more than {MAX_PAGES} pages of {PER_PAGE} packages"
+        )))
     }
 
     /// `GET …/grants?package=` without a version: the package node and

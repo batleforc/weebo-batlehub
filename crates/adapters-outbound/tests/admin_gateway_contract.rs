@@ -3,6 +3,11 @@
 //! `GatewayError`. Response shapes follow BatleHub 1.6.0
 //! (`spec/batlehub-v1.6.0.json`, `/livez` from its source).
 
+#![expect(
+    clippy::unwrap_used,
+    reason = "an integration test: a failure panics with its message, fixtures are known"
+)]
+
 use adapters_outbound::HttpAdminGateway;
 use application::ports::{
     AdminGateway, AdminRequest, Exemption, GatewayError, Method, PackageNode,

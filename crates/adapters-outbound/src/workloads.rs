@@ -102,6 +102,11 @@ impl KubeWorkloads {
                     .get(cluster_role)
                     .await
                     .map_err(|e| kube_error(&format!("ClusterRole {cluster_role}"), e))?;
+                #[expect(
+                    clippy::expect_used,
+                    reason = "a map of strings: serde_json has nothing to refuse in it"
+                )]
+                let recorded = serde_json::to_string(&instances).expect("a map serializes");
                 let binding = ClusterRoleBinding {
                     metadata: ObjectMeta {
                         name: Some(cluster_role.into()),
@@ -111,7 +116,7 @@ impl KubeWorkloads {
                         )])),
                         annotations: Some(BTreeMap::from([(
                             TOKEN_REVIEW_INSTANCES.into(),
-                            serde_json::to_string(&instances).expect("a map serializes"),
+                            recorded,
                         )])),
                         owner_references: Some(vec![OwnerReference {
                             api_version: "rbac.authorization.k8s.io/v1".into(),
@@ -158,13 +163,15 @@ impl KubeWorkloads {
             if instances == recorded && existing.subjects.clone().unwrap_or_default() == subjects {
                 return Ok(());
             }
+            #[expect(
+                clippy::expect_used,
+                reason = "a map of strings: serde_json has nothing to refuse in it"
+            )]
+            let text = serde_json::to_string(&instances).expect("a map serializes");
             let patch = json!({
                 "metadata": {
                     "resourceVersion": existing.resource_version(),
-                    "annotations": {
-                        TOKEN_REVIEW_INSTANCES:
-                            serde_json::to_string(&instances).expect("a map serializes"),
-                    },
+                    "annotations": { TOKEN_REVIEW_INSTANCES: text },
                 },
                 "subjects": subjects,
             });

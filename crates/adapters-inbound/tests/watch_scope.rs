@@ -16,6 +16,11 @@
 //! `watchRole` (`weebo-operator.kindRules`) and this chart's
 //! `operator.namespacedRules`: keep them in step.
 
+#![expect(
+    clippy::unwrap_used,
+    reason = "an integration test: a failure panics with its message, fixtures are known"
+)]
+
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -308,7 +313,8 @@ async fn operator_client(cluster: &EnvTestCluster) -> Client {
 
 #[tokio::test]
 async fn a_namespaced_scope_runs_on_namespaced_rbac_and_sees_only_its_instances() {
-    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+    // Once per test binary: a later test finds it installed.
+    tracing_subscriber::fmt().with_test_writer().try_init().ok();
     let cluster = testkit::envtest::start().await;
     let admin = cluster.client();
     grant_rbac(&admin, "team-a", true).await;
@@ -378,7 +384,8 @@ async fn a_namespaced_scope_runs_on_namespaced_rbac_and_sees_only_its_instances(
 async fn a_managed_instance_runs_on_the_watch_role_alone_and_is_deletable() {
     use k8s_openapi::api::apps::v1::Deployment;
 
-    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+    // Once per test binary: a later test finds it installed.
+    tracing_subscriber::fmt().with_test_writer().try_init().ok();
     let cluster = testkit::envtest::start().await;
     let admin = cluster.client();
     grant_rbac(&admin, "team-a", false).await;
@@ -458,7 +465,8 @@ fn token_review_rules(role: &str) -> Vec<PolicyRule> {
 async fn the_token_review_binding_is_shared_and_edited_with_the_chart_rules_only() {
     use adapters_outbound::KubeWorkloads;
     use application::ports::{Owner, Workloads};
-    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+    // Once per test binary: a later test finds it installed.
+    tracing_subscriber::fmt().with_test_writer().try_init().ok();
     let cluster = testkit::envtest::start().await;
     let admin = cluster.client();
     grant_rbac(&admin, "team-a", true).await;

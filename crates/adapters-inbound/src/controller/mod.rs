@@ -439,6 +439,10 @@ where
 {
     let previous = obj.conditions();
     if let Some(instance) = &outcome.instance {
+        #[expect(
+            clippy::expect_used,
+            reason = "plain structs and string-keyed maps: serde_json has nothing to refuse in them"
+        )]
         let instance = serde_json::to_value(instance).expect("a BoundInstance serializes");
         fields.insert("instance".into(), instance);
     }
@@ -563,7 +567,7 @@ where
     /// Retried in place on a transient apiserver error (the kit's
     /// `status::record`): the remote write already happened, a lost record
     /// would leave the CR at odds with what it wrote.
-    async fn record(&self, written: &T) -> Result<(), String> {
+    async fn record(&self, written: &T) -> Result<(), application::ports::KubernetesError> {
         let recorded = match self.field {
             Some(field) => {
                 weebo_kit_runtime::status::record(
@@ -581,7 +585,7 @@ where
         };
         recorded
             .map(|_| ())
-            .map_err(|e| format!("recording the status: {e}"))
+            .map_err(|e| application::ports::KubernetesError::new("recording the status", e))
     }
 }
 

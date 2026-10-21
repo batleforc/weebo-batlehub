@@ -149,7 +149,8 @@ impl ConfigSources for KubeConfigSources {
         &self,
         namespace: &str,
         source: &ConfigSource,
-    ) -> Result<BTreeMap<String, String>, SourceError> {
+    ) -> Result<BTreeMap<String, Option<String>>, SourceError> {
+        // Not UTF-8: the pods still get the key, its value is unknown here.
         let text = |bytes: Vec<u8>| String::from_utf8(bytes).ok();
         match (&source.config_map_ref, &source.secret_ref) {
             (Some(r), None) => {
@@ -159,11 +160,14 @@ impl ConfigSources for KubeConfigSources {
                     .await
                     .map_err(|e| SourceError::Kubernetes(format!("reading {what}: {e}")))?
                     .ok_or_else(|| SourceError::Missing(format!("{what}: not found")))?;
-                let mut all: BTreeMap<String, String> = map.data.unwrap_or_default();
+                let mut all: BTreeMap<String, Option<String>> = map
+                    .data
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(k, v)| (k, Some(v)))
+                    .collect();
                 for (k, v) in map.binary_data.unwrap_or_default() {
-                    if let Some(v) = text(v.0) {
-                        all.insert(k, v);
-                    }
+                    all.insert(k, text(v.0));
                 }
                 Ok(all)
             }
@@ -174,7 +178,7 @@ impl ConfigSources for KubeConfigSources {
                     .data
                     .unwrap_or_default()
                     .into_iter()
-                    .filter_map(|(k, v)| Some((k, text(v.0)?)))
+                    .map(|(k, v)| (k, text(v.0)))
                     .collect())
             }
             _ => Err(SourceError::Missing(

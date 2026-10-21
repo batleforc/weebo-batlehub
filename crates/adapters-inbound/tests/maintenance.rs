@@ -2,6 +2,12 @@
 //! (envtest), with the real instance resolution and dependents — only the
 //! instance is in memory (`FakeGateway`, which records every admin call).
 
+#![expect(
+    clippy::unwrap_used,
+    clippy::arithmetic_side_effects,
+    reason = "an integration test: a failure panics with its message, fixtures are known"
+)]
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -139,7 +145,8 @@ async fn gone(maintenances: &Api<Maintenance>, name: &str) {
 
 #[tokio::test]
 async fn maintenances_run_at_most_once() {
-    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+    // Once per test binary: a later test finds it installed.
+    tracing_subscriber::fmt().with_test_writer().try_init().ok();
     let cluster = testkit::envtest::start().await;
     let client = cluster.client();
     Api::<Namespace>::all(client.clone())

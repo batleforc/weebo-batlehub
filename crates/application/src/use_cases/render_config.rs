@@ -200,8 +200,13 @@ async fn registry_entry(
                 format!("spec.configFrom[{i}] is not TOML: {e}"),
             )
         })?;
+        // A TOML document is a table: anything else is a parser's bug,
+        // refused rather than trusted.
         let Value::Object(fragment) = fragment else {
-            unreachable!("a TOML document is a table");
+            return Err(Failure::new(
+                ReasonCode::ConfigInvalid,
+                format!("spec.configFrom[{i}] is not a table"),
+            ));
         };
         if let Some(key) = ["type", "name"].iter().find(|k| fragment.contains_key(**k)) {
             return Err(Failure::new(
@@ -371,7 +376,7 @@ pub async fn instance_env(
         if let Ok(values) = sources.read_all(namespace, &source).await {
             env.secret |= secret && !values.is_empty();
             for (name, value) in values {
-                env.values.insert(format!("{prefix}{name}"), Some(value));
+                env.values.insert(format!("{prefix}{name}"), value);
             }
         }
     }
@@ -494,12 +499,12 @@ pub fn render_config(
 
 /// Whether the rendered configuration still lets the operator in with
 /// `token`: `OperatorTokenShadowed` otherwise.
-pub fn check_token(
+pub async fn check_token(
     rendered: &Rendered,
     token: &str,
     parser: &dyn ConfigParser,
 ) -> Result<(), Failure> {
-    match parser.token_check(&rendered.document, token) {
+    match parser.token_check(&rendered.document, token).await {
         TokenCheck::Accepted | TokenCheck::Unverifiable => Ok(()),
         TokenCheck::Refused => Err(Failure::new(
             ReasonCode::OperatorTokenShadowed,
@@ -575,9 +580,31 @@ mod tests {
         let base = base_layers(hub, "ns", sources, parser).await?;
         let rendered = render_config(hub, &base, vec![], false, &InstanceEnv::default(), parser)?;
         if let Some(token) = token {
-            check_token(&rendered, token, parser)?;
+            check_token(&rendered, token, parser).await?;
         }
         Ok(rendered)
+    }
+
+    #[tokio::test]
+    async fn an_env_from_value_that_is_not_text_is_set_but_unknown() {
+        let sources = FakeSources::default();
+        sources.put("ns", "env", r#"{"A": "a", "B": null}"#);
+        let mut hub = instance(json!({}));
+        hub.spec.managed = Some(
+            serde_json::from_value(json!({
+                "envFrom": [{"prefix": "X_", "configMapRef": {"name": "env"}}],
+            }))
+            .unwrap(),
+        );
+        let env = instance_env(&hub, "ns", &sources).await;
+        assert_eq!(
+            env.values,
+            [
+                ("X_A".to_string(), Some("a".to_string())),
+                ("X_B".to_string(), None)
+            ]
+            .into()
+        );
     }
 
     #[tokio::test]

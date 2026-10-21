@@ -27,7 +27,8 @@ use std::sync::Arc;
 use api::LocalInstance;
 use api::managed::Names;
 use application::ports::{
-    BoundInstance, GatewayFactory, GatewayFactoryError, InstanceAccess, PodGateway,
+    BoundInstance, GatewayFactory, GatewayFactoryError, InstanceAccess, KubernetesError,
+    PodGateway, Token,
 };
 use k8s_openapi::api::apps::v1::{Deployment, ReplicaSet, StatefulSet};
 use k8s_openapi::api::core::v1::Pod;
@@ -67,7 +68,9 @@ impl HttpGatewayFactory {
                 TokenSecretError::NotAllowed { .. } => {
                     GatewayFactoryError::TokenNotAllowed(e.to_string())
                 }
-                TokenSecretError::Kubernetes(e) => GatewayFactoryError::Kubernetes(e),
+                TokenSecretError::Kubernetes(e) => {
+                    GatewayFactoryError::Kubernetes(KubernetesError::new(where_(), e))
+                }
             })?
             .ok_or_else(|| GatewayFactoryError::TokenSecret(format!("{} not found", where_())))?;
         let token = String::from_utf8(bytes)
@@ -80,7 +83,9 @@ impl HttpGatewayFactory {
     async fn ca(&self, ca_ref: &SecretKeyRef) -> Result<Vec<u8>, GatewayFactoryError> {
         read_secret_key(&self.client, ca_ref)
             .await
-            .map_err(GatewayFactoryError::Kubernetes)?
+            .map_err(|e| {
+                GatewayFactoryError::Kubernetes(KubernetesError::new("tls.caSecretRef", e))
+            })?
             .ok_or_else(|| {
                 GatewayFactoryError::InvalidSpec(format!(
                     "tls.caSecretRef: secret {}/{} key {:?} not found",
@@ -95,7 +100,9 @@ impl HttpGatewayFactory {
         self.instances
             .get(bound)
             .await
-            .map_err(|e| GatewayFactoryError::Kubernetes(e.to_string()))?
+            .map_err(|e| {
+                GatewayFactoryError::Kubernetes(KubernetesError::new(format!("reading {bound}"), e))
+            })?
             .ok_or_else(|| GatewayFactoryError::InstanceNotFound(bound.clone()))
     }
 
@@ -244,10 +251,13 @@ impl HttpGatewayFactory {
             (None, None) => return Ok(None),
         };
         let namespace = instance.namespace().unwrap_or_default();
+        // Read from the API: the operator watches no Pod, ReplicaSet nor
+        // StatefulSet (a cluster-wide watch of them would cost more than
+        // one labelled LIST per reconcile of an instance with pods).
         let mut pods = Api::<Pod>::namespaced(self.client.clone(), &namespace)
             .list(&ListParams::default().labels_from(&selector))
             .await
-            .map_err(|e| GatewayFactoryError::Kubernetes(format!("listing pods: {e}")))?
+            .map_err(|e| GatewayFactoryError::Kubernetes(KubernetesError::new("listing pods", e)))?
             .items;
         pods.sort_by_key(|p| p.name_any());
         Ok(Some(self.owned_pods(instance, pods).await?))
@@ -261,7 +271,7 @@ impl HttpGatewayFactory {
     ) -> Result<Vec<Pod>, GatewayFactoryError> {
         let namespace = instance.namespace().unwrap_or_default();
         let kube = |what: String| {
-            move |e: kube::Error| GatewayFactoryError::Kubernetes(format!("{what}: {e}"))
+            move |e: kube::Error| GatewayFactoryError::Kubernetes(KubernetesError::new(what, e))
         };
         let rule = match (&instance.spec.external, &instance.spec.managed) {
             (None, Some(_)) => {
@@ -290,11 +300,14 @@ impl HttpGatewayFactory {
             let workload = match controller_of(&pod.metadata) {
                 Some(reference) => {
                     let key = (reference.kind.clone(), reference.name.clone());
-                    if !workloads.contains_key(&key) {
-                        let read = self.workload(&namespace, reference).await?;
-                        workloads.insert(key.clone(), read);
+                    match workloads.get(&key) {
+                        Some(known) => known.clone(),
+                        None => {
+                            let read = self.workload(&namespace, reference).await?;
+                            workloads.insert(key, read.clone());
+                            read
+                        }
                     }
-                    workloads[&key].clone()
                 }
                 None => None,
             };
@@ -315,7 +328,7 @@ impl HttpGatewayFactory {
         reference: &OwnerReference,
     ) -> Result<Option<Workload>, GatewayFactoryError> {
         let what = format!("reading {} {}", reference.kind, reference.name);
-        let kube = |e: kube::Error| GatewayFactoryError::Kubernetes(format!("{what}: {e}"));
+        let kube = |e: kube::Error| GatewayFactoryError::Kubernetes(KubernetesError::new(what, e));
         Ok(match reference.kind.as_str() {
             "ReplicaSet" => Api::<ReplicaSet>::namespaced(self.client.clone(), namespace)
                 .get_opt(&reference.name)
@@ -499,7 +512,7 @@ impl GatewayFactory for HttpGatewayFactory {
             .map_err(GatewayFactoryError::InvalidSpec)?;
         Ok(InstanceAccess {
             gateway: Arc::new(gateway),
-            token,
+            token: Token::new(token),
         })
     }
 }

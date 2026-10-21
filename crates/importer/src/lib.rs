@@ -89,6 +89,13 @@ fn trunc63(s: &str) -> String {
         .to_string()
 }
 
+/// The value at `pointer` (`/a/b`) in `values`, `null` when absent — as
+/// `values["a"]["b"]` reads, without indexing.
+fn at<'a>(values: &'a Value, pointer: &str) -> &'a Value {
+    static NULL: Value = Value::Null;
+    values.pointer(pointer).unwrap_or(&NULL)
+}
+
 /// `value` when it is set and not an empty map, list or string.
 fn set(value: &Value) -> Option<Value> {
     match value {
@@ -119,9 +126,9 @@ pub fn chart_instance(
         .clone()
         .unwrap_or_else(|| options.release.clone());
     let config = values["config"].clone();
-    let credentials_secret = match values["credentials"]["enabled"].as_bool() {
+    let credentials_secret = match at(values, "/credentials/enabled").as_bool() {
         Some(true) => Some(
-            values["credentials"]["existingSecret"]
+            at(values, "/credentials/existingSecret")
                 .as_str()
                 .filter(|s| !s.is_empty())
                 .map(String::from)
@@ -141,7 +148,7 @@ pub fn chart_instance(
                 .into(),
         );
     }
-    if values["trivy"]["enabled"].as_bool() == Some(true) {
+    if at(values, "/trivy/enabled").as_bool() == Some(true) {
         warnings.push(
             "trivy.enabled is out of scope: install Trivy yourself and point \
              config.scanners.trivy.endpoint at it"
@@ -155,7 +162,7 @@ pub fn chart_instance(
                  release's namespace holding an admin token, labelled \
                  batlehub.weebo.io/instance-token=true",
             )?;
-            let port = values["service"]["port"].as_i64().unwrap_or(8080);
+            let port = at(values, "/service/port").as_i64().unwrap_or(8080);
             if credentials_secret.is_some() && options.manage_config {
                 warnings.push(
                     "the release mounts a credentials layer the operator can't see: it may \
@@ -307,7 +314,7 @@ pub fn chart_instance(
                     }
                     out.insert("autoscaling".into(), Value::Object(a));
                 }
-                if set(&worker["yaraRules"]["configMap"]).is_some() {
+                if set(at(worker, "/yaraRules/configMap")).is_some() {
                     warnings.push(
                         "worker.yaraRules.configMap isn't carried over: mount it with \
                          managed.extraVolumes/extraVolumeMounts"
@@ -356,7 +363,7 @@ pub fn chart_instance(
 }
 
 fn credentials_key(values: &Value) -> String {
-    values["credentials"]["key"]
+    at(values, "/credentials/key")
         .as_str()
         .filter(|s| !s.is_empty())
         .unwrap_or("credentials.toml")
@@ -567,6 +574,10 @@ pub fn governance(
             },
             status: None,
         };
+        #[expect(
+            clippy::expect_used,
+            reason = "a status of plain fields: serde_json has nothing to refuse in it"
+        )]
         let seed = serde_json::to_value(PackageGrantStatus {
             applied: grant.applied.clone(),
             ..Default::default()
@@ -589,6 +600,10 @@ pub fn governance(
             },
             status: None,
         };
+        #[expect(
+            clippy::expect_used,
+            reason = "a status of plain fields: serde_json has nothing to refuse in it"
+        )]
         let seed = serde_json::to_value(PackagePolicyStatus {
             applied_policy_hash: policy.applied_policy_hash.clone(),
             observed_policy_hash: policy.observed_policy_hash.clone(),
@@ -602,12 +617,18 @@ pub fn governance(
 }
 
 /// `cr` with its `apiVersion` and `kind`, as printed or applied.
+#[expect(
+    clippy::expect_used,
+    reason = "one of this crate's CRs, built above: it serializes to an object and reads back"
+)]
 fn with_kind<K: Resource<DynamicType = ()> + serde::Serialize + serde::de::DeserializeOwned>(
     cr: K,
 ) -> K {
     let mut value = serde_json::to_value(&cr).expect("a CR serializes");
-    value["apiVersion"] = json!(K::api_version(&()));
-    value["kind"] = json!(K::kind(&()));
+    if let Some(object) = value.as_object_mut() {
+        object.insert("apiVersion".into(), json!(K::api_version(&())));
+        object.insert("kind".into(), json!(K::kind(&())));
+    }
     serde_json::from_value(value).expect("a CR deserializes")
 }
 
@@ -616,11 +637,17 @@ pub fn manifests(items: &[Adoptable]) -> Vec<Value> {
     items
         .iter()
         .map(|item| {
+            #[expect(
+                clippy::expect_used,
+                reason = "this crate's CRs: serde_json has nothing to refuse in them"
+            )]
             let (mut value, seed) = match item {
-                Adoptable::Grant(g, s) => (serde_json::to_value(g).unwrap(), s.clone()),
-                Adoptable::Policy(p, s) => (serde_json::to_value(p).unwrap(), s.clone()),
+                Adoptable::Grant(g, s) => (serde_json::to_value(g).expect("a CR serializes"), s),
+                Adoptable::Policy(p, s) => (serde_json::to_value(p).expect("a CR serializes"), s),
             };
-            value["status"] = seed;
+            if let Some(object) = value.as_object_mut() {
+                object.insert("status".into(), seed.clone());
+            }
             value
         })
         .collect()

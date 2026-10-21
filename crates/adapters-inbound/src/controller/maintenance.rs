@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use api::Maintenance;
 use api::local_instance::ReloadStrategy;
 use api::maintenance::{LastRun, MaintenanceAction};
-use application::ports::{Approver, RunGuard};
+use application::ports::{Approver, KubernetesError, RunGuard};
 use application::use_cases::reconcile_maintenance::{
     Decision, Plan, Restarter, Target, decide, run_maintenance, settle,
 };
@@ -80,11 +80,11 @@ pub async fn record_start(
     resource_version: &str,
     run: &LastRun,
     run_now: Option<&str>,
-) -> Result<bool, String> {
-    let mut status = json!({ "lastRun": run });
-    if let Some(token) = run_now {
-        status["runNow"] = json!(token);
-    }
+) -> Result<bool, KubernetesError> {
+    let status = match run_now {
+        Some(token) => json!({ "lastRun": run, "runNow": token }),
+        None => json!({ "lastRun": run }),
+    };
     let patch = Patch::Merge(json!({
         "metadata": { "resourceVersion": resource_version },
         "status": status,
@@ -95,13 +95,13 @@ pub async fn record_start(
     {
         Ok(_) => Ok(true),
         Err(kube::Error::Api(e)) if e.code == 409 => Ok(false),
-        Err(e) => Err(format!("recording the run: {e}")),
+        Err(e) => Err(KubernetesError::new("recording the run", e)),
     }
 }
 
 #[async_trait::async_trait]
 impl RunGuard for ConditionalStart<'_> {
-    async fn start(&self, run: &LastRun, run_now: Option<&str>) -> Result<bool, String> {
+    async fn start(&self, run: &LastRun, run_now: Option<&str>) -> Result<bool, KubernetesError> {
         let started =
             record_start(&self.api, &self.name, &self.resource_version, run, run_now).await?;
         if started {
@@ -127,7 +127,7 @@ struct AnnotateInstance {
 
 #[async_trait::async_trait]
 impl Approver for AnnotateInstance {
-    async fn approve(&self, hash: &str) -> Result<(), String> {
+    async fn approve(&self, hash: &str) -> Result<(), KubernetesError> {
         let patch = Patch::Merge(json!({
             "metadata": { "annotations": { api::APPROVED_CONFIG_HASH: hash } }
         }));
@@ -135,7 +135,7 @@ impl Approver for AnnotateInstance {
             .patch(&self.name, &PatchParams::default(), &patch)
             .await
             .map(|_| ())
-            .map_err(|e| format!("approving {hash}: {e}"))
+            .map_err(|e| KubernetesError::new(format!("approving {hash}"), e))
     }
 }
 
@@ -184,7 +184,7 @@ fn plan<'a>(m: &'a Maintenance) -> Plan<'a> {
         schedule: m.spec.schedule.as_deref(),
         suspend: m.spec.suspend,
         ttl_seconds_after_finished: m.spec.ttl_seconds_after_finished,
-        timeout: Duration::from_secs(m.spec.timeout_seconds.max(1) as u64),
+        timeout: Duration::from_secs(m.spec.timeout_seconds.max(1).unsigned_abs()),
         generation: m.metadata.generation.unwrap_or_default(),
         created,
         run_now: m.annotations().get(api::RUN_NOW).map(String::as_str),
@@ -247,7 +247,12 @@ async fn reconcile(obj: Arc<Maintenance>, ctx: Arc<Ctx>) -> Result<Action, Error
 
 /// The steady requeue, or sooner when the schedule (or a TTL) is due.
 fn next(m: &Maintenance, outcome: &Outcome, wake: Option<Timestamp>, now: Timestamp) -> Action {
-    let due_in = wake.map(|w| w.as_second().saturating_sub(now.as_second()).max(1) as u64);
+    let due_in = wake.map(|w| {
+        w.as_second()
+            .saturating_sub(now.as_second())
+            .max(1)
+            .unsigned_abs()
+    });
     weebo_kit_runtime::controller::requeue_after(m, outcome.steady(), due_in)
 }
 

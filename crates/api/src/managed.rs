@@ -122,6 +122,10 @@ pub struct ManagedInstance {
 
 impl Default for ManagedInstance {
     /// Every field at its default, as an empty `managed: {}` reads.
+    #[expect(
+        clippy::expect_used,
+        reason = "a constant `{}`: every field has a serde default, every test building a default spec runs it"
+    )]
     fn default() -> Self {
         serde_json::from_value(serde_json::json!({})).expect("every field has a default")
     }

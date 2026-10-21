@@ -2,6 +2,15 @@
 //! and [`ConfigSources`] for use-case and controller tests (exposed to
 //! other crates by the `test-support` feature).
 
+// Test doubles, only compiled for tests: a poisoned lock or a missing
+// fixture is a failed test, with its message.
+#![expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "test doubles: a panic is a failed test, with its message"
+)]
+
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
@@ -562,9 +571,9 @@ impl AdminGateway for FakeGateway {
     async fn packages(
         &self,
         registry: &str,
-    ) -> Result<BTreeMap<String, Vec<String>>, GatewayError> {
+    ) -> Result<BTreeMap<String, std::collections::BTreeSet<String>>, GatewayError> {
         self.check()?;
-        let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let mut out: BTreeMap<String, std::collections::BTreeSet<String>> = BTreeMap::new();
         let grants = self.grants.lock().unwrap();
         let policies = self.policies.lock().unwrap();
         for node in grants.keys().chain(policies.keys()) {
@@ -572,10 +581,8 @@ impl AdminGateway for FakeGateway {
                 continue;
             }
             let versions = out.entry(node.package.clone()).or_default();
-            if let Some(v) = &node.version
-                && !versions.contains(v)
-            {
-                versions.push(v.clone());
+            if let Some(v) = &node.version {
+                versions.insert(v.clone());
             }
         }
         Ok(out)
@@ -660,9 +667,12 @@ impl<T: Clone> FakeLedger<T> {
 
 #[async_trait::async_trait]
 impl<T: Clone + Send + Sync> Ledger<T> for FakeLedger<T> {
-    async fn record(&self, written: &T) -> Result<(), String> {
+    async fn record(&self, written: &T) -> Result<(), crate::ports::KubernetesError> {
         if *self.fail.lock().unwrap() {
-            return Err("status patch refused".into());
+            return Err(crate::ports::KubernetesError::new(
+                "patching the status",
+                "status patch refused",
+            ));
         }
         self.records.lock().unwrap().push(written.clone());
         Ok(())
@@ -715,6 +725,7 @@ fn merge_json(base: &mut Value, over: Value) {
     }
 }
 
+#[async_trait::async_trait]
 impl ConfigParser for FakeConfigParser {
     fn layer(&self, object: &Value) -> Result<String, ConfigError> {
         match object {
@@ -782,11 +793,11 @@ impl ConfigParser for FakeConfigParser {
         })
     }
 
-    fn hash_token(&self, token: &str) -> String {
-        format!("hashed:{token}")
+    async fn hash_token(&self, token: &str) -> Result<String, ConfigError> {
+        Ok(format!("hashed:{token}"))
     }
 
-    fn token_check(&self, document: &str, token: &str) -> TokenCheck {
+    async fn token_check(&self, document: &str, token: &str) -> TokenCheck {
         if document.contains(token) {
             TokenCheck::Accepted
         } else {
@@ -851,7 +862,7 @@ impl ConfigSources for FakeSources {
         &self,
         namespace: &str,
         source: &ConfigSource,
-    ) -> Result<BTreeMap<String, String>, SourceError> {
+    ) -> Result<BTreeMap<String, Option<String>>, SourceError> {
         let text = self.read(namespace, source).await?;
         serde_json::from_str(&text).map_err(|e| SourceError::Missing(e.to_string()))
     }

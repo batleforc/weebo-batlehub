@@ -180,7 +180,7 @@ pub trait AdminGateway: Send + Sync {
     async fn packages(
         &self,
         registry: &str,
-    ) -> Result<std::collections::BTreeMap<String, Vec<String>>, GatewayError>;
+    ) -> Result<std::collections::BTreeMap<String, std::collections::BTreeSet<String>>, GatewayError>;
     /// Every grant of `package` in `registry`: the package node's (`None`)
     /// and each version's.
     async fn package_grants(
@@ -276,14 +276,14 @@ pub trait RunGuard: Send + Sync {
         &self,
         run: &api::maintenance::LastRun,
         run_now: Option<&str>,
-    ) -> Result<bool, String>;
+    ) -> Result<bool, KubernetesError>;
 }
 
 /// Approves the configuration an instance holds (`reload.strategy:
 /// Manual`): its `approved-config-hash` annotation.
 #[async_trait::async_trait]
 pub trait Approver: Send + Sync {
-    async fn approve(&self, hash: &str) -> Result<(), String>;
+    async fn approve(&self, hash: &str) -> Result<(), KubernetesError>;
 }
 
 /// A team namespace of a registry: a package name prefix reserved to a
@@ -355,7 +355,7 @@ pub enum GatewayFactoryError {
     TokenNotAllowed(String),
     /// A Kubernetes API read failed — usually transient.
     #[error("Kubernetes API error: {0}")]
-    Kubernetes(String),
+    Kubernetes(#[source] KubernetesError),
     /// The instance's spec can't produce a client.
     #[error("invalid instance: {0}")]
     InvalidSpec(String),
@@ -373,6 +373,58 @@ impl GatewayFactoryError {
     }
 }
 
+/// A Kubernetes API call behind a port failed: what was being done, and
+/// the client's error as the source (the application names no client
+/// type). Equal when their messages are.
+#[derive(Debug, Clone, thiserror::Error)]
+#[error("{context}: {source}")]
+pub struct KubernetesError {
+    context: String,
+    #[source]
+    source: Arc<dyn std::error::Error + Send + Sync>,
+}
+
+impl KubernetesError {
+    pub fn new(
+        context: impl Into<String>,
+        source: impl Into<Box<dyn std::error::Error + Send + Sync>>,
+    ) -> Self {
+        Self {
+            context: context.into(),
+            source: Arc::from(source.into()),
+        }
+    }
+}
+
+impl PartialEq for KubernetesError {
+    fn eq(&self, other: &Self) -> bool {
+        self.to_string() == other.to_string()
+    }
+}
+
+impl Eq for KubernetesError {}
+
+/// A bearer token: its `Debug` doesn't print it.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Token(String);
+
+impl Token {
+    pub fn new(token: impl Into<String>) -> Self {
+        Self(token.into())
+    }
+
+    /// The token's text, to send or compare.
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for Token {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Token(<redacted>)")
+    }
+}
+
 /// What reaching a resolved instance takes. Implementations re-read the
 /// token `Secret` on every call: rotating it needs no restart.
 pub struct InstanceAccess {
@@ -380,7 +432,7 @@ pub struct InstanceAccess {
     pub gateway: Arc<dyn AdminGateway>,
     /// The token the gateways present, to check the configuration still
     /// accepts it before pushing one.
-    pub token: String,
+    pub token: Token,
 }
 
 #[async_trait::async_trait]
@@ -409,7 +461,7 @@ pub trait GatewayFactory: Send + Sync {
 /// own first writes unknown next time, and take them for a conflict.
 #[async_trait::async_trait]
 pub trait Ledger<T: Send + Sync>: Send + Sync {
-    async fn record(&self, written: &T) -> Result<(), String>;
+    async fn record(&self, written: &T) -> Result<(), KubernetesError>;
 }
 
 pub use weebo_kit_application::workload::{
@@ -530,6 +582,10 @@ pub enum TokenCheck {
 /// merges them, validated with the instance's environment (`env` answers
 /// the `${VAR}` placeholders and the `PROXY_CACHE__*` overrides), never
 /// the operator's.
+///
+/// Async for the two token methods only: Argon2 at BatleHub's parameters
+/// is CPU work an implementation runs off the async workers.
+#[async_trait::async_trait]
 pub trait ConfigParser: Send + Sync {
     /// A configuration written in YAML (as JSON) as a TOML layer.
     fn layer(&self, object: &serde_json::Value) -> Result<String, ConfigError>;
@@ -545,7 +601,7 @@ pub trait ConfigParser: Send + Sync {
     ) -> Result<ConfigVerdict, ConfigError>;
     /// Whether `document` (as [`Self::merge`] returns it) accepts `token`
     /// with the admin role.
-    fn token_check(&self, document: &str, token: &str) -> TokenCheck;
+    async fn token_check(&self, document: &str, token: &str) -> TokenCheck;
     /// The changed keys between two documents (as [`Self::merge`] returns
     /// them) that a reload doesn't fully apply: BatleHub's own
     /// `reload_keys::classify`.
@@ -553,7 +609,7 @@ pub trait ConfigParser: Send + Sync {
     /// `token` as BatleHub's `hash-token` writes it (Argon2id, its
     /// parameters), salted from the token itself: the same token, the same
     /// hash, the same rendered file.
-    fn hash_token(&self, token: &str) -> String;
+    async fn hash_token(&self, token: &str) -> Result<String, ConfigError>;
 }
 
 /// Why a configuration source couldn't be read.
@@ -601,11 +657,12 @@ pub trait ConfigSources: Send + Sync {
     async fn read(&self, namespace: &str, source: &ConfigSource) -> Result<String, SourceError>;
     /// Every key of a `ConfigMap`/`Secret` of `namespace` (the key of
     /// `source` aside), on the same terms as [`Self::read`]: an `envFrom`.
+    /// `None`: the key is set, its value isn't UTF-8 text.
     async fn read_all(
         &self,
         namespace: &str,
         source: &ConfigSource,
-    ) -> Result<std::collections::BTreeMap<String, String>, SourceError>;
+    ) -> Result<std::collections::BTreeMap<String, Option<String>>, SourceError>;
     /// Every `BatleHubRegistry` the operator sees, resolved.
     async fn registries(&self) -> Result<Vec<RegistryView>, String>;
     /// Whether the `Secret` `name` of `namespace` carries
@@ -684,7 +741,7 @@ mod tests {
                 ReasonCode::TokenSecretNotAllowed,
             ),
             (
-                GatewayFactoryError::Kubernetes("x".into()).reason(),
+                GatewayFactoryError::Kubernetes(KubernetesError::new("reading", "x")).reason(),
                 ReasonCode::KubernetesApiError,
             ),
             (

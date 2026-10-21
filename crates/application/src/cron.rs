@@ -60,10 +60,21 @@ fn field(text: &str, min: u32, max: u32, name: &str) -> Result<Vec<bool>, String
             return Err(format!("{name}: {from}-{to} is empty"));
         }
         for n in (from..=to).step_by(step as usize) {
-            set[n as usize] = true;
+            if let Some(slot) = set.get_mut(n as usize) {
+                *slot = true;
+            }
         }
     }
     Ok(set)
+}
+
+/// Whether `set` holds `n` (a date or time field jiff keeps in range).
+fn has(set: &[bool], n: i8) -> bool {
+    usize::try_from(n)
+        .ok()
+        .and_then(|i| set.get(i))
+        .copied()
+        .unwrap_or(false)
 }
 
 impl Schedule {
@@ -76,8 +87,10 @@ impl Schedule {
             ));
         };
         let mut weekdays = field(weekday, 0, 7, "day-of-week")?;
-        if weekdays[7] {
-            weekdays[0] = true;
+        if weekdays.get(7) == Some(&true)
+            && let Some(sunday) = weekdays.first_mut()
+        {
+            *sunday = true;
         }
         weekdays.truncate(7);
         Ok(Self {
@@ -94,8 +107,8 @@ impl Schedule {
     }
 
     fn day_matches(&self, date: Date) -> bool {
-        let day = self.days[date.day() as usize];
-        let weekday = self.weekdays[date.weekday().to_sunday_zero_offset() as usize];
+        let day = has(&self.days, date.day());
+        let weekday = has(&self.weekdays, date.weekday().to_sunday_zero_offset());
         match (self.any_day, self.any_weekday) {
             (false, false) => day || weekday,
             _ => day && weekday,
@@ -116,7 +129,7 @@ impl Schedule {
         let limit = start.date().checked_add(5.years()).ok()?;
         while at.date() <= limit {
             let date = at.date();
-            if !self.months[date.month() as usize] {
+            if !has(&self.months, date.month()) {
                 let first = Date::new(date.year(), date.month(), 1).ok()?;
                 at = first
                     .checked_add(1.month())
@@ -131,13 +144,13 @@ impl Schedule {
                     .to_datetime(Time::midnight());
                 continue;
             }
-            if !self.hours[at.hour() as usize] {
+            if !has(&self.hours, at.hour()) {
                 at = DateTime::from_parts(date, Time::new(at.hour(), 0, 0, 0).ok()?)
                     .checked_add(1.hour())
                     .ok()?;
                 continue;
             }
-            if !self.minutes[at.minute() as usize] {
+            if !has(&self.minutes, at.minute()) {
                 at = at.checked_add(1.minute()).ok()?;
                 continue;
             }

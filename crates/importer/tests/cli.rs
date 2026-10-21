@@ -1,6 +1,11 @@
 //! The real `weebo-batlehub-importer` binary: a release's values on stdin,
 //! the instance on stdout; a refusal exits non-zero.
 
+#![expect(
+    clippy::unwrap_used,
+    reason = "an integration test: a failure panics with its message, fixtures are known"
+)]
+
 use std::io::Write;
 use std::process::{Command, Stdio};
 

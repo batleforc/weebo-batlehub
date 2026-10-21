@@ -123,14 +123,12 @@ pub fn with_operator_token(
         .cloned()
         .unwrap_or_default();
     let entry = json!({"value": hash, "role": "admin", "user_id": user_id});
-    match auth
-        .iter_mut()
-        .find(|p| p.get("type").and_then(Value::as_str) == Some("token"))
-    {
+    match auth.iter_mut().find_map(|p| {
+        p.as_object_mut()
+            .filter(|p| p.get("type").and_then(Value::as_str) == Some("token"))
+    }) {
         Some(provider) => {
             let tokens = provider
-                .as_object_mut()
-                .expect("an [[auth]] entry is a table")
                 .entry("tokens")
                 .or_insert_with(|| Value::Array(Vec::new()));
             match tokens.as_array_mut() {
@@ -185,21 +183,22 @@ pub async fn reconcile_managed(
     workloads: &dyn Workloads,
     reach: &dyn Reach,
 ) -> ManagedReport {
+    // The pass's `status.config`, filled as it goes, then reported.
+    let mut status = kept(&pass.state);
     let mut report = ManagedReport {
         instance: InstanceReport {
             outcome: Outcome::synced(String::new()),
             observed: None,
-            config: Some(kept(&pass.state)),
+            config: None,
             due_in: None,
             reloaded: false,
         },
         workload: WorkloadStatus::default(),
         rolled_out: None,
     };
-    let result = run(&pass, parser, workloads, reach, &mut report).await;
+    let result = run(&pass, parser, workloads, reach, &mut report, &mut status).await;
     let mut advisories = std::mem::take(&mut report.instance.outcome.advisories);
     // What the pods still lack, as the pass left it.
-    let status = report.instance.config.as_ref().expect("set above");
     if pass.spec.hot_reload {
         if pass.reload.restart == RestartPolicy::Never && !status.restart_keys.is_empty() {
             advisories.push(Advisory {
@@ -229,6 +228,7 @@ pub async fn reconcile_managed(
         Err(failure) => Outcome::failed(failure),
     };
     report.instance.outcome.advisories = advisories;
+    report.instance.config = Some(status);
     report
 }
 
@@ -267,11 +267,11 @@ async fn run(
     workloads: &dyn Workloads,
     reach: &dyn Reach,
     report: &mut ManagedReport,
+    status: &mut ConfigStatus,
 ) -> Result<String, Failure> {
     let names = Names::new(&pass.owner.name);
     let spec = pass.spec;
     let state = &pass.state;
-    let status = report.instance.config.as_mut().expect("set above");
     status.restart_keys = pass.restart_keys.clone();
     status.partial_keys = pass.partial_keys.clone();
     let rendered = pass.rendered.clone()?;
@@ -290,12 +290,13 @@ async fn run(
     };
     let mut document = rendered.document.clone();
     if let Some(token) = &token {
-        document = with_operator_token(
-            &document,
-            &parser.hash_token(token),
-            &spec.operator_access.user_id,
-            parser,
-        )?;
+        let hash = parser.hash_token(token).await.map_err(|e| {
+            Failure::new(
+                ReasonCode::ConfigInvalid,
+                format!("hashing the operator's token: {e}"),
+            )
+        })?;
+        document = with_operator_token(&document, &hash, &spec.operator_access.user_id, parser)?;
     }
     let credentials = match &pass.credentials {
         Some(text) => Some(text.clone()?),
@@ -318,7 +319,7 @@ async fn run(
             })?,
             None => document.clone(),
         };
-        if parser.token_check(&effective, &token) == TokenCheck::Refused {
+        if parser.token_check(&effective, &token).await == TokenCheck::Refused {
             return Err(Failure::new(
                 ReasonCode::OperatorTokenShadowed,
                 if generated {
@@ -353,12 +354,13 @@ async fn run(
         .secret_text(&pass.owner, &names.config(), CONFIG_KEY)
         .await
         .map_err(workload_failure)?;
-    let held = pass.reload.strategy == ReloadStrategy::Manual
-        && previous.is_some()
-        && state.approved_hash.as_deref() != Some(hash.as_str())
-        && state.applied_hash.as_deref() != Some(hash.as_str());
-    let (target, target_hash, file) = if held {
-        let file = previous.clone().expect("held only with a previous file");
+    let held = previous.as_ref().filter(|_| {
+        pass.reload.strategy == ReloadStrategy::Manual
+            && state.approved_hash.as_deref() != Some(hash.as_str())
+            && state.applied_hash.as_deref() != Some(hash.as_str())
+    });
+    let (target, target_hash, file) = if let Some(file) = held {
+        let file = file.clone();
         let doc = without_nonce(&file).to_string();
         let doc_hash = sha256(&doc);
         status.pending_hash = Some(hash.clone());
@@ -439,7 +441,6 @@ async fn run(
     };
     let advisory = deploy.apply(workloads, &restart_hash).await?;
     report.instance.outcome.advisories.extend(advisory);
-    let status = report.instance.config.as_mut().expect("set above");
     if spec.hot_reload
         && let Some(current) = current.as_deref()
         && current != restart_hash
@@ -478,7 +479,6 @@ async fn run(
             "no proxy pod is ready",
         ));
     }
-    let status = report.instance.config.as_mut().expect("set above");
     let mut behind = Vec::new();
     for pod in &pods {
         let content = pod.gateway.config_content().await.map_err(fail)?;
@@ -517,11 +517,10 @@ async fn run(
             // compares (`*` when a placeholder names an entry).
             may_owe: restart_hash != target_hash,
         };
-        if approval.run(report).await? == Approved::Roll {
+        if approval.run(report, status).await? == Approved::Roll {
             // Restart-only keys the dry run or a pod reported (the
             // credentials layer's, a pod's environment): the pods restart
             // onto the configuration.
-            let status = report.instance.config.as_ref().expect("set above");
             let keys = status.restart_keys.clone();
             deploy.apply(workloads, &target_hash).await?;
             report.rolled_out = Some(RolledOut {
@@ -551,7 +550,6 @@ async fn run(
             }
         }
     }
-    let status = report.instance.config.as_mut().expect("set above");
     status.applied_hash = Some(target_hash.clone());
     status.rejected_hash = None;
     status.rejected_at = None;
@@ -721,16 +719,20 @@ struct Approval<'a> {
 }
 
 impl Approval<'_> {
-    async fn run(&self, report: &mut ManagedReport) -> Result<Approved, Failure> {
+    async fn run(
+        &self,
+        report: &mut ManagedReport,
+        status: &mut ConfigStatus,
+    ) -> Result<Approved, Failure> {
         let (hash, state) = (self.hash, self.state);
-        let status = report.instance.config.as_mut().expect("set above");
         let retry = "reloaded again 10 minutes after status.lastRejectionTime, or at once on a \
                      change of the spec";
         if status.rejected_hash.as_deref() == Some(hash)
             && let Some(at) = status.rejected_at
         {
-            if state.now - at < REJECTION_BACKOFF_SECS {
-                report.instance.due_in = Some((REJECTION_BACKOFF_SECS - (state.now - at)) as u64);
+            let wait = REJECTION_BACKOFF_SECS.saturating_sub(state.now.saturating_sub(at));
+            if wait > 0 {
+                report.instance.due_in = u64::try_from(wait).ok();
                 return Err(Failure::new(
                     ReasonCode::ConfigRejected,
                     format!(
@@ -746,7 +748,7 @@ impl Approval<'_> {
             // Waited out. The pods tried these bytes already (a reload of
             // them stages nothing — it would read as loaded): new ones
             // first, and a pod staging nothing for them refused them.
-            status.nonce += 1;
+            status.nonce = status.nonce.wrapping_add(1);
             status.rejected_at = None;
             report.instance.due_in = Some(PROPAGATION_RETRY_SECS);
             return Err(Failure::new(
@@ -807,7 +809,7 @@ impl Approval<'_> {
             // for them refused them.
             let restage = |status: &mut ConfigStatus, done: &[String]| {
                 if !done.is_empty() {
-                    status.nonce += 1;
+                    status.nonce = status.nonce.wrapping_add(1);
                     if status.rejected_hash.as_deref() != Some(hash) {
                         status.rejected_hash = Some(hash.to_string());
                         status.rejected_at = None;
@@ -844,7 +846,7 @@ impl Approval<'_> {
                 Ok(Reloaded::AlreadyTried) => {
                     // These bytes were tried before — run, refused, or let
                     // expire: BatleHub doesn't say. Never read as loaded.
-                    status.nonce += 1;
+                    status.nonce = status.nonce.wrapping_add(1);
                     status.rejected_hash = Some(hash.to_string());
                     status.rejected_at = None;
                     report.instance.due_in = Some(PROPAGATION_RETRY_SECS);
@@ -862,7 +864,7 @@ impl Approval<'_> {
                 Err(GatewayError::NoPending(why)) => {
                     // BatleHub let its pending expire: new bytes, staged by
                     // the watcher on the next sync.
-                    status.nonce += 1;
+                    status.nonce = status.nonce.wrapping_add(1);
                     report.instance.due_in = Some(PROPAGATION_RETRY_SECS);
                     return Err(Failure::new(
                         ReasonCode::ConfigPropagating,

@@ -11,7 +11,7 @@
 //! projection's rows are left out: they are package ownership's, not
 //! grants anyone wrote.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use api::package_grant::{AppliedGrant, SubjectGrant};
 use api::package_policy::{AppliedExemption, Gate, GateExemption};
@@ -80,7 +80,11 @@ fn split(node: &PackageNode, read: Value, warnings: &mut Vec<String>) -> Importe
             kept.push(rule);
             continue;
         }
-        let name = rule["gate"].as_str().unwrap_or_default().to_string();
+        let name = rule
+            .get("gate")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
         let until = rule
             .pointer("/settings/exempt_until")
             .and_then(Value::as_str)
@@ -262,15 +266,12 @@ pub async fn import_governance(
         scope.registries.clone()
     };
     for registry in registries {
-        let mut catalogue: BTreeMap<String, Vec<String>> = gateway.packages(&registry).await?;
+        let mut catalogue: BTreeMap<String, BTreeSet<String>> = gateway.packages(&registry).await?;
         for package in &scope.packages {
             catalogue.entry(package.clone()).or_default();
         }
         for (package, version) in gateway.exemption_nodes(&registry).await? {
-            let versions = catalogue.entry(package).or_default();
-            if !versions.contains(&version) {
-                versions.push(version);
-            }
+            catalogue.entry(package).or_default().insert(version);
         }
         for (package, mut versions) in catalogue {
             // Grants: one read for the package and its versions.
@@ -279,10 +280,8 @@ pub async fn import_governance(
                 if grant.from_ownership {
                     continue;
                 }
-                if let Some(v) = &version
-                    && !versions.contains(v)
-                {
-                    versions.push(v.clone());
+                if let Some(v) = &version {
+                    versions.insert(v.clone());
                 }
                 by_node.entry(version).or_default().push(grant);
             }
@@ -294,8 +293,7 @@ pub async fn import_governance(
                 };
                 imported.grants.push(grant_of(node, rows));
             }
-            // Policies: the package node, then each version.
-            versions.sort();
+            // Policies: the package node, then each version (sorted).
             for version in std::iter::once(None).chain(versions.into_iter().map(Some)) {
                 let node = PackageNode {
                     registry: registry.clone(),

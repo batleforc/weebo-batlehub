@@ -212,7 +212,7 @@ impl Pass<'_> {
         self.ledger
             .record(&self.applied)
             .await
-            .map_err(|e| Failure::new(ReasonCode::KubernetesApiError, e))
+            .map_err(|e| Failure::new(ReasonCode::KubernetesApiError, e.to_string()))
     }
 }
 
@@ -223,10 +223,10 @@ pub async fn revoke_package_grant(
     applied: &[AppliedGrant],
     gateway: &dyn AdminGateway,
 ) -> Result<usize, Failure> {
-    let mut revoked = 0;
+    let mut revoked: usize = 0;
     for grant in applied {
         match gateway.delete_grant(node, &grant.subject).await {
-            Ok(true) => revoked += 1,
+            Ok(true) => revoked = revoked.saturating_add(1),
             Ok(false) | Err(GatewayError::HeldByOwnership(_)) => {}
             Err(err) => return Err(err.into()),
         }

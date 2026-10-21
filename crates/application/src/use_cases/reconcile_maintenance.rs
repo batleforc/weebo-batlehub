@@ -165,7 +165,7 @@ pub fn settle(
                 run.reason = Some(ReasonCode::MaintenanceInterrupted.as_str().to_string());
                 run.message = Some(message.clone());
             }
-            status.failure_count += 1;
+            status.failure_count = status.failure_count.saturating_add(1);
             let outcome =
                 Outcome::failed(Failure::new(ReasonCode::MaintenanceInterrupted, message));
             (outcome, status)
@@ -296,7 +296,10 @@ pub async fn run_maintenance(
         Err(e) => {
             return RunReport {
                 started: false,
-                outcome: Outcome::failed(Failure::new(ReasonCode::KubernetesApiError, e)),
+                outcome: Outcome::failed(Failure::new(
+                    ReasonCode::KubernetesApiError,
+                    e.to_string(),
+                )),
                 status,
             };
         }
@@ -310,7 +313,7 @@ pub async fn run_maintenance(
     };
     let finished = Timestamp::now().max(now);
     run.completion_time = Some(finished.to_string());
-    status.run_count += 1;
+    status.run_count = status.run_count.saturating_add(1);
     status.run_now = plan.run_now.map(String::from).or(status.run_now);
     let outcome = match result {
         Ok(answer) => {
@@ -336,7 +339,7 @@ pub async fn run_maintenance(
             run.state = RunState::Failed;
             run.reason = Some(reason.as_str().to_string());
             run.message = Some(failure.message.clone());
-            status.failure_count += 1;
+            status.failure_count = status.failure_count.saturating_add(1);
             Outcome::failed(Failure::new(
                 reason,
                 format!("{} failed: {}", plan.action.as_str(), failure.message),
@@ -440,9 +443,11 @@ pub fn request(
                 .map(|t| Some(t.to_string()))
                 .map_err(|e| Failure::new(ReasonCode::InvalidSpec, format!("params.before: {e}"))),
             (None, Some(days)) => Ok(Some(
-                now.checked_sub(SignedDuration::from_hours(days.clamp(0, 365 * 100) * 24))
-                    .unwrap_or(Timestamp::MIN)
-                    .to_string(),
+                now.checked_sub(SignedDuration::from_hours(
+                    days.clamp(0, 365 * 100).saturating_mul(24),
+                ))
+                .unwrap_or(Timestamp::MIN)
+                .to_string(),
             )),
             (None, None) => Ok(None),
         }
@@ -736,7 +741,7 @@ async fn execute(plan: &Plan<'_>, target: &Target<'_>, now: Timestamp) -> Result
                     .approver
                     .approve(hash)
                     .await
-                    .map_err(|e| Failure::new(ReasonCode::MaintenanceFailed, e))?;
+                    .map_err(|e| Failure::new(ReasonCode::MaintenanceFailed, e.to_string()))?;
                 return Ok(json!({"approved": hash}));
             }
             let request = AdminRequest {
@@ -818,7 +823,11 @@ async fn execute(plan: &Plan<'_>, target: &Target<'_>, now: Timestamp) -> Result
                 .map_err(failed)?;
             Ok(json!({"healthz": healthz, "health": health}))
         }
-        _ => unreachable!("a plain action has its request"),
+        // A plain action returned above, with its request.
+        other => Err(Failure::new(
+            ReasonCode::MaintenanceFailed,
+            format!("{} has no request", other.as_str()),
+        )),
     }
 }
 
@@ -875,7 +884,11 @@ mod tests {
 
     #[async_trait::async_trait]
     impl RunGuard for Guard {
-        async fn start(&self, run: &LastRun, _: Option<&str>) -> Result<bool, String> {
+        async fn start(
+            &self,
+            run: &LastRun,
+            _: Option<&str>,
+        ) -> Result<bool, crate::ports::KubernetesError> {
             if self.refuse {
                 return Ok(false);
             }
@@ -889,7 +902,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl Approver for Approvals {
-        async fn approve(&self, hash: &str) -> Result<(), String> {
+        async fn approve(&self, hash: &str) -> Result<(), crate::ports::KubernetesError> {
             self.0.lock().unwrap().push(hash.into());
             Ok(())
         }

@@ -29,3 +29,6 @@ weebo-kit-application = { workspace = true, features = ["test-support"] }
 [features]
 # Exposes `test_support` (in-memory gateway) to other crates' tests.
 test-support = ["weebo-kit-application/test-support"]
+
+[lints]
+workspace = true

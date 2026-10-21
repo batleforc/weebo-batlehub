@@ -47,6 +47,7 @@ use domain::error::ReasonCode;
 use kube::api::{Api, ListParams};
 use kube::core::DynamicObject;
 use weebo_kit_runtime::admission::{Admission, Denial, NotTheCrd, typed};
+use weebo_kit_runtime::shared::SharedWatches;
 
 pub struct BatleHubAdmission {
     pub sources: Arc<dyn ConfigSources>,
@@ -61,38 +62,79 @@ pub struct BatleHubAdmission {
 /// collide with.
 #[async_trait::async_trait]
 pub trait Siblings: Send + Sync {
-    async fn grants(&self, namespace: &str) -> Result<Vec<PackageGrant>, String>;
-    async fn policies(&self, namespace: &str) -> Result<Vec<PackagePolicy>, String>;
-    async fn instances(&self, namespace: &str) -> Result<Vec<LocalInstance>, String>;
+    async fn grants(&self, namespace: &str) -> Result<Vec<PackageGrant>, SiblingsError>;
+    async fn policies(&self, namespace: &str) -> Result<Vec<PackagePolicy>, SiblingsError>;
+    async fn instances(&self, namespace: &str) -> Result<Vec<LocalInstance>, SiblingsError>;
 }
 
-/// [`Siblings`] read from the API server.
-pub struct KubeSiblings(pub kube::Client);
+/// The namespace's objects of a kind couldn't be listed.
+#[derive(Debug, thiserror::Error)]
+#[error("listing {kind}s: {source}")]
+pub struct SiblingsError {
+    kind: String,
+    #[source]
+    source: Box<kube::Error>,
+}
+
+/// How long a review waits for a watch that hasn't listed yet before
+/// asking the API: well under the webhook's own timeout.
+const SIBLINGS_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// [`Siblings`] from the operator's shared watches once they have listed
+/// — its watch scope, the objects it reconciles and could see collide —
+/// the API server otherwise (a watch not spawned, or not listed yet).
+pub struct KubeSiblings {
+    pub client: kube::Client,
+    pub watches: SharedWatches,
+}
+
+impl KubeSiblings {
+    async fn list<K>(&self, namespace: &str) -> Result<Vec<K>, SiblingsError>
+    where
+        K: kube::Resource<DynamicType = (), Scope = kube::core::NamespaceResourceScope>
+            + Clone
+            + std::fmt::Debug
+            + serde::de::DeserializeOwned
+            + Send
+            + Sync
+            + 'static,
+    {
+        if let Some(watch) = self.watches.get::<K>() {
+            let store = watch.store();
+            if weebo_kit_adapters::wait_synced(&store, SIBLINGS_READY_TIMEOUT).await {
+                let mut objects: Vec<K> = store
+                    .state()
+                    .iter()
+                    .filter(|o| o.meta().namespace.as_deref() == Some(namespace))
+                    .map(|o| K::clone(o))
+                    .collect();
+                objects.sort_by_key(kube::ResourceExt::name_any);
+                return Ok(objects);
+            }
+        }
+        Api::<K>::namespaced(self.client.clone(), namespace)
+            .list(&ListParams::default())
+            .await
+            .map(|l| l.items)
+            .map_err(|source| SiblingsError {
+                kind: K::kind(&()).into_owned(),
+                source: Box::new(source),
+            })
+    }
+}
 
 #[async_trait::async_trait]
 impl Siblings for KubeSiblings {
-    async fn grants(&self, namespace: &str) -> Result<Vec<PackageGrant>, String> {
-        Api::<PackageGrant>::namespaced(self.0.clone(), namespace)
-            .list(&ListParams::default())
-            .await
-            .map(|l| l.items)
-            .map_err(|e| e.to_string())
+    async fn grants(&self, namespace: &str) -> Result<Vec<PackageGrant>, SiblingsError> {
+        self.list(namespace).await
     }
 
-    async fn policies(&self, namespace: &str) -> Result<Vec<PackagePolicy>, String> {
-        Api::<PackagePolicy>::namespaced(self.0.clone(), namespace)
-            .list(&ListParams::default())
-            .await
-            .map(|l| l.items)
-            .map_err(|e| e.to_string())
+    async fn policies(&self, namespace: &str) -> Result<Vec<PackagePolicy>, SiblingsError> {
+        self.list(namespace).await
     }
 
-    async fn instances(&self, namespace: &str) -> Result<Vec<LocalInstance>, String> {
-        Api::<LocalInstance>::namespaced(self.0.clone(), namespace)
-            .list(&ListParams::default())
-            .await
-            .map(|l| l.items)
-            .map_err(|e| e.to_string())
+    async fn instances(&self, namespace: &str) -> Result<Vec<LocalInstance>, SiblingsError> {
+        self.list(namespace).await
     }
 }
 
@@ -115,6 +157,17 @@ fn mentions(value: &serde_json::Value, key: &str) -> bool {
         serde_json::Value::Array(items) => items.iter().any(|v| mentions(v, key)),
         _ => false,
     }
+}
+
+/// The siblings of `namespace` couldn't be listed: the object is
+/// admitted as if none were found (fail-open), its reconcile resolves
+/// them again and reports what it finds.
+fn unlisted(namespace: &str, error: &dyn std::fmt::Display) {
+    tracing::warn!(
+        namespace,
+        error = %error,
+        "admission: listing the namespace's objects failed, checked by the reconcile instead"
+    );
 }
 
 /// The reasons a rendering refusal is certain for.
@@ -273,8 +326,15 @@ impl BatleHubAdmission {
         pod_safety::check(&objects, &self.allowed_images)?;
         for secret in pod_safety::secrets_to_check(&objects) {
             // Absent or unreadable: nothing certain, the status says.
-            if let Ok(Some(false)) = self.sources.secret_consents(namespace, &secret).await {
-                return Err(pod_safety::secret_not_allowed(namespace, &secret));
+            match self.sources.secret_consents(namespace, &secret).await {
+                Ok(Some(false)) => return Err(pod_safety::secret_not_allowed(namespace, &secret)),
+                Ok(_) => {}
+                Err(e) => tracing::warn!(
+                    namespace,
+                    secret,
+                    error = %e,
+                    "admission: a Secret's consent couldn't be read, checked by the reconcile instead"
+                ),
             }
         }
         Ok(())
@@ -284,7 +344,11 @@ impl BatleHubAdmission {
     async fn only_instance(&self, namespace: &str) -> Option<LocalInstance> {
         match self.siblings.instances(namespace).await {
             Ok(mut instances) if instances.len() == 1 => instances.pop(),
-            _ => None,
+            Ok(_) => None,
+            Err(e) => {
+                unlisted(namespace, &e);
+                None
+            }
         }
     }
 
@@ -311,7 +375,14 @@ impl BatleHubAdmission {
                 Ok(text) => text,
                 // Missing or not labelled yet: the status says so.
                 Err(SourceError::Missing(_) | SourceError::NotAllowed(_)) => continue,
-                Err(SourceError::Kubernetes(_)) => continue,
+                Err(e @ SourceError::Kubernetes(_)) => {
+                    tracing::warn!(
+                        namespace,
+                        error = %e,
+                        "admission: a configFrom source couldn't be read, checked by the reconcile instead"
+                    );
+                    continue;
+                }
             };
             let fragment = self.config.fragment(&text).map_err(|e| {
                 Denial::new(
@@ -345,8 +416,12 @@ impl BatleHubAdmission {
 impl BatleHubAdmission {
     async fn grant(&self, namespace: &str, grant: PackageGrant) -> Result<(), Denial<ReasonCode>> {
         // Not listed: nothing certain, the status will say.
-        let Ok(siblings) = self.siblings.grants(namespace).await else {
-            return Ok(());
+        let siblings = match self.siblings.grants(namespace).await {
+            Ok(siblings) => siblings,
+            Err(e) => {
+                unlisted(namespace, &e);
+                return Ok(());
+            }
         };
         let name = kube::ResourceExt::name_any(&grant);
         let spec = &grant.spec;
@@ -409,8 +484,12 @@ impl BatleHubAdmission {
                 format!("gate {gate} is both set in policy.rules and exempted"),
             ));
         }
-        let Ok(siblings) = self.siblings.policies(namespace).await else {
-            return Ok(());
+        let siblings = match self.siblings.policies(namespace).await {
+            Ok(siblings) => siblings,
+            Err(e) => {
+                unlisted(namespace, &e);
+                return Ok(());
+            }
         };
         let name = kube::ResourceExt::name_any(&policy);
         let only = self
@@ -449,15 +528,15 @@ impl BatleHubAdmission {
     ) -> Result<(), Denial<ReasonCode>> {
         if maintenance.spec.action == api::maintenance::MaintenanceAction::Restart {
             let instance = match &maintenance.spec.instance_ref {
-                Some(r) => self
-                    .siblings
-                    .instances(namespace)
-                    .await
-                    .ok()
-                    .and_then(|all| {
-                        all.into_iter()
-                            .find(|i| kube::ResourceExt::name_any(i) == r.name)
-                    }),
+                Some(r) => match self.siblings.instances(namespace).await {
+                    Ok(all) => all
+                        .into_iter()
+                        .find(|i| kube::ResourceExt::name_any(i) == r.name),
+                    Err(e) => {
+                        unlisted(namespace, &e);
+                        None
+                    }
+                },
                 None => self.only_instance(namespace).await,
             };
             if let Some(instance) = instance
@@ -551,15 +630,15 @@ mod tests {
 
     #[async_trait::async_trait]
     impl Siblings for FakeSiblings {
-        async fn grants(&self, _: &str) -> Result<Vec<PackageGrant>, String> {
+        async fn grants(&self, _: &str) -> Result<Vec<PackageGrant>, SiblingsError> {
             Ok(self.grants.lock().unwrap().clone())
         }
 
-        async fn policies(&self, _: &str) -> Result<Vec<PackagePolicy>, String> {
+        async fn policies(&self, _: &str) -> Result<Vec<PackagePolicy>, SiblingsError> {
             Ok(self.policies.lock().unwrap().clone())
         }
 
-        async fn instances(&self, _: &str) -> Result<Vec<LocalInstance>, String> {
+        async fn instances(&self, _: &str) -> Result<Vec<LocalInstance>, SiblingsError> {
             Ok(self.instances.lock().unwrap().clone())
         }
     }

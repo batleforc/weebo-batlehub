@@ -111,7 +111,11 @@ pub async fn run(client: Client, ctx: Arc<Ctx>) {
         }
     };
 
-    // Metadata only: no ConfigMap data in memory.
+    // Metadata only: no ConfigMap data in memory. Every ConfigMap in the
+    // scope: a layer names its ConfigMap, nothing labels it, so the watch
+    // can't be narrowed. Each event scans the two stores (in memory, no
+    // allocation but the matches): an index would have to follow both
+    // stores' changes for less than what the event itself costs.
     let configmaps: Api<PartialObjectMeta<ConfigMap>> = match ctx.scope.watched_namespace() {
         Some(namespace) => Api::namespaced(client.clone(), namespace),
         None => Api::all(client.clone()),
@@ -310,9 +314,12 @@ async fn managed_config(
     rendered: Result<Rendered, Failure>,
     ctx: &Ctx,
 ) -> ManagedConfig {
-    let rendered = rendered.and_then(|rendered| {
-        check_token(&rendered, &access.token, ctx.config.as_ref()).map(|()| rendered)
-    });
+    let rendered = match rendered {
+        Ok(rendered) => check_token(&rendered, access.token.expose(), ctx.config.as_ref())
+            .await
+            .map(|()| rendered),
+        Err(e) => Err(e),
+    };
     let targets = match ctx.gateways.pod_gateways(bound).await {
         Ok(None) => Targets::Url,
         Ok(Some(pods)) => {
@@ -459,7 +466,8 @@ fn series(
     };
     let mut by_code = std::collections::BTreeMap::new();
     for warning in warnings {
-        *by_code.entry(warning.code).or_insert(0) += 1;
+        let count = by_code.entry(warning.code).or_insert(0_u64);
+        *count = count.saturating_add(1);
     }
     super::metrics::InstanceSeries {
         ready: outcome.ready.is_ok(),
@@ -514,7 +522,7 @@ struct FactoryReach<'a> {
 impl Reach for FactoryReach<'_> {
     async fn gateway(&self) -> Result<(Arc<dyn AdminGateway>, String), Failure> {
         let access = self.ctx.gateways.gateway_for(self.bound).await?;
-        Ok((access.gateway, access.token))
+        Ok((access.gateway, access.token.expose().to_string()))
     }
 
     async fn pods(&self) -> Result<Vec<PodGateway>, Failure> {
@@ -583,10 +591,12 @@ fn fields(obj: &LocalInstance, report: &InstanceReport) -> Map<String, Value> {
     fields.insert("endpoint".into(), json!(api::local_instance::endpoint(obj)));
     if let Some(observed) = &report.observed {
         fields.insert("version".into(), json!(observed.version));
-        fields.insert(
-            "warnings".into(),
-            serde_json::to_value(&observed.warnings).expect("warnings serialize"),
-        );
+        #[expect(
+            clippy::expect_used,
+            reason = "plain structs and string-keyed maps: serde_json has nothing to refuse in them"
+        )]
+        let warnings = serde_json::to_value(&observed.warnings).expect("warnings serialize");
+        fields.insert("warnings".into(), warnings);
     }
     let config = match (&report.config, obj.spec.manages_config()) {
         (Some(config), true) => {
@@ -632,10 +642,12 @@ fn fields(obj: &LocalInstance, report: &InstanceReport) -> Map<String, Value> {
         "partialKeys".into(),
         list_or_null(json!(config.partial_keys)),
     );
-    fields.insert(
-        "pods".into(),
-        list_or_null(serde_json::to_value(&config.pods).expect("pods serialize")),
-    );
+    #[expect(
+        clippy::expect_used,
+        reason = "plain structs and string-keyed maps: serde_json has nothing to refuse in them"
+    )]
+    let pods = serde_json::to_value(&config.pods).expect("pods serialize");
+    fields.insert("pods".into(), list_or_null(pods));
     fields.insert("lastReloadTime".into(), rfc3339(config.reloaded_at));
     fields
 }
