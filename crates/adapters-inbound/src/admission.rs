@@ -117,6 +117,17 @@ fn mentions(value: &serde_json::Value, key: &str) -> bool {
     }
 }
 
+/// The siblings of `namespace` couldn't be listed: the object is
+/// admitted as if none were found (fail-open), its reconcile resolves
+/// them again and reports what it finds.
+fn unlisted(namespace: &str, error: &dyn std::fmt::Display) {
+    tracing::warn!(
+        namespace,
+        error = %error,
+        "admission: listing the namespace's objects failed, checked by the reconcile instead"
+    );
+}
+
 /// The reasons a rendering refusal is certain for.
 fn certain(reason: ReasonCode) -> bool {
     matches!(reason, ReasonCode::ConfigInvalid | ReasonCode::InvalidSpec)
@@ -273,8 +284,15 @@ impl BatleHubAdmission {
         pod_safety::check(&objects, &self.allowed_images)?;
         for secret in pod_safety::secrets_to_check(&objects) {
             // Absent or unreadable: nothing certain, the status says.
-            if let Ok(Some(false)) = self.sources.secret_consents(namespace, &secret).await {
-                return Err(pod_safety::secret_not_allowed(namespace, &secret));
+            match self.sources.secret_consents(namespace, &secret).await {
+                Ok(Some(false)) => return Err(pod_safety::secret_not_allowed(namespace, &secret)),
+                Ok(_) => {}
+                Err(e) => tracing::warn!(
+                    namespace,
+                    secret,
+                    error = %e,
+                    "admission: a Secret's consent couldn't be read, checked by the reconcile instead"
+                ),
             }
         }
         Ok(())
@@ -284,7 +302,11 @@ impl BatleHubAdmission {
     async fn only_instance(&self, namespace: &str) -> Option<LocalInstance> {
         match self.siblings.instances(namespace).await {
             Ok(mut instances) if instances.len() == 1 => instances.pop(),
-            _ => None,
+            Ok(_) => None,
+            Err(e) => {
+                unlisted(namespace, &e);
+                None
+            }
         }
     }
 
@@ -311,7 +333,14 @@ impl BatleHubAdmission {
                 Ok(text) => text,
                 // Missing or not labelled yet: the status says so.
                 Err(SourceError::Missing(_) | SourceError::NotAllowed(_)) => continue,
-                Err(SourceError::Kubernetes(_)) => continue,
+                Err(e @ SourceError::Kubernetes(_)) => {
+                    tracing::warn!(
+                        namespace,
+                        error = %e,
+                        "admission: a configFrom source couldn't be read, checked by the reconcile instead"
+                    );
+                    continue;
+                }
             };
             let fragment = self.config.fragment(&text).map_err(|e| {
                 Denial::new(
@@ -345,8 +374,12 @@ impl BatleHubAdmission {
 impl BatleHubAdmission {
     async fn grant(&self, namespace: &str, grant: PackageGrant) -> Result<(), Denial<ReasonCode>> {
         // Not listed: nothing certain, the status will say.
-        let Ok(siblings) = self.siblings.grants(namespace).await else {
-            return Ok(());
+        let siblings = match self.siblings.grants(namespace).await {
+            Ok(siblings) => siblings,
+            Err(e) => {
+                unlisted(namespace, &e);
+                return Ok(());
+            }
         };
         let name = kube::ResourceExt::name_any(&grant);
         let spec = &grant.spec;
@@ -409,8 +442,12 @@ impl BatleHubAdmission {
                 format!("gate {gate} is both set in policy.rules and exempted"),
             ));
         }
-        let Ok(siblings) = self.siblings.policies(namespace).await else {
-            return Ok(());
+        let siblings = match self.siblings.policies(namespace).await {
+            Ok(siblings) => siblings,
+            Err(e) => {
+                unlisted(namespace, &e);
+                return Ok(());
+            }
         };
         let name = kube::ResourceExt::name_any(&policy);
         let only = self
@@ -449,15 +486,15 @@ impl BatleHubAdmission {
     ) -> Result<(), Denial<ReasonCode>> {
         if maintenance.spec.action == api::maintenance::MaintenanceAction::Restart {
             let instance = match &maintenance.spec.instance_ref {
-                Some(r) => self
-                    .siblings
-                    .instances(namespace)
-                    .await
-                    .ok()
-                    .and_then(|all| {
-                        all.into_iter()
-                            .find(|i| kube::ResourceExt::name_any(i) == r.name)
-                    }),
+                Some(r) => match self.siblings.instances(namespace).await {
+                    Ok(all) => all
+                        .into_iter()
+                        .find(|i| kube::ResourceExt::name_any(i) == r.name),
+                    Err(e) => {
+                        unlisted(namespace, &e);
+                        None
+                    }
+                },
                 None => self.only_instance(namespace).await,
             };
             if let Some(instance) = instance

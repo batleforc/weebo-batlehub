@@ -371,7 +371,7 @@ pub async fn instance_env(
         if let Ok(values) = sources.read_all(namespace, &source).await {
             env.secret |= secret && !values.is_empty();
             for (name, value) in values {
-                env.values.insert(format!("{prefix}{name}"), Some(value));
+                env.values.insert(format!("{prefix}{name}"), value);
             }
         }
     }
@@ -578,6 +578,28 @@ mod tests {
             check_token(&rendered, token, parser)?;
         }
         Ok(rendered)
+    }
+
+    #[tokio::test]
+    async fn an_env_from_value_that_is_not_text_is_set_but_unknown() {
+        let sources = FakeSources::default();
+        sources.put("ns", "env", r#"{"A": "a", "B": null}"#);
+        let mut hub = instance(json!({}));
+        hub.spec.managed = Some(
+            serde_json::from_value(json!({
+                "envFrom": [{"prefix": "X_", "configMapRef": {"name": "env"}}],
+            }))
+            .unwrap(),
+        );
+        let env = instance_env(&hub, "ns", &sources).await;
+        assert_eq!(
+            env.values,
+            [
+                ("X_A".to_string(), Some("a".to_string())),
+                ("X_B".to_string(), None)
+            ]
+            .into()
+        );
     }
 
     #[tokio::test]

@@ -851,7 +851,7 @@ impl ConfigSources for FakeSources {
         &self,
         namespace: &str,
         source: &ConfigSource,
-    ) -> Result<BTreeMap<String, String>, SourceError> {
+    ) -> Result<BTreeMap<String, Option<String>>, SourceError> {
         let text = self.read(namespace, source).await?;
         serde_json::from_str(&text).map_err(|e| SourceError::Missing(e.to_string()))
     }

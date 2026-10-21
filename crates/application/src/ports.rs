@@ -601,11 +601,12 @@ pub trait ConfigSources: Send + Sync {
     async fn read(&self, namespace: &str, source: &ConfigSource) -> Result<String, SourceError>;
     /// Every key of a `ConfigMap`/`Secret` of `namespace` (the key of
     /// `source` aside), on the same terms as [`Self::read`]: an `envFrom`.
+    /// `None`: the key is set, its value isn't UTF-8 text.
     async fn read_all(
         &self,
         namespace: &str,
         source: &ConfigSource,
-    ) -> Result<std::collections::BTreeMap<String, String>, SourceError>;
+    ) -> Result<std::collections::BTreeMap<String, Option<String>>, SourceError>;
     /// Every `BatleHubRegistry` the operator sees, resolved.
     async fn registries(&self) -> Result<Vec<RegistryView>, String>;
     /// Whether the `Secret` `name` of `namespace` carries
