@@ -9,4 +9,12 @@ Add resources, point each reference field (an `instanceRef`, a
 of them writes, and export the whole set as YAML. To start from what runs
 in a cluster, import `kubectl get <kinds> -A -o yaml`.
 
+What lives outside the cluster is drawn too, never exported with the
+manifests: each upstream URL of a registry's `config.upstreams` (or of an
+instance's `config.registries[].upstreams`) becomes an `UpstreamRegistry`,
+each ingress host a `DnsName`, one node per URL whichever registries use
+it. Add the database and the object store by hand (`Database`,
+`S3Bucket`): their settings live in Secrets the IDE never reads. The
+drawing downloads as `schematic.yaml`.
+
 <CrdIde />

@@ -1,7 +1,9 @@
 //! Writes `deploy/crd/<kind, lowercase>.yaml`, one file per CRD, from the
 //! `api` types (`CustomResourceExt::crd()`), and `deploy/crd/links.json`,
 //! the reference fields and produced Secrets of each kind
-//! (`weebo_kit_api::links`) for the docs' CRD IDE. Run by `task recu`.
+//! (`weebo_kit_api::links`) for the docs' CRD IDE, with the kit's shared
+//! schematic kinds the IDE draws (`weebo_kit_api::schematic`: the upstream
+//! registries, the DNS names). Run by `task recu`.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -11,7 +13,7 @@ use clap::Parser;
 use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomResourceDefinition;
 use kube::CustomResourceExt;
 use schemars::JsonSchema;
-use weebo_kit_api::links::{self, GroupKind, KindLinks, Roles};
+use weebo_kit_api::links::{self, GroupKind, KindLinks, Roles, Schematic};
 
 #[derive(Parser)]
 struct Args {
@@ -35,7 +37,8 @@ fn main() -> anyhow::Result<()> {
     write::<api::PackageGrant>(out, &roles, &mut kinds)?;
     write::<api::PackagePolicy>(out, &roles, &mut kinds)?;
     write::<api::Maintenance>(out, &roles, &mut kinds)?;
-    let links = serde_json::json!({ "version": 1, "kinds": kinds });
+    let schematic: BTreeMap<String, Schematic> = weebo_kit_api::schematic::shared(&roles)?;
+    let links = serde_json::json!({ "version": 1, "kinds": kinds, "schematic": schematic });
     fs::write(
         out.join("links.json"),
         serde_json::to_string_pretty(&links)? + "\n",
