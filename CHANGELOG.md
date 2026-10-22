@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## [v0.5.0](https://github.com/batleforc/weebo-batlehub/compare/dea9eaca29f96c968428052d55f66970b9fd58ef..v0.5.0) - 2026-10-22
+#### Features
+- kit v0.24.0, upstream registries and hosts drawn in the CRD IDE (#20) - ([dea9eac](https://github.com/batleforc/weebo-batlehub/commit/dea9eaca29f96c968428052d55f66970b9fd58ef)) - Maxime, Claude Opus 5.5 (1M context)
+
+- - -
+
 ## [v0.4.0](https://github.com/batleforc/weebo-batlehub/compare/d57ab83d072793967ad16ec4ae4196bd06df9a56..v0.4.0) - 2026-10-22
 #### Features
 - kit v0.23.0, the CRD IDE in the docs (#19) - ([d57ab83](https://github.com/batleforc/weebo-batlehub/commit/d57ab83d072793967ad16ec4ae4196bd06df9a56)) - Maxime, Claude Opus 5.5 (1M context), Claude Opus 5.5 (1M context), Claude Opus 5.5 (1M context)
