@@ -58,7 +58,38 @@
           ]
         }
       ],
-      "produces": []
+      "produces": [
+        {
+          "kind": {
+            "group": "schematic.weebo.io",
+            "kind": "UpstreamRegistry"
+          },
+          "each": "spec.config.registries[].upstreams[]",
+          "name": [
+            "."
+          ]
+        },
+        {
+          "kind": {
+            "group": "schematic.weebo.io",
+            "kind": "DnsName"
+          },
+          "each": "spec.managed.ingress.extraHosts[]",
+          "name": [
+            "."
+          ]
+        },
+        {
+          "kind": {
+            "group": "schematic.weebo.io",
+            "kind": "DnsName"
+          },
+          "each": "spec.managed.ingress.host",
+          "name": [
+            "."
+          ]
+        }
+      ]
     },
     "BatleHubMaintenance": {
       "references": [],
@@ -97,6 +128,45 @@
           ]
         }
       ],
+      "produces": [
+        {
+          "kind": {
+            "group": "schematic.weebo.io",
+            "kind": "UpstreamRegistry"
+          },
+          "each": "spec.config.upstreams[]",
+          "name": [
+            "."
+          ]
+        }
+      ]
+    },
+    "Database": {
+      "references": [],
+      "produces": []
+    },
+    "DnsName": {
+      "references": [],
+      "produces": []
+    },
+    "HttpEndpoint": {
+      "references": [],
+      "produces": []
+    },
+    "OidcIssuer": {
+      "references": [],
+      "produces": []
+    },
+    "S3Bucket": {
+      "references": [],
+      "produces": []
+    },
+    "UpstreamRegistry": {
+      "references": [],
+      "produces": []
+    },
+    "VaultServer": {
+      "references": [],
       "produces": []
     }
   }

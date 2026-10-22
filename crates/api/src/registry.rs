@@ -59,6 +59,8 @@ pub struct BatleHubRegistrySpec {
     /// for key (`mode`, `upstreams`, `rbac`, `rules`, `cache`, `hosts`…).
     #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
     #[schemars(schema_with = "open_object")]
+    // The docs' CRD IDE draws each upstream URL (the kit's shared kind).
+    #[schemars(extend("x-weebo-produces" = { "kind": { "group": "schematic.weebo.io", "kind": "UpstreamRegistry" }, "each": "upstreams[]", "name": ["."] }))]
     pub config: serde_json::Value,
     /// TOML fragments of the table merged over `config` (`upstream_auth`,
     /// `tls`…), from this namespace. A fragment may not set `type` nor

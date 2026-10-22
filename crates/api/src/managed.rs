@@ -269,9 +269,12 @@ impl Service {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Ingress {
+    // The docs' CRD IDE draws each host as a DNS name (the kit's shared kind).
     #[schemars(length(min = 1))]
+    #[schemars(extend("x-weebo-produces" = { "kind": { "group": "schematic.weebo.io", "kind": "DnsName" }, "name": ["."] }))]
     pub host: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(extend("x-weebo-produces" = { "kind": { "group": "schematic.weebo.io", "kind": "DnsName" }, "name": ["."] }))]
     pub extra_hosts: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub class_name: Option<String>,

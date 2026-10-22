@@ -66,6 +66,8 @@ pub struct BatleHubLocalInstanceSpec {
     /// `external.manageConfig`.
     #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
     #[schemars(schema_with = "open_object")]
+    // The docs' CRD IDE draws the upstreams of the registries written here.
+    #[schemars(extend("x-weebo-produces" = { "kind": { "group": "schematic.weebo.io", "kind": "UpstreamRegistry" }, "each": "registries[].upstreams[]", "name": ["."] }))]
     pub config: serde_json::Value,
     /// TOML documents merged in order over `config`, the way BatleHub
     /// merges its `--config` layers (the later wins; tables merge; arrays
