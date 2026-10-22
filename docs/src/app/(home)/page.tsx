@@ -10,6 +10,7 @@ export default function HomePage() {
       actions={[
         { href: '/docs/guides/install', label: 'Get started', primary: true },
         { href: '/docs', label: 'Read the docs' },
+        { href: '/docs/ide', label: 'Access the CRD IDE' },
       ]}
       install={`helm install weebo-batlehub \\
   oci://ghcr.io/batleforc/charts/weebo-batlehub \\

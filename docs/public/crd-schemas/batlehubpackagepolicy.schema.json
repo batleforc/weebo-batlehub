@@ -2,6 +2,9 @@
   "apiVersion": "batlehub.weebo.io/v1alpha1",
   "kind": "BatleHubPackagePolicy",
   "scope": "Namespaced",
+  "served": [
+    "v1alpha1"
+  ],
   "description": "The policy of a package, or of one version of it, in a registry of the\ninstance, and the exemptions of a version from its gates.\n\nBatleHub keeps these in its database: the operator writes the policy\nthrough the admin API, reads it back on every pass (rewriting it when\nit was changed elsewhere), and clears it when this object is deleted\n(unless `deletionPolicy: Orphan`). A policy already on the node that\nthis object didn't write is a conflict, never taken over.",
   "properties": {
     "deletionPolicy": {

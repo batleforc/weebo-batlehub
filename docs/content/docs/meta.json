@@ -2,6 +2,7 @@
   "title": "weebo-batlehub",
   "pages": [
     "index",
+    "ide",
     "---Getting started---",
     "guides/install",
     "guides/connect-instance",

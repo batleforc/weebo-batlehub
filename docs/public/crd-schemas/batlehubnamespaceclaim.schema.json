@@ -2,6 +2,9 @@
   "apiVersion": "batlehub.weebo.io/v1alpha1",
   "kind": "BatleHubNamespaceClaim",
   "scope": "Namespaced",
+  "served": [
+    "v1alpha1"
+  ],
   "description": "A team namespace of a registry: a package name prefix reserved to a\ngroup of the instance's auth providers. Only its members (and admins)\nmay publish `prefix`, or a package under it (`prefix/…`, with the\nregistry's own separator), and the group is the audience of the `team`\nvisibility there.\n\nBatleHub keeps these claims in its database, not in its configuration:\nthe operator claims the prefix through the admin API, checks it again\non every pass, and releases it when this object is deleted (unless\n`deletionPolicy: Orphan`). A prefix already claimed by anything else\nis never taken over.",
   "properties": {
     "deletionPolicy": {

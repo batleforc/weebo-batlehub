@@ -17,9 +17,11 @@ use serde::{Deserialize, Serialize};
 pub struct ConfigSource {
     /// A key of a `ConfigMap`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-weebo-link" = { "to": [{ "kind": "ConfigMap" }] }))]
     pub config_map_ref: Option<ConfigKeyRef>,
     /// A key of a `Secret` labelled `batlehub.weebo.io/credential: "true"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-weebo-link" = { "to": [{ "kind": "Secret" }] }))]
     pub secret_ref: Option<ConfigKeyRef>,
 }
 

@@ -2,6 +2,9 @@
   "apiVersion": "batlehub.weebo.io/v1alpha1",
   "kind": "BatleHubMaintenance",
   "scope": "Namespaced",
+  "served": [
+    "v1alpha1"
+  ],
   "description": "An administrative action against the instance of this namespace, run\nonce or on a schedule: warming or clearing a cache, a retention pass, a\nconfiguration reload, blocking an IP…\n\nThe operator is the scheduler (no Job, no pod): it calls BatleHub's\nadmin API at the time due, at most once per run — a run interrupted by\na restart of the operator is closed as failed, never replayed. Actions\nthat respect `params.dryRun` only report unless it is set to `false`.",
   "properties": {
     "action": {
